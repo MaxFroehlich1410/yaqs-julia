@@ -2,23 +2,14 @@ using Test
 using LinearAlgebra
 using Random
 
-if !isdefined(Main, :GateLibrary)
-    include("../src/GateLibrary.jl")
+if !isdefined(Main, :Yaqs)
+    include("../src/Yaqs.jl")
+    using .Yaqs
 end
-if !isdefined(Main, :Decompositions)
-    include("../src/Decompositions.jl")
-end
-if !isdefined(Main, :MPSModule)
-    include("../src/MPS.jl")
-end
-if !isdefined(Main, :MPOModule)
-    include("../src/MPO.jl")
-end
-
-using .GateLibrary
-using .Decompositions
-using .MPSModule
-using .MPOModule
+using .Yaqs.GateLibrary
+using .Yaqs.Decompositions
+using .Yaqs.MPSModule
+using .Yaqs.MPOModule
 
 # Helper (same as in test_MPS.jl)
 function crandn(shape)

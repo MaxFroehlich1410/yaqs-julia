@@ -1,31 +1,24 @@
 using Test
 using LinearAlgebra
 
-if !isdefined(Main, :GateLibrary)
-    include("../src/GateLibrary.jl")
-end
-if !isdefined(Main, :Decompositions)
-    include("../src/Decompositions.jl")
-end
-if !isdefined(Main, :MPSModule)
-    include("../src/MPS.jl")
-end
-if !isdefined(Main, :SimulationConfigs)
-    include("../src/SimulationConfigs.jl")
+if !isdefined(Main, :Yaqs)
+    include("../src/Yaqs.jl")
+    using .Yaqs
 end
 
-using .GateLibrary
-using .Decompositions
-using .MPSModule
-using .SimulationConfigs
+using .Yaqs.GateLibrary
+using .Yaqs.Decompositions
+using .Yaqs.MPSModule
+using .Yaqs.SimulationConfigs
 
 @testset "SimulationConfigs Tests" begin
 
     @testset "Observable Creation" begin
         gate = XGate()
         site = 1
-        obs = Observable(gate, site)
+        obs = Observable("X", gate, site)
 
+        @test obs.name == "X"
         @test obs.op == gate
         @test obs.sites == [1]
         @test isempty(obs.results)
@@ -33,7 +26,7 @@ using .SimulationConfigs
     end
 
     @testset "TimeEvolutionConfig Basic" begin
-        obs_list = [Observable(XGate(), 1)]
+        obs_list = [Observable("X", XGate(), 1)]
         elapsed_time = 1.0
         dt = 0.2
         config = TimeEvolutionConfig(obs_list, elapsed_time; dt=dt, sample_timesteps=true, num_traj=50)
@@ -66,49 +59,22 @@ using .SimulationConfigs
     end
 
     @testset "Initialize with Sample Timesteps" begin
-        obs = Observable(XGate(), 1)
+        obs = Observable("X", XGate(), 1)
         config = TimeEvolutionConfig([obs], 1.0; dt=0.5, sample_timesteps=true, num_traj=10)
         # times: 0.0, 0.5, 1.0 (length 3)
 
-        initialize!(obs, config)
+        SimulationConfigs.initialize!(obs, config)
         
         @test length(obs.results) == 3
         @test size(obs.trajectories) == (10, 3)
     end
 
     @testset "Initialize without Sample Timesteps" begin
-        obs = Observable(XGate(), 1)
+        obs = Observable("X", XGate(), 1)
         config = TimeEvolutionConfig([obs], 1.0; dt=0.25, sample_timesteps=false, num_traj=5)
         # times length 5
 
-        initialize!(obs, config)
-        
-        # In Julia impl, if not sampling timesteps, we store result for final time only?
-        # Python code says: 
-        # trajectories = (num_traj, 1)
-        # results = (len(times)) ? Wait, let's check Python logic.
-        # Python: "self.results = np.empty(len(sim_params.times))" (Line 106)
-        # Python: "self.trajectories = np.empty((sim_params.num_traj, 1))" (Line 104)
-        
-        # My Julia implementation:
-        # if config.sample_timesteps
-        #   trajectories = (num_traj, length(times))
-        #   results = length(times)
-        # else
-        #   trajectories = (num_traj, 1)
-        #   results = 1 # <--- I wrote 1. Python wrote len(times).
-        
-        # Why would results be len(times) if we don't sample timesteps?
-        # Maybe it stores 0s? Or maybe it expects full evolution but only stores trajectories at end?
-        # If `sample_timesteps` is False, we usually only care about the final state or specific points.
-        # If I look at `aggregate_trajectories`:
-        # Python: `observable.results = np.mean(observable.trajectories, axis=0)`
-        # If trajectories is (num_traj, 1), mean is (1,).
-        # But `results` was initialized to size `len(times)`.
-        # So assignment `observable.results = ...` (size 1) into `results` (size N) works in Python?
-        # No, `observable.results = ...` REPLACES the attribute.
-        # So the initialization size doesn't strictly matter if it's overwritten.
-        # My Julia implementation overwrites `results` too.
+        SimulationConfigs.initialize!(obs, config)
         
         @test length(obs.results) == 1
         @test size(obs.trajectories) == (5, 1)
@@ -120,21 +86,21 @@ using .SimulationConfigs
         mps = MPS(L; state="x+") # |++++>
         
         # Observable X on site 1
-        obs = Observable(XGate(), 1)
+        obs = Observable("X", XGate(), 1)
         
         val = expect(mps, obs)
         @test isapprox(val, 1.0; atol=1e-10)
         
         # Observable Z on site 1 -> should be 0 for |+>
-        obs_z = Observable(ZGate(), 1)
+        obs_z = Observable("Z", ZGate(), 1)
         val_z = expect(mps, obs_z)
         @test isapprox(val_z, 0.0; atol=1e-10)
     end
 
     @testset "Aggregation Logic" begin
-        obs = Observable(XGate(), 1)
+        obs = Observable("X", XGate(), 1)
         config = TimeEvolutionConfig([obs], 1.0; num_traj=2, sample_timesteps=false)
-        initialize!(obs, config)
+        SimulationConfigs.initialize!(obs, config)
         
         # Mock trajectories
         # Shape (2, 1)
@@ -164,4 +130,3 @@ using .SimulationConfigs
     end
 
 end
-

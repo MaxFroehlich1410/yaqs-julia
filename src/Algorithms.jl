@@ -2,6 +2,7 @@ module Algorithms
 
 using LinearAlgebra
 using TensorOperations
+using KrylovKit
 using ..MPSModule
 using ..MPOModule
 using ..SimulationConfigs
@@ -12,86 +13,10 @@ export single_site_tdvp!, two_site_tdvp!
 # --- Krylov Subspace Methods ---
 
 """
-    lanczos(A_func, v, k, tol)
-
-Lanczos iteration to generate Krylov basis.
-`A_func(x)` applies the operator.
-`v` is initial vector.
-`k` is max iterations.
-"""
-function lanczos(A_func::Function, v::AbstractArray{T}, k::Int; tol::Float64=1e-10) where T
-    n = length(v)
-    # Match Python's adaptive tolerance: 100 * N * eps
-    # But user requested loose 1e-10 or adaptive. 
-    # Let's use 1e-10 as requested default, but implement logic inside loop if desired.
-    # Actually, let's use the adaptive logic inside:
-    adaptive_tol = 100 * n * eps(real(T))
-    final_tol = max(tol, adaptive_tol)
-    
-    k = min(k, n)
-    
-    # Storage
-    # V stores basis vectors as columns.
-    # We assume v is flat or we flatten it.
-    # Let's work with flat vectors for simplicity in dot products.
-    
-    v_shape = size(v)
-    v_curr = reshape(v, :) # Copy? No, reshape is view if possible, but we normalize.
-    norm_v = norm(v_curr)
-    
-    if norm_v < final_tol
-        return zeros(T, 0), zeros(T, 0), zeros(T, 0, 0) # Handle zero vector
-    end
-    
-    v_curr = v_curr ./ norm_v
-    
-    # Basis V: n x (k+1) (or k)
-    V = Matrix{T}(undef, n, k)
-    alpha = Vector{Float64}(undef, k)
-    beta = Vector{Float64}(undef, k-1)
-    
-    V[:, 1] = v_curr
-    
-    m = k
-    for j in 1:k
-        w = A_func(reshape(V[:, j], v_shape)) # Apply operator
-        w = reshape(w, :)
-        
-        # Orthogonalize against prev (if any) - mainly via beta
-        if j > 1
-            w .-= beta[j-1] .* @view V[:, j-1]
-        end
-        
-        # Alpha
-        alpha[j] = real(dot(@view(V[:, j]), w))
-        w .-= alpha[j] .* @view V[:, j]
-        
-        # Full re-orthogonalization (optional but stable)
-        # for i in 1:j
-        #    c = dot(V[:, i], w)
-        #    w .-= c .* V[:, i]
-        # end
-        
-        if j < k
-            b = norm(w)
-            if b < final_tol
-                m = j
-                break
-            end
-            beta[j] = b
-            V[:, j+1] = w ./ b
-        else
-            # Last step, no beta needed
-        end
-    end
-    
-    return alpha[1:m], beta[1:m-1], V[:, 1:m]
-end
-
-"""
     expm_krylov(A_func, v, dt, k)
 
 Compute exp(-im * dt * A) * v using Krylov subspace.
+Wrapper around KrylovKit.exponentiate.
 """
 function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) where T
     norm_v = norm(v)
@@ -99,45 +24,20 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
         return v
     end
     
-    alpha, beta, V = lanczos(A_func, v, k)
-    m = length(alpha)
+    # We assume A_func(x) applies A * x.
+    # We want to compute exp(-im * dt * A) * v.
+    # KrylovKit.exponentiate computes exp(t * A) * v.
+    # So we pass t = -im * dt.
     
-    if m == 0
-        return v
-    end
+    t_val = -1im * dt
     
-    # Construct T matrix (Tridiagonal)
-    T_mat = SymTridiagonal(alpha, beta)
+    # Using KrylovKit
+    # exponentiate(A, t, x0) -> exp(t*A) * x0
+    val, info = exponentiate(A_func, t_val, v; tol=1e-10, krylovdim=k, maxiter=1, ishermitian=false)
     
-    # Diagonalize T
-    F = eigen(T_mat)
-    vals = F.values
-    vecs = F.vectors
-    
-    # exp(-im * dt * T) = U * exp(-im * dt * vals) * U'
-    # We want exp(...) * e1 (first basis vector in subspace)
-    # e1 is (1, 0, ...)^T
-    # Result in subspace: U * (exp(...) .* (U' * e1))
-    # U' * e1 is just the first row of U (since U is real symmetric eigenvectors? Hermitian?)
-    # SymTridiagonal in Julia is real symmetric if alpha/beta are real.
-    # `vecs` are real.
-    
-    # Calculate coefficients c = exp(-im*dt*vals) * (first component of eigenvectors)
-    # Note: vecs[i, j] is i-th component of j-th eigenvector.
-    # We want <u_j | e1> = u_j[1] = vecs[1, j]
-    
-    c = exp.((-1im * dt) .* vals) .* vecs[1, :]
-    
-    # Project back: w = V * (U * c)
-    # z = U * c
-    z = vecs * c
-    
-    # w = V * z
-    # V is (n x m), z is (m)
-    w = V * z
-    
-    return reshape(w .* norm_v, size(v))
+    return val
 end
+
 
 
 # --- Environment Helpers ---

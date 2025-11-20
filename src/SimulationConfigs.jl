@@ -21,14 +21,15 @@ Represents an observable to be measured on the quantum state.
 - `trajectories::Matrix{ComplexF64}`: Per-trajectory data.
 """
 mutable struct Observable{O<:AbstractOperator}
+    name::String
     op::O
     sites::Vector{Int}
     results::Vector{Float64}
     trajectories::Matrix{ComplexF64}
     
-    function Observable(op::O, sites::Union{Int, Vector{Int}}) where O <: AbstractOperator
+    function Observable(name::String, op::O, sites::Union{Int, Vector{Int}}) where O <: AbstractOperator
         s = isa(sites, Int) ? [sites] : sites
-        new{O}(op, s, Float64[], Matrix{ComplexF64}(undef, 0, 0))
+        new{O}(name, op, s, Float64[], Matrix{ComplexF64}(undef, 0, 0))
     end
 end
 

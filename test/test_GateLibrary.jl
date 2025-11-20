@@ -2,8 +2,11 @@ using Test
 using LinearAlgebra
 using StaticArrays
 
-include("../src/GateLibrary.jl")
-using .GateLibrary
+if !isdefined(Main, :Yaqs)
+    include("../src/Yaqs.jl")
+    using .Yaqs
+end
+using .Yaqs.GateLibrary
 
 @testset "GateLibrary" begin
     

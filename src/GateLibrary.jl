@@ -4,7 +4,7 @@ using StaticArrays
 using LinearAlgebra
 
 export AbstractOperator
-export XGate, YGate, ZGate, HGate, IdGate, SGate, TGate, SXGate
+export XGate, YGate, ZGate, HGate, IdGate, SGate, TGate, SXGate, RaisingGate, LoweringGate
 export RxGate, RyGate, RzGate, PhaseGate, UGate
 export CXGate, CZGate, SwapGate
 export matrix
@@ -26,6 +26,8 @@ struct IdGate <: AbstractOperator end
 struct SGate <: AbstractOperator end
 struct TGate <: AbstractOperator end
 struct SXGate <: AbstractOperator end
+struct RaisingGate <: AbstractOperator end
+struct LoweringGate <: AbstractOperator end
 
 # --- Parameterized Gates ---
 
@@ -102,6 +104,20 @@ end
 
 function matrix(::TGate)
     return SMatrix{2,2,C128}(1, 0, 0, exp(1im * π/4))
+end
+
+function matrix(::RaisingGate)
+    # |0> -> |1>
+    # [0 0; 1 0]
+    # Col-Major: (1,1)=0, (2,1)=1, (1,2)=0, (2,2)=0
+    return SMatrix{2,2,C128}(0, 1, 0, 0)
+end
+
+function matrix(::LoweringGate)
+    # |1> -> |0>
+    # [0 1; 0 0]
+    # Col-Major: (1,1)=0, (2,1)=0, (1,2)=1, (2,2)=0
+    return SMatrix{2,2,C128}(0, 0, 1, 0)
 end
 
 # Rotations

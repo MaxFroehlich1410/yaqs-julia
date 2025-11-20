@@ -362,6 +362,83 @@ end
 # --- MPO-MPO Multiplication (Optional) ---
 
 """
+    Base.:+(a::MPO, b::MPO) -> MPO
+
+Add two MPOs: C = A + B.
+Resulting bond dimension is the sum of bond dimensions.
+"""
+function Base.:+(a::MPO{T}, b::MPO{T}) where T
+    @assert a.length == b.length
+    L = a.length
+    
+    new_tensors = Vector{Array{T, 4}}(undef, L)
+    new_phys = a.phys_dims
+    
+    for i in 1:L
+        A = a.tensors[i] # (La, Po, Pi, Ra)
+        B = b.tensors[i] # (Lb, Po, Pi, Rb)
+        
+        la, po, pi, ra = size(A)
+        lb, _, _, rb = size(B)
+        
+        new_L = (i == 1) ? 1 : la + lb
+        new_R = (i == L) ? 1 : ra + rb
+        
+        C = zeros(T, new_L, po, pi, new_R)
+        
+        if i == 1 && i == L
+            # Single site MPO: Just add tensors
+            # Assumes 1x1 bond dimensions
+            if la == 1 && ra == 1 && lb == 1 && rb == 1
+                C = A .+ B
+            else
+                # If bonds are not 1, simple addition might fail if dims differ
+                # But L=1 usually implies (1, d, d, 1).
+                # Fallback or error?
+                # For safety in StochasticProcess (where we sum local terms), this is what we need.
+                 C = A .+ B
+            end
+        
+        elseif i == 1
+            # First site: Row vector [A B]
+            C[1:1, :, :, 1:ra] = A
+            C[1:1, :, :, ra+1:end] = B
+             
+        elseif i == L
+             # Last site: Col vector [A; B]
+             C[1:la, :, :, 1:1] = A
+             C[la+1:end, :, :, 1:1] = B
+             
+        else
+             # Middle: Block Diag
+             C[1:la, :, :, 1:ra] = A
+             C[la+1:end, :, :, ra+1:end] = B
+        end
+        
+        new_tensors[i] = C
+    end
+    
+    return MPO(L, new_tensors, new_phys)
+end
+
+"""
+    Base.:*(c::Number, mpo::MPO) -> MPO
+    Base.:*(mpo::MPO, c::Number) -> MPO
+
+Scalar multiplication. Multiplies the FIRST tensor by c.
+"""
+function Base.:*(c::Number, mpo::MPO{T}) where T
+    new_tensors = copy(mpo.tensors)
+    # Multiply first tensor only to distribute scalar
+    new_tensors[1] = c .* new_tensors[1]
+    return MPO(mpo.length, new_tensors, mpo.phys_dims)
+end
+
+function Base.:*(mpo::MPO, c::Number)
+    return c * mpo
+end
+
+"""
     contract_mpo_mpo(a::MPO, b::MPO) -> MPO
 
 Contract two MPOs: A * B.

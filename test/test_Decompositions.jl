@@ -2,9 +2,11 @@ using Test
 using LinearAlgebra
 using TensorOperations
 
-include("../src/MPS.jl") # Need MPSModule for types if used, though Decompositions uses AbstractArray
-include("../src/Decompositions.jl")
-using .Decompositions
+if !isdefined(Main, :Yaqs)
+    include("../src/Yaqs.jl")
+    using .Yaqs
+end
+using .Yaqs.Decompositions
 
 @testset "Decompositions" begin
     
