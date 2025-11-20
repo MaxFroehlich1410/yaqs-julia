@@ -5,7 +5,7 @@ using LinearAlgebra
 using Base.Threads
 using ..MPSModule
 
-export MPO, contract_mpo_mps, expect_mpo
+export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo
 
 abstract type AbstractTensorNetwork end
 

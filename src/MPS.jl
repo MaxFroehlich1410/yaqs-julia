@@ -6,7 +6,7 @@ using StaticArrays
 using Printf
 using Base.Threads
 
-export MPS, scalar_product, local_expect, measure_shots, normalize!, check_canonical_form, shift_orthogonality_center_right!, truncate!
+export MPS, scalar_product, local_expect, evaluate_all_local_expectations, measure_shots, normalize!, check_canonical_form, shift_orthogonality_center_right!, truncate!
 
 abstract type AbstractTensorNetwork end
 
