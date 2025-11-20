@@ -4,8 +4,9 @@ using TensorOperations
 using LinearAlgebra
 using Base.Threads
 using ..MPSModule
+using ..GateLibrary
 
-export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo
+export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_heisenberg
 
 abstract type AbstractTensorNetwork end
 
@@ -82,6 +83,167 @@ function MPO(length::Int;
             d = phys_dims[i]
             tensors[i] = zeros(T, 1, d, d, 1)
         end
+    end
+
+    return MPO(length, tensors, phys_dims)
+end
+
+"""
+    init_ising(length::Int, J::Union{Real, Vector{<:Real}}, g::Union{Real, Vector{<:Real}}) -> MPO
+
+Initialize the Ising model MPO.
+H = sum(-J Z_i Z_{i+1} - g X_i)
+Supports site-dependent J and g.
+If J is a vector, J[i] is the coupling between i and i+1.
+"""
+function init_ising(length::Int, J::Union{Real, Vector{<:Real}}, g::Union{Real, Vector{<:Real}})
+    # Operators
+    X_op = Matrix(matrix(XGate()))
+    Z_op = Matrix(matrix(ZGate()))
+    I_op = Matrix(I, 2, 2)
+    Zero_op = zeros(ComplexF64, 2, 2)
+
+    tensors = Vector{Array{ComplexF64, 4}}(undef, length)
+    phys_dims = fill(2, length)
+
+    get_J(i) = isa(J, Vector) ? (i <= Base.length(J) ? J[i] : 0.0) : J
+    get_g(i) = isa(g, Vector) ? g[i] : g
+    
+    # Helper to convert Block Matrix of Matrices to (Left, P_out, P_in, Right)
+    function block_to_tensor(W_block)
+        rows, cols = size(W_block) # Left, Right bond dims
+        T = zeros(ComplexF64, rows, 2, 2, cols)
+        for r in 1:rows
+            for c in 1:cols
+                op = W_block[r, c]
+                T[r, :, :, c] = op
+            end
+        end
+        return T
+    end
+
+    if length == 1
+         val_g = get_g(1)
+         tensors[1] = reshape(-val_g * X_op, 1, 2, 2, 1)
+    else
+        # Left Boundary (Site 1)
+        # [ I, -J1 Z, -g1 X ]
+        val_J = get_J(1)
+        val_g = get_g(1)
+        
+        W_left = Matrix{Matrix{ComplexF64}}(undef, 1, 3)
+        W_left[1, 1] = I_op
+        W_left[1, 2] = -val_J * Z_op
+        W_left[1, 3] = -val_g * X_op
+        tensors[1] = block_to_tensor(W_left)
+        
+        # Bulk (Sites 2 to L-1)
+        for i in 2:(length-1)
+            val_Ji = get_J(i)
+            val_gi = get_g(i)
+            
+            W_bulk = Matrix{Matrix{ComplexF64}}(undef, 3, 3)
+            W_bulk .= [Zero_op for _ in 1:3, _ in 1:3]
+            
+            W_bulk[1, 1] = I_op
+            W_bulk[1, 2] = -val_Ji * Z_op
+            W_bulk[1, 3] = -val_gi * X_op
+            W_bulk[2, 3] = Z_op
+            W_bulk[3, 3] = I_op
+            
+            tensors[i] = block_to_tensor(W_bulk)
+        end
+        
+        # Right Boundary (Site L)
+        # [ -gL X ]
+        # [    Z  ]
+        # [    I  ]
+        val_gL = get_g(length)
+        # J[L] is not used (open boundary)
+        
+        W_right = Matrix{Matrix{ComplexF64}}(undef, 3, 1)
+        W_right[1, 1] = -val_gL * X_op
+        W_right[2, 1] = Z_op
+        W_right[3, 1] = I_op
+        tensors[length] = block_to_tensor(W_right)
+    end
+
+    return MPO(length, tensors, phys_dims)
+end
+
+"""
+    init_heisenberg(length::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64) -> MPO
+
+Initialize the Heisenberg model MPO.
+"""
+function init_heisenberg(length::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64)
+    X_op = Matrix(matrix(XGate()))
+    Y_op = Matrix(matrix(YGate()))
+    Z_op = Matrix(matrix(ZGate()))
+    I_op = Matrix(I, 2, 2)
+    Zero_op = zeros(ComplexF64, 2, 2)
+    
+    tensors = Vector{Array{ComplexF64, 4}}(undef, length)
+    phys_dims = fill(2, length)
+
+    # Bulk (5x5)
+    # [ I  -Jx X  -Jy Y  -Jz Z  -h Z ]
+    # [ 0    0      0      0      X  ]
+    # [ 0    0      0      0      Y  ]
+    # [ 0    0      0      0      Z  ]
+    # [ 0    0      0      0      I  ]
+    
+    W_bulk = Matrix{Matrix{ComplexF64}}(undef, 5, 5)
+    W_bulk .= [Zero_op for _ in 1:5, _ in 1:5]
+    
+    W_bulk[1, 1] = I_op
+    W_bulk[1, 2] = -Jx * X_op
+    W_bulk[1, 3] = -Jy * Y_op
+    W_bulk[1, 4] = -Jz * Z_op
+    W_bulk[1, 5] = -h * Z_op
+    W_bulk[2, 5] = X_op
+    W_bulk[3, 5] = Y_op
+    W_bulk[4, 5] = Z_op
+    W_bulk[5, 5] = I_op
+    
+    # Left (1x5)
+    W_left = Matrix{Matrix{ComplexF64}}(undef, 1, 5)
+    W_left[1, 1] = I_op
+    W_left[1, 2] = -Jx * X_op
+    W_left[1, 3] = -Jy * Y_op
+    W_left[1, 4] = -Jz * Z_op
+    W_left[1, 5] = -h * Z_op
+    
+    # Right (5x1)
+    # [ 0, X, Y, Z, I ]^T
+    W_right = Matrix{Matrix{ComplexF64}}(undef, 5, 1)
+    W_right[1, 1] = Zero_op
+    W_right[2, 1] = X_op
+    W_right[3, 1] = Y_op
+    W_right[4, 1] = Z_op
+    W_right[5, 1] = I_op
+
+    function block_to_tensor(W_block)
+        rows, cols = size(W_block)
+        T = zeros(ComplexF64, rows, 2, 2, cols)
+        for r in 1:rows
+            for c in 1:cols
+                op = W_block[r, c]
+                T[r, :, :, c] = op
+            end
+        end
+        return T
+    end
+
+    if length == 1
+        # Single site: -h Z  (Heisenberg usually sums interactions, only field remains)
+        tensors[1] = reshape(-h * Z_op, 1, 2, 2, 1)
+    else
+        tensors[1] = block_to_tensor(W_left)
+        for i in 2:(length-1)
+            tensors[i] = block_to_tensor(W_bulk)
+        end
+        tensors[length] = block_to_tensor(W_right)
     end
 
     return MPO(length, tensors, phys_dims)
@@ -247,4 +409,3 @@ function contract_mpo_mpo(a::MPO, b::MPO)
 end
 
 end # module
-

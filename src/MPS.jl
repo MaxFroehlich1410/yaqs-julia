@@ -5,8 +5,9 @@ using LinearAlgebra
 using StaticArrays
 using Printf
 using Base.Threads
+using ..Decompositions
 
-export MPS, scalar_product, local_expect, evaluate_all_local_expectations, measure_shots, normalize!, check_canonical_form, shift_orthogonality_center_right!, truncate!
+export MPS, scalar_product, local_expect, evaluate_all_local_expectations, measure_shots, normalize!, check_canonical_form, shift_orthogonality_center_right!, shift_orthogonality_center_left!, truncate!, pad_bond_dimension!
 
 abstract type AbstractTensorNetwork end
 
@@ -112,7 +113,7 @@ function MPS(length::Int;
             vector[idx] = 1.0
         elseif state == "random"
             vector = rand(T, d)
-            normalize!(vector)
+            LinearAlgebra.normalize!(vector)
         else
             error("Invalid state string: $state")
         end
@@ -254,6 +255,77 @@ function shift_orthogonality_center_right!(mps::MPS, current_center::Int; decomp
 end
 
 """
+    shift_orthogonality_center_left!(mps::MPS, current_center::Int; decomposition::String="QR", cutoff::Float64=1e-15)
+
+Perform LQ/SVD to shift orthogonality center from `current_center` to `current_center - 1`.
+Native implementation avoiding network flipping for maximum efficiency.
+"""
+function shift_orthogonality_center_left!(mps::MPS, current_center::Int; decomposition::String="QR", cutoff::Float64=1e-15)
+    # Shift from i to i-1
+    # Current Tensor B at i: (L, P, R)
+    # Goal: Decompose B -> L * Q, where Q is Right Canonical (rows orthonormal)
+    # Matrix shape: (L) x (P*R)
+    
+    B = mps.tensors[current_center]
+    l, p, r = size(B)
+    B_mat = reshape(B, l, p * r)
+    
+    if decomposition == "QR" || current_center == 1
+        # LQ Decomposition via QR of transpose
+        # B = L * Q  => B' = Q' * L' = Q_tilde * R_tilde
+        # We perform QR on B' (dims (p*r) x l)
+        # Q_fact = qr(B_mat')
+        
+        # Note: Julia's LQ is available? 
+        # LinearAlgebra.lq exists.
+        F = lq(B_mat)
+        L_factor = Matrix(F.L)
+        Q_ortho = Matrix(F.Q)
+        
+        # Q_ortho shape: (l, p*r) - effectively new bond dim might change if rank deficient
+        new_bond = size(Q_ortho, 1)
+        
+        # Update current site to Right Canonical Form
+        mps.tensors[current_center] = reshape(Q_ortho, new_bond, p, r)
+        
+        # Absorb L_factor into Left Neighbor (i-1)
+        if current_center > 1
+            A_left = mps.tensors[current_center - 1] # (L_prev, P_prev, R_prev=l)
+            # Contract: A_new = A_left * L_factor
+            # A_left: (l_prev, p_prev, k)
+            # L_factor: (k, new_bond) [Since L matches R_prev, and new_bond matches Left of B]
+            # Wait, B was (l, pr). L_factor is (l, new_bond)? No, LQ -> (m,n) = (m,k)*(k,n). 
+            # B (l, pr) = L (l, l) * Q (l, pr) usually.
+            # So L_factor is (l, l).
+            
+            @tensor A_new[l_prev, p_prev, new_r] := A_left[l_prev, p_prev, k] * L_factor[k, new_r]
+            mps.tensors[current_center - 1] = A_new
+        end
+        
+    elseif decomposition == "SVD"
+        # SVD: B = U S V'
+        # Right Canonical: V' is the tensor at site i
+        # Left factor: U S
+        F = svd(B_mat)
+        U, S, Vt = F.U, F.S, F.Vt
+        
+        # Truncation logic could go here
+        new_bond = length(S)
+        
+        # Update site i
+        mps.tensors[current_center] = reshape(Vt, new_bond, p, r)
+        
+        # Update site i-1
+        if current_center > 1
+            A_left = mps.tensors[current_center - 1]
+            US = U * Diagonal(S)
+            @tensor A_new[l_prev, p_prev, new_r] := A_left[l_prev, p_prev, k] * US[k, new_r]
+            mps.tensors[current_center - 1] = A_new
+        end
+    end
+end
+
+"""
     truncate!(mps::MPS, threshold=1e-12)
 
 In-place truncation using SVD.
@@ -271,96 +343,58 @@ function truncate!(mps::MPS; threshold::Float64=1e-12, max_bond_dim::Union{Int, 
     
     # Forward Sweep
     for i in 1:(mps.length - 1)
-        two_site_svd_update!(mps, i, threshold, max_bond_dim)
+        A = mps.tensors[i]
+        B = mps.tensors[i+1]
+        A_new, B_new = two_site_svd(A, B, threshold; max_bond_dim=max_bond_dim)
+        mps.tensors[i] = A_new
+        mps.tensors[i+1] = B_new
     end
     
     # Backward Sweep
     flip_network!(mps)
     for i in 1:(mps.length - 1)
-        two_site_svd_update!(mps, i, threshold, max_bond_dim)
+        A = mps.tensors[i]
+        B = mps.tensors[i+1]
+        A_new, B_new = two_site_svd(A, B, threshold; max_bond_dim=max_bond_dim)
+        mps.tensors[i] = A_new
+        mps.tensors[i+1] = B_new
     end
     flip_network!(mps)
+    
+    # Re-normalize to ensure unit norm state
+    normalize!(mps)
 end
 
-function two_site_svd_update!(mps::MPS, i::Int, threshold::Float64, max_bond_dim::Union{Int, Nothing})
-    A = mps.tensors[i]     # (L, P, R)
-    B = mps.tensors[i+1]   # (R, P', R')
-    
-    l_A, p_A, r_A = size(A)
-    l_B, p_B, r_B = size(B)
-    
-    # Contract A and B -> Theta
-    # A: (l_A, p_A, k)
-    # B: (k, p_B, r_B)
-    # Theta: (l_A, p_A, p_B, r_B)
-    @tensor Theta[l, pa, pb, r] := A[l, pa, k] * B[k, pb, r]
-    
-    # Reshape for SVD: (l_A * p_A, p_B * r_B)
-    Theta_mat = reshape(Theta, l_A * p_A, p_B * r_B)
-    
-    F = svd(Theta_mat)
-    U, S, Vt = F.U, F.S, F.Vt
-    
-    # Truncate
-    # Calculate retained bond dim
-    norm_sq = dot(S, S)
-    cum_sum = 0.0
-    keep_dim = length(S)
-    
-    # Truncate by threshold
-    discarded_sq = 0.0
-    for k in length(S):-1:1
-        discarded_sq += S[k]^2
-        if discarded_sq > threshold^2
-            keep_dim = k + 1 # Keep up to this one
-            if keep_dim > length(S) keep_dim = length(S) end
-            break
-        end
-        if k == 1 
-            keep_dim = 1 # Always keep at least 1
-        end
-    end
-    
-    # Truncate by max_bond_dim
-    if !isnothing(max_bond_dim)
-        keep_dim = min(keep_dim, max_bond_dim)
-    end
-    
-    # Slice
-    U_trunc = U[:, 1:keep_dim]
-    S_trunc = S[1:keep_dim]
-    Vt_trunc = Vt[1:keep_dim, :]
-    
-    # Update tensors
-    # A_new: U_trunc -> (l_A, p_A, keep_dim)
-    mps.tensors[i] = reshape(U_trunc, l_A, p_A, keep_dim)
-    
-    # B_new: S * Vt -> (keep_dim, p_B, r_B)
-    SV = Diagonal(S_trunc) * Vt_trunc
-    mps.tensors[i+1] = reshape(SV, keep_dim, p_B, r_B)
-end
 
 
 function normalize!(mps::MPS; form::String="B")
     # Normalize to Right Canonical (B-form)
-    # 1. Flip
-    flip_network!(mps)
-    # 2. Shift center to end (now rightmost)
-    for i in 1:(mps.length - 1)
-        shift_orthogonality_center_right!(mps, i)
+    # Sweep Right-to-Left (L -> 1)
+    # Shift orthogonality center from L down to 1
+    
+    # We start by assuming the center is at L (or we move it there virtually?)
+    # Actually, to make it Right Canonical, we need all sites 2..L to be B-tensors.
+    # This is achieved by shifting the orthogonality center all the way to site 1.
+    
+    # Wait, if we start with arbitrary state, we first sweep Left->Right to make it Left Canonical (A-form)?
+    # Or we can just sweep Right->Left directly using LQ.
+    
+    # Algorithm for full B-form normalization:
+    # 1. Start at L. Perform LQ. Absorb L into L-1.
+    # 2. Repeat until site 2.
+    # 3. At site 1, normalize the vector.
+    
+    for i in mps.length:-1:2
+        shift_orthogonality_center_left!(mps, i)
     end
-    # 3. Flip back
-    flip_network!(mps)
     
-    # Now state is Left Canonical (A-form). 
-    # If we want B-form (Right Canonical), we need to shift center to the rightmost site?
-    # Wait, Python normalize(form="B"):
-    # flip, set_canonical(right), shift_right, flip.
-    # For now, let's just ensure the state is normalized (norm=1).
-    # The simplest way to normalize the vector is to shift orthogonality center to one end and normalize the last tensor.
-    
-    # Just ensure orthogonality center is at 1 (Right Canonical) or L (Left Canonical)
-    # Let's stick to Python behavior: Orthogonality center at L-1.
+    # Center is now at site 1.
+    # Explicitly normalize the state (divide by norm)
+    center_tensor = mps.tensors[1]
+    norm_val = norm(center_tensor)
+    if norm_val > 1e-15
+        mps.tensors[1] ./= norm_val
+    end
 end
 
 

@@ -2,6 +2,12 @@ using Test
 using LinearAlgebra
 using Random
 
+if !isdefined(Main, :GateLibrary)
+    include("../src/GateLibrary.jl")
+end
+if !isdefined(Main, :Decompositions)
+    include("../src/Decompositions.jl")
+end
 if !isdefined(Main, :MPSModule)
     include("../src/MPS.jl")
 end
@@ -9,6 +15,8 @@ if !isdefined(Main, :MPOModule)
     include("../src/MPO.jl")
 end
 
+using .GateLibrary
+using .Decompositions
 using .MPSModule
 using .MPOModule
 
@@ -26,7 +34,7 @@ function random_mps(length, phys_dim, bond_dim)
     push!(tensors, crandn((bond_dim, phys_dim, 1)))
     
     mps = MPS(length, tensors, [phys_dim for _ in 1:length])
-    normalize!(mps)
+    MPSModule.normalize!(mps)
     return mps
 end
 
@@ -100,5 +108,62 @@ end
         @test isapprox(val, 1.0 + 0.0im; atol=1e-12)
     end
 
+    @testset "Ising Hamiltonian" begin
+        L = 4
+        J = 1.0
+        g = 0.0
+        # H = - sum Z_i Z_{i+1} (Ferromagnetic)
+        mpo = init_ising(L, J, g)
+        
+        # State |0000> -> Z_i = 1
+        # Energy = -J * (L-1) = -3
+        mps = MPS(L; state="zeros") # |0000>
+        val = expect_mpo(mpo, mps)
+        @test isapprox(real(val), -3.0; atol=1e-10)
+        
+        # State |1111> -> Z_i = -1
+        # Z_i Z_{i+1} = (-1)(-1) = 1
+        # Energy = -3
+        mps_ones = MPS(L; state="ones") # |1111>
+        val = expect_mpo(mpo, mps_ones)
+        @test isapprox(real(val), -3.0; atol=1e-10)
+        
+        # Neel |0101> -> Z values: 1, -1, 1, -1
+        # Bonds: (1*-1), (-1*1), (1*-1) -> -1, -1, -1
+        # Sum = -3.
+        # H = -J * (-3) = +3.
+        mps_neel = MPS(L; state="Neel")
+        val = expect_mpo(mpo, mps_neel)
+        @test isapprox(real(val), 3.0; atol=1e-10)
+        
+        # Transverse Field Case
+        J = 0.0
+        g = 1.0
+        mpo_tf = init_ising(L, J, g)
+        # H = -g sum X_i
+        # State |+> (x+) -> X_i = 1
+        # Energy = -g * L = -4
+        mps_x = MPS(L; state="x+")
+        val = expect_mpo(mpo_tf, mps_x)
+        @test isapprox(real(val), -4.0; atol=1e-10)
+    end
+
+    @testset "Heisenberg Hamiltonian" begin
+        L = 3
+        Jx, Jy, Jz = 1.0, 1.0, 1.0
+        h = 0.0
+        # H = - sum (X X + Y Y + Z Z)
+        mpo = init_heisenberg(L, Jx, Jy, Jz, h)
+        
+        # Ferromagnetic |000>
+        # X|0> = |1>, Y|0> = i|1>, Z|0> = |0>
+        # <00| XX |00> = 0
+        # <00| YY |00> = 0
+        # <00| ZZ |00> = 1
+        # Term per bond: -1. Total: -2.
+        mps = MPS(L; state="zeros")
+        val = expect_mpo(mpo, mps)
+        @test isapprox(real(val), -2.0; atol=1e-10)
+    end
 end
 

@@ -4,9 +4,18 @@ using Random
 
 # Include source files (assuming running from project root or test dir)
 # Adjust paths as necessary
+if !isdefined(Main, :GateLibrary)
+    include("../src/GateLibrary.jl")
+end
+if !isdefined(Main, :Decompositions)
+    include("../src/Decompositions.jl")
+end
 if !isdefined(Main, :MPSModule)
     include("../src/MPS.jl")
 end
+
+using .GateLibrary
+using .Decompositions
 using .MPSModule
 
 # Helper functions for testing
@@ -47,7 +56,7 @@ function random_mps(length, phys_dim, bond_dim; normalize_state=true)
     
     mps = MPS(length, tensors, [phys_dim for _ in 1:length])
     if normalize_state
-        normalize!(mps)
+        MPSModule.normalize!(mps)
     end
     return mps
 end
@@ -180,6 +189,39 @@ end
         results = measure_shots(mps, shots)
         @test haskey(results, 7)
         @test results[7] == shots
+
+        # New measurement checks
+        mps_x = MPS(4; state="x+") # |++++>
+        counts = measure_shots(mps_x, 100)
+        @test sum(values(counts)) == 100
+    end
+
+    @testset "Initialization States" begin
+        L = 4
+        
+        # x+ state: (1/sqrt(2), 1/sqrt(2))
+        mps = MPS(L; state="x+")
+        # Overlap with zeros should be (1/sqrt(2))^L
+        mps0 = MPS(L; state="zeros")
+        ov = scalar_product(mps, mps0)
+        expected = (1.0/sqrt(2))^L
+        @test isapprox(abs(ov), expected; atol=1e-10)
+        
+        # y+ state: (1/sqrt(2), i/sqrt(2))
+        mps_y = MPS(L; state="y+")
+        # Norm should be 1
+        @test isapprox(scalar_product(mps_y, mps_y), 1.0; atol=1e-10)
+        
+        # Basis state
+        basis_str = "0101"
+        mps_basis = MPS(L; state="basis", basis_string=basis_str)
+        # Check tensors directly
+        # Site 1 (0): [1, 0]
+        # Site 2 (1): [0, 1]
+        @test mps_basis.tensors[1][1, 1, 1] ≈ 1.0
+        @test mps_basis.tensors[1][1, 2, 1] ≈ 0.0
+        @test mps_basis.tensors[2][1, 1, 1] ≈ 0.0
+        @test mps_basis.tensors[2][1, 2, 1] ≈ 1.0
     end
     
     @testset "Canonical Forms & Shifting" begin
@@ -196,7 +238,7 @@ end
         @test !isempty(centers)
         
         # Normalize
-        normalize!(mps)
+        MPSModule.normalize!(mps)
         @test isapprox(scalar_product(mps, mps), 1.0; atol=1e-12)
     end
     
@@ -213,7 +255,7 @@ end
         push!(tensors, crandn((large_bond, pdim, 1)))
         
         mps = MPS(L, tensors, [pdim for _ in 1:L])
-        normalize!(mps)
+        MPSModule.normalize!(mps)
         
         # Truncate to max_bond=2
         truncate!(mps; max_bond_dim=2)
