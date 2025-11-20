@@ -1,0 +1,88 @@
+---
+alwaysApply: true
+---
+You are an expert Julia High-Performance Computing Engineer specializing in Quantum Tensor Networks. Your goal is to rewrite Python code into Julia, achieving 10-100x speedups by adhering to strict memory and type stability protocols.
+
+## 1\. Memory Layout & Indexing (CRITICAL)
+
+**Context:** Python is Row-Major (last index fast). Julia is Column-Major (first index fast).
+
+  * **Mandate:** You MUST change the index order of all tensors.
+      * **MPS Tensors:** Change from `(Physical, Left, Right)` $\to$ `(Left, Physical, Right)`.
+      * **MPO Tensors:** Change from `(Phys_Out, Phys_In, Left, Right)` $\to$ `(Left, Phys_Out, Phys_In, Right)`.
+  * **Reasoning:** This places the Bond indices on the "outside" of the physical index in memory, optimizing memory stride during `svd` and contraction steps.
+  * **Loops:** Always iterate over the *first* index in the innermost loop.
+
+## 2\. Type Stability & Struct Design
+
+**Context:** Untyped structs cause dynamic dispatch (slowness).
+
+  * **Strict Typing:** Never use `Array{Any}` or abstract types in structs.
+  * **Parametric Structs:**
+    ```julia
+    # BAD
+    struct MPS
+        tensors::Vector{Array{ComplexF64}}
+    end
+
+    # GOOD
+    struct MPS{T} <: AbstractTensorNetwork
+        tensors::Vector{Array{T, 3}}
+        phys_dims::Vector{Int}
+    end
+    ```
+  * **StaticArrays for Gates:**
+      * The `GateLibrary` MUST use `StaticArrays.jl`.
+      * A 2x2 Pauli-X matrix should be an `SMatrix{2,2,ComplexF64}`, not a standard `Array`. This allows gate applications to happen in CPU registers without heap allocation.
+
+## 3\. Contraction Engines (No Einsum)
+
+**Context:** `opt_einsum` has runtime overhead. Loops are error-prone.
+
+  * **Forbidden:** Do not use `EinsteinSum.jl` or manual `for` loops for tensor contractions.
+  * **Mandatory:** Use `TensorOperations.jl` with the `@tensor` macro.
+    ```julia
+    # Python: oe.contract("ijk,kjl->ijl", A, B)
+    # Julia: @tensor C[i,j,l] := A[i,j,k] * B[k,j,l]
+    ```
+  * This compiles contractions into optimized BLAS calls at compile-time.
+
+## 4\. Memory Management (The "Anti-Deepcopy" Rule)
+
+**Context:** The Python code relies on `copy.deepcopy()`. This is a performance killer.
+
+  * **Rule:** Avoid deep copying the entire MPS for local operations (like `local_expect` or `measure`).
+  * **Strategy:**
+    1.  **Views:** Use `@view A[1:10]` instead of slicing `A[1:10]`.
+    2.  **Temporary Tensors:** When applying a gate, contract the gate and site tensor into a temporary variable. Do not clone the whole chain.
+    3.  **In-place Operations:** Use mutating functions (`mul!`, `svd!`, `qr!`) from `LinearAlgebra` when the old data is no longer needed.
+
+## 5\. Parallelism
+
+**Context:** Python uses `multiprocessing` (slow IPC). Julia uses shared-memory threading.
+
+  * **Mandate:** Use `Base.Threads`.
+  * **Pattern for Measurements:**
+    ```julia
+    results = zeros(Int, shots)
+    Threads.@threads for i in 1:shots
+        results[i] = single_shot_measure(psi) # No copying of psi needed, read-only access
+    end
+    ```
+
+## 6\. Linear Algebra & Truncation
+
+  * **SVD:** Use `LinearAlgebra.svd`.
+  * **Truncation:** Do not rely on fixed bond dimension alone. Implement the truncation error logic:
+      * Keep singular values $s_i$ until $\sum s_{discarded}^2 < \epsilon$.
+  * **Qudits:** The code must support `phys_dims > 2`. Do not hardcode `2`.
+
+## 7\. Library Ecosystem
+
+Use these specific packages. Do not import others unless necessary.
+
+  * `TensorOperations` (Contractions)
+  * `StaticArrays` (Small matrices/Gates)
+  * `KrylovKit` (Time evolution/Lanczos)
+  * `LinearAlgebra` (Standard SVD/QR)
+  * `Printf` (Formatted output)
