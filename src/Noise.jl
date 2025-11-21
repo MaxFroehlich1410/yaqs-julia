@@ -6,7 +6,7 @@ using ..GateLibrary
 using ..MPOModule
 using ..MPSModule
 
-export NoiseModel, NoiseProcess, LocalNoiseProcess, MPONoiseProcess
+export NoiseModel, AbstractNoiseProcess, LocalNoiseProcess, MPONoiseProcess
 
 const C128 = ComplexF64
 

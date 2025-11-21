@@ -72,6 +72,7 @@ mutable struct TimeEvolutionConfig <: AbstractSimConfig
     min_bond_dim::Int
     truncation_threshold::Float64
     sample_timesteps::Bool
+    order::Int
     
     function TimeEvolutionConfig(observables::Vector{<:Observable}, total_time::Float64;
                                  dt::Float64=0.1,
@@ -79,10 +80,11 @@ mutable struct TimeEvolutionConfig <: AbstractSimConfig
                                  max_bond_dim::Int=4096,
                                  min_bond_dim::Int=2,
                                  truncation_threshold::Float64=1e-9,
-                                 sample_timesteps::Bool=true)
+                                 sample_timesteps::Bool=true,
+                                 order::Int=2)
         
         times = collect(0.0:dt:total_time)
-        new(observables, total_time, dt, times, num_traj, max_bond_dim, min_bond_dim, truncation_threshold, sample_timesteps)
+        new(observables, total_time, dt, times, num_traj, max_bond_dim, min_bond_dim, truncation_threshold, sample_timesteps, order)
     end
 end
 

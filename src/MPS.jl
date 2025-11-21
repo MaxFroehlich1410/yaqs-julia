@@ -538,9 +538,9 @@ function expect(mps::MPS, observable)
         site_idx = (sites isa Vector) ? sites[1] : sites
         return real(local_expect(mps, gate_matrix, site_idx))
     elseif size(gate_matrix, 1) == 4 # Two site
-        # TODO: Implement two-site expectation if needed, similar to local_expect but merging two tensors
-        # For now, error or simple placeholder
-        error("Two-site expectation not fully implemented in this snippet.")
+        s = (sites isa Vector) ? sites : [sites]
+        @assert length(s) == 2 "Two-site operator requires 2 sites"
+        return real(local_expect_two_site(mps, gate_matrix, s[1], s[2]))
     else
         error("Unsupported gate dimension")
     end

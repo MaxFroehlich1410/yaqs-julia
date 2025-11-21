@@ -10,20 +10,30 @@ using ..SimulationConfigs
 using ..GateLibrary
 using TensorOperations
 
-export StochasticProcess, trajectory_evolution
+export StochasticProcess, trajectory_evolution, solve_jumps!
 
-mutable struct StochasticProcess{T}
-    mps::MPS{T}
-    noise_model::NoiseModel{T}
+"""
+    StochasticProcess{T}
+
+Holds the pre-calculated effective Hamiltonian and jump operators for a given noise model.
+Does NOT hold the MPS state (to avoid re-creation).
+"""
+struct StochasticProcess{T}
     H_eff::MPO{T}
     jump_ops::Vector{Any} 
 end
 
-function StochasticProcess(mps::MPS{T}, hamiltonian::MPO{T}, noise_model::NoiseModel{T}) where T
+"""
+    StochasticProcess(hamiltonian, noise_model, L)
+
+Constructor that pre-calculates H_eff and jump_ops.
+"""
+function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) where T
     H_eff = deepcopy(hamiltonian)
     jump_ops = []
+    L = hamiltonian.length
     
-    one_site_terms = [zeros(T, 2, 2) for _ in 1:mps.length]
+    one_site_terms = [zeros(T, 2, 2) for _ in 1:L]
     has_one_site = false
     
     for proc in noise_model.processes
@@ -43,7 +53,7 @@ function StochasticProcess(mps::MPS{T}, hamiltonian::MPO{T}, noise_model::NoiseM
                 s1, s2 = sort(proc.sites)
                 if s2 - s1 == 1
                      push!(jump_ops, (proc, L_op, "local_2"))
-                     mpo_term = construct_2site_mpo(mps.length, s1, s2, term)
+                     mpo_term = construct_2site_mpo(L, s1, s2, term)
                      H_eff = H_eff + mpo_term
                 else
                     error("Non-adjacent local process not supported without MPO")
@@ -64,11 +74,11 @@ function StochasticProcess(mps::MPS{T}, hamiltonian::MPO{T}, noise_model::NoiseM
     end
     
     if has_one_site
-        decay_mpo = construct_1site_sum_mpo(mps.length, one_site_terms)
+        decay_mpo = construct_1site_sum_mpo(L, one_site_terms)
         H_eff = H_eff + decay_mpo
     end
     
-    return StochasticProcess(mps, noise_model, H_eff, jump_ops)
+    return StochasticProcess(H_eff, jump_ops)
 end
 
 function adjoint_mpo(a::MPO{T}) where T
@@ -145,10 +155,100 @@ function construct_1site_sum_mpo(L::Int, terms::Vector{Matrix{ComplexF64}})
     return MPO(L, tensors, phys)
 end
 
-function trajectory_evolution(process::StochasticProcess, t_final::Float64, dt::Float64; 
+"""
+    solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
+
+Perform the MCWF jump logic on `mps` using pre-calculated `process`.
+"""
+function solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
+    norm_sq = real(scalar_product(mps, mps))
+    
+    r = rand()
+    
+    if r > norm_sq
+        # Jump!
+        rates = Float64[]
+        
+        for (proc, op, type) in process.jump_ops
+            val = 0.0
+            gamma = proc.strength
+            
+            if type == "local_1"
+                op_sq = op' * op
+                val = real(local_expect(mps, op_sq, proc.sites[1]))
+            elseif type == "local_2"
+                op_sq = op' * op
+                val = real(local_expect_two_site(mps, op_sq, proc.sites[1], proc.sites[2]))
+            elseif type == "mpo"
+                L_dag = adjoint_mpo(op)
+                L_sq = contract_mpo_mpo(L_dag, op)
+                val = real(expect_mpo(L_sq, mps))
+            end
+            
+            push!(rates, max(0.0, val * gamma * dt)) # Multiply by dt here? Original code multiplied later?
+            # Wait, original code: push!(rates, val * gamma * dt)
+            # Yes.
+        end
+        
+        total_rate = sum(rates)
+        if total_rate > 0
+            r_jump = rand() * total_rate
+            current_sum = 0.0
+            chosen_idx = 1
+            for (i, rate) in enumerate(rates)
+                current_sum += rate
+                if r_jump <= current_sum
+                    chosen_idx = i
+                    break
+                end
+            end
+            
+            # Apply Jump
+            (proc, op, type) = process.jump_ops[chosen_idx]
+            
+            if type == "local_1"
+                site = proc.sites[1]
+                T_ten = mps.tensors[site]
+                @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
+                mps.tensors[site] = T_new
+            elseif type == "local_2"
+                site1, site2 = proc.sites
+                A1 = mps.tensors[site1]
+                A2 = mps.tensors[site2]
+                @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+                
+                op_tensor = reshape(op, 2, 2, 2, 2)
+                @tensor Theta_prime[l, p1n, p2n, r] := op_tensor[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+                
+                # SVD Split
+                l_dim, _, _, r_dim = size(Theta_prime)
+                Mat = reshape(Theta_prime, l_dim*2, 2*r_dim)
+                F = svd(Mat)
+                
+                # Keep full rank for jump
+                rank = length(F.S)
+                U = F.U
+                S = F.S
+                Vt = F.Vt
+                
+                mps.tensors[site1] = reshape(U, l_dim, 2, rank)
+                mps.tensors[site2] = reshape(Diagonal(S)*Vt, rank, 2, r_dim)
+                
+            elseif type == "mpo"
+                 new_mps = contract_mpo_mps(op, mps)
+                 mps.tensors = new_mps.tensors
+                 truncate!(mps)
+            end
+        end
+    end
+    
+    MPSModule.normalize!(mps)
+end
+
+function trajectory_evolution(process::StochasticProcess, mps::MPS, t_final::Float64, dt::Float64; 
                               measure_interval::Int=1, observables=[])
     
-    current_mps = deepcopy(process.mps)
+    current_mps = deepcopy(mps)
     steps = floor(Int, t_final / dt)
     
     results = Dict{String, Vector{ComplexF64}}()
@@ -162,78 +262,12 @@ function trajectory_evolution(process::StochasticProcess, t_final::Float64, dt::
         time += dt
         
         # 1. TDVP Step with H_eff
-        norm_sq_old = real(scalar_product(current_mps, current_mps))
-        
-        # Evolve using 2-site TDVP
         dummy_obs = Vector{Observable{AbstractOperator}}()
         config = TimeEvolutionConfig(dummy_obs, dt; dt=dt, truncation_threshold=1e-10, max_bond_dim=64)
-        
         two_site_tdvp!(current_mps, process.H_eff, config)
         
-        # Norm after
-        norm_sq_new = real(scalar_product(current_mps, current_mps))
-        p_survive = norm_sq_new # / norm_sq_old (should be 1)
-        
-        # Roll
-        r = rand()
-        
-        if r > p_survive
-            # JUMP
-            rates = Float64[]
-            for (proc, op, type) in process.jump_ops
-                val = 0.0
-                gamma = proc.strength
-                if type == "local_1"
-                    op_sq = op' * op
-                    val = real(local_expect(current_mps, op_sq, proc.sites[1]))
-                elseif type == "local_2"
-                    # op is 4x4. local_expect handles 2x2.
-                    # TODO: Implement 2-site local_expect
-                    # Fallback or error?
-                    # For now assume 1-site jumps only or use MPO for 2-site
-                    # Ideally convert 2-site op to MPO for expectation
-                    # But we stored it as "local_2".
-                    # Let's just fail gracefully or skip for now.
-                    val = 0.0 
-                elseif type == "mpo"
-                    L_dag = adjoint_mpo(op)
-                    L_sq = contract_mpo_mpo(L_dag, op)
-                    val = real(expect_mpo(L_sq, current_mps))
-                end
-                push!(rates, val * gamma * dt)
-            end
-            
-            # Sample
-            total_rate = sum(rates)
-            if total_rate > 0
-                r_jump = rand() * total_rate
-                chosen_idx = 1
-                cum = 0.0
-                for (i, rate) in enumerate(rates)
-                    cum += rate
-                    if r_jump <= cum
-                        chosen_idx = i
-                        break
-                    end
-                end
-                
-                # Apply Jump
-                (proc, op, type) = process.jump_ops[chosen_idx]
-                
-                if type == "local_1"
-                    site = proc.sites[1]
-                    T_ten = current_mps.tensors[site]
-                    @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
-                    current_mps.tensors[site] = T_new
-                elseif type == "mpo"
-                     current_mps = contract_mpo_mps(op, current_mps)
-                     truncate!(current_mps)
-                end
-            end
-        end
-        
-        # Normalize
-        MPSModule.normalize!(current_mps)
+        # 2. Jumps
+        solve_jumps!(current_mps, process, dt)
         
         # Measurements
         if step % measure_interval == 0
