@@ -5,13 +5,14 @@ import pandas as pd
 import os
 
 def run_qutip_and_plot():
-    # --- Simulation Parameters (Matching Julia/Python L=6) ---
+    # --- Simulation Parameters (Matching Python L=6) ---
     L = 6
     J = 1.0
     h = 0.5
     gamma = 0.1
     dt = 0.05
     total_time = 2.0
+    num_traj = 200
     
     print(f"Running QuTiP Exact Simulation (L={L})...")
 
@@ -21,8 +22,7 @@ def run_qutip_and_plot():
     sz = qt.sigmaz()
     
     # YAQS 'raising' is [[0,0],[1,0]] (0->1 excitation).
-    # In QuTiP basis (0=Up, 1=Down), this corresponds to sigmam (0->1).
-    # sigmam = [[0,0],[1,0]].
+    # In QuTiP, sigmam = [[0,0],[1,0]] maps |0> -> |1>.
     sp = qt.sigmam() 
 
     # Hamiltonian (Ising)
@@ -67,15 +67,14 @@ def run_qutip_and_plot():
     result_qutip = qt.mesolve(H_qutip, initial_state_qutip, times, c_ops, z_ops)
     print("QuTiP Simulation Finished.")
 
-    # --- Load Benchmark Results ---
-    julia_file = "experiments/julia_results_L6.csv"
+    # --- Load Python Results ---
     python_file = "experiments/python_results_L6.csv"
     
-    if not os.path.exists(julia_file) or not os.path.exists(python_file):
-        print("Error: Benchmark result files not found. Run benchmarks first.")
+    if not os.path.exists(python_file):
+        print(f"Error: Python results file not found at {python_file}")
+        print("Please run: python3 experiments/benchmark_python.py")
         return
 
-    df_julia = pd.read_csv(julia_file)
     df_python = pd.read_csv(python_file)
 
     # --- Plotting ---
@@ -89,28 +88,25 @@ def run_qutip_and_plot():
         c = colors[i]
         lbl = labels[i]
         
-        # Julia (Solid)
-        plt.plot(df_julia["Time"], df_julia[col], label=f"Julia Z_{lbl}", 
-                 color=c, linestyle='-', linewidth=2.5, alpha=0.8)
-        
         # Python (Dashed)
-        plt.plot(df_python["Time"], df_python[col], label=f"Python Z_{lbl}", 
+        plt.plot(df_python["Time"], df_python[col], label=f"Python TJM Z_{lbl}", 
                  color=c, linestyle='--', linewidth=2.5, alpha=0.8)
         
-        # QuTiP (Dotted + Markers)
-        plt.plot(times, result_qutip.expect[i], label=f"QuTiP Z_{lbl}", 
-                 color=c, linestyle=':', linewidth=2, marker='o', markersize=4, alpha=0.6)
+        # QuTiP (Solid + Markers)
+        plt.plot(times, result_qutip.expect[i], label=f"QuTiP Exact Z_{lbl}", 
+                 color=c, linestyle='-', linewidth=2, marker='o', markersize=4, alpha=0.6)
 
     plt.xlabel("Time")
     plt.ylabel("Expectation Value <Z>")
-    plt.title(f"Comparison: Julia TJM vs Python TJM vs QuTiP Exact\n(L={L}, Traj=200, Ising Chain, γ={gamma})\nNOTE: Python TJM shows significant discrepancy (~40-50% lower)")
+    plt.title(f"Python TJM vs QuTiP Exact\n(L={L}, Traj={num_traj}, Ising Chain, γ={gamma})")
     plt.legend(ncol=3, loc='best')
     plt.grid(True, which='both', linestyle='--', linewidth=0.5)
     plt.tight_layout()
     
-    output_img = "experiments/comparison_L6_all.png"
+    output_img = "experiments/comparison_python_qutip.png"
     plt.savefig(output_img, dpi=300)
     print(f"Plot saved to {output_img}")
 
 if __name__ == "__main__":
     run_qutip_and_plot()
+

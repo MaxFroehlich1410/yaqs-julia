@@ -21,22 +21,22 @@ function run_benchmark()
     LinearAlgebra.BLAS.set_num_threads(1)
 
     # 1. Parameters
-    L = 6
+    L = 12
     J = 1.0
     h = 0.5
     dt = 0.05
-    t_total = 2.0
-    num_traj = 200 # Reduced to 200
-    strength = 0.1
+    t_total = 1.0
+    num_traj = 500
+    strength = 0.01
 
     println("Starting Julia Analog TJM Benchmark (L=6)...")
-    println("L=$L, J=$J, h=$h, dt=$dt, T=$t_total, Traj=$num_traj, Noise=Raising($strength)")
+    println("L=$L, J=$J, h=$h, dt=$dt, T=$t_total, Traj=$num_traj, Noise=Lowering($strength)")
     println("Threads: $(Threads.nthreads()) (BLAS threads set to 1)")
 
     # 2. Initialize Objects
     initial_state = MPS(L, state="zeros")
     H = init_ising(L, J, h)
-    processes = [Dict("name" => "raising", "sites" => [i], "strength" => strength) for i in 1:L]
+    processes = [Dict("name" => "lowering", "sites" => [i], "strength" => strength) for i in 1:L]
     noise_model = NoiseModel(processes, L)
     
     # Observables: First, Middle, Last (1-based indexing)

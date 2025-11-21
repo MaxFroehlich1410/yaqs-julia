@@ -18,13 +18,13 @@ except ImportError:
 
 def run_benchmark():
     # 1. Parameters
-    L = 6
+    L = 12
     J = 1.0
     h = 0.5
     dt = 0.05
-    t_total = 2.0
-    num_traj = 200  # Reduced to 200
-    strength = 0.1
+    t_total = 1.0
+    num_traj = 500  
+    strength = 0.01
 
     print(f"Starting Python Analog TJM Benchmark (L=6)...")
     print(f"L={L}, J={J}, h={h}, dt={dt}, T={t_total}, Traj={num_traj}, Noise=Raising({strength})")
@@ -40,7 +40,7 @@ def run_benchmark():
     # Noise Model
     # Note: 'raising' in YAQS is [[0,0],[1,0]] (0->1 excitation)
     processes = [{"name": "raising", "sites": [i], "strength": strength} for i in range(L)]
-    noise_model = NoiseModel(processes)
+    noise_model = NoiseModel(processes, num_qubits=L)
 
     # Observables: Z on first, middle, last
     # L=6 -> Julia: 1, 3, 6. Python: 0, 2, 5.
