@@ -38,7 +38,7 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
     if isnothing(noise_model) || all(p.strength == 0 for p in noise_model.processes)
         # Shift orthogonality center to Left (1)
         for i in mps.length:-1:2
-            MPSModule.shift_orthogonality_center_left!(mps, i; decomposition="QR")
+            MPSModule.shift_orthogonality_center!(mps, i - 1)
         end
         return
     end
@@ -146,7 +146,7 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
 
         # Shift center left
         if i > 1
-             MPSModule.shift_orthogonality_center_left!(mps, i; decomposition="QR")
+             MPSModule.shift_orthogonality_center!(mps, i - 1)
         end
     end
 end

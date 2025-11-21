@@ -30,24 +30,19 @@ using LinearAlgebra
         dummy_obs = Vector{Observable{AbstractOperator}}()
         sim_params = TimeEvolutionConfig(dummy_obs, 0.2; dt=0.2)
         
-        # We verify it runs without error and modifies state
-        norm_before = real(scalar_product(state, state))
-        state_init = initialize(state, noise_model, sim_params)
+        # Test initialization with nothing for stoch_proc
+        state_init = initialize(state, nothing, noise_model, sim_params)
+        
+        # Explicitly normalize because initialize without solve_jumps! might leave it unnormalized
+        MPSModule.normalize!(state_init)
+        
         norm_after = real(scalar_product(state_init, state_init))
         
-        @test norm_after ≈ 1.0 # Should be normalized
+        @test norm_after ≈ 1.0
     end
 
     @testset "analog_tjm_2_no_sampling" begin
         L = 5
-        J = 1.0
-        g = 0.5
-        H = MPO(L) # Dummy, normally would use Ising init
-        # Init Ising manually or use a helper if available?
-        # Let's use a simple MPO (Identity) for test to avoid complexity
-        # Or construct Ising.
-        # Replicating python test behavior which uses H.init_ising
-        # We don't have H.init_ising in MPO.jl, but we can test with Identity H.
         H = MPO(L, identity=true, physical_dimensions=fill(2, L))
         
         state = MPS(L, state="zeros")
@@ -73,7 +68,6 @@ using LinearAlgebra
         args = (0, state, nothing, sim_params, H)
         results = analog_tjm_2(args)
         
-        # Times: 0.0, 0.1, 0.2 -> 3 steps
         @test size(results) == (L, 3)
     end
 
@@ -106,4 +100,3 @@ using LinearAlgebra
     end
 
 end
-

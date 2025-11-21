@@ -37,7 +37,7 @@ end
     expect(psi::MPS, obs::Observable)
 
 Compute the expectation value of the observable on the MPS.
-Currently supports single-site observables.
+Currently supports single-site and two-site observables.
 """
 function expect(psi::MPS, obs::Observable)
     # Get matrix from GateLibrary
@@ -47,6 +47,9 @@ function expect(psi::MPS, obs::Observable)
         # Single site
         site = obs.sites[1]
         return real(local_expect(psi, op_mat, site))
+    elseif length(obs.sites) == 2
+        s1, s2 = sort(obs.sites)
+        return real(local_expect_two_site(psi, op_mat, s1, s2))
     else
         error("Multi-site expectation not yet implemented in Julia port.")
     end

@@ -1,811 +1,700 @@
 module MPSModule
 
-using TensorOperations
 using LinearAlgebra
 using StaticArrays
 using Printf
-using Base.Threads
-using ..Decompositions
+using TensorOperations
 
-export MPS, scalar_product, local_expect, evaluate_all_local_expectations, measure_shots, normalize!, check_canonical_form, shift_orthogonality_center_right!, shift_orthogonality_center_left!, truncate!, pad_bond_dimension!
+export MPS, check_if_valid_mps, check_canonical_form, pad_bond_dimension!
+export write_max_bond_dim, to_vec
+export shift_orthogonality_center!, normalize!, truncate!
+export scalar_product, norm, local_expect, local_expect_two_site, single_shot_measure, measure_single_shot, measure_shots, project_onto_bitstring, evaluate_all_local_expectations
 
-abstract type AbstractTensorNetwork end
+# --- Constants & Types ---
+
+const AbstractTensor3{T} = AbstractArray{T, 3}
 
 """
     MPS{T} <: AbstractTensorNetwork
 
-Matrix Product State (MPS) using Column-Major memory layout.
+Matrix Product State (MPS) with explicitly tracked orthogonality center.
+Memory Layout: Column-Major (Left, Physical, Right).
 
-# Layout
-Tensors are stored with indices: `(Left_Bond, Physical, Right_Bond)`.
-This contrasts with Python's Row-Major `(Physical, Left_Bond, Right_Bond)`.
-
-# Fields
-- `tensors::Vector{Array{T, 3}}`: The MPS tensors.
-- `phys_dims::Vector{Int}`: Physical dimension of each site.
-- `length::Int`: Number of sites.
+Fields:
+- `tensors`: Vector of rank-3 tensors.
+- `phys_dims`: Physical dimensions (usually 2 for qubits).
+- `length`: Number of sites.
+- `orth_center`: Index of the orthogonality center (1-based). 
+                 Sites 1..oc-1 are Left-Canonical (A).
+                 Sites oc+1..L are Right-Canonical (B).
+                 Site oc is the center (C).
 """
-mutable struct MPS{T<:Number} <: AbstractTensorNetwork
+mutable struct MPS{T}
     tensors::Vector{Array{T, 3}}
     phys_dims::Vector{Int}
     length::Int
-    flipped::Bool
-
-    function MPS(length::Int, tensors::Vector{Array{T, 3}}, phys_dims::Vector{Int}) where T
-        new{T}(tensors, phys_dims, length, false)
+    orth_center::Int
+    
+    # Inner constructor for specific T
+    function MPS{T}(length::Int, tensors::Vector{Array{T, 3}}, phys_dims::Vector{Int}, orth_center::Int=1) where T
+        new{T}(tensors, phys_dims, length, orth_center)
     end
+end
+
+# Outer constructor to infer T
+function MPS(length::Int, tensors::Vector{Array{T, 3}}, phys_dims::Vector{Int}, orth_center::Int=1) where T
+    return MPS{T}(length, tensors, phys_dims, orth_center)
 end
 
 # --- Constructors ---
 
-"""
-    MPS(length::Int; 
-        tensors=nothing, 
-        physical_dimensions=nothing, 
-        state="zeros", 
-        basis_string=nothing)
-
-Initialize an MPS. 
-"""
 function MPS(length::Int; 
-             tensors::Union{Vector{Array{ComplexF64, 3}}, Nothing}=nothing,
-             physical_dimensions::Union{Vector{Int}, Int, Nothing}=nothing,
+             tensors::Union{Vector{Array{ComplexF64, 3}}, Nothing}=nothing, 
+             physical_dimensions::Union{Vector{Int}, Int, Nothing}=nothing, 
              state::String="zeros",
              pad::Union{Int, Nothing}=nothing,
              basis_string::Union{String, Nothing}=nothing)
 
-    # 1. Handle Physical Dimensions
-    phys_dims = if isnothing(physical_dimensions)
+    # 1. Physical Dims
+    p_dims = if isnothing(physical_dimensions)
         fill(2, length)
     elseif isa(physical_dimensions, Int)
         fill(physical_dimensions, length)
     else
         physical_dimensions
     end
-    @assert length == Base.length(phys_dims)
-
-    # 2. Handle Tensors
+    
+    T = ComplexF64
+    
+    # 2. Tensors
     if !isnothing(tensors)
         @assert Base.length(tensors) == length
-        # Assuming input tensors might need layout conversion if coming from external source?
-        # For now, assume provided tensors match the strict (Left, Phys, Right) layout if passed directly.
-        return MPS(length, tensors, phys_dims)
+        # Assume provided tensors are normalized/canonical if orth_center not specified? 
+        # We default to 1 and let validity checks happen later if needed.
+        return MPS(length, tensors, p_dims, 1)
     end
-
-    # 3. Initialize State
-    T = ComplexF64
-    generated_tensors = Vector{Array{T, 3}}(undef, length)
-
+    
+    new_tensors = Vector{Array{T, 3}}(undef, length)
+    
+    # 3. Initialization
     if state == "basis"
-        @assert !isnothing(basis_string) "basis_string must be provided for 'basis' state initialization."
-        return init_mps_from_basis(basis_string, phys_dims)
-    end
-
-    for i in 1:length
-        d = phys_dims[i]
-        vector = zeros(T, d)
+        @assert !isnothing(basis_string) "Must provide basis_string for state='basis'"
+        @assert Base.length(basis_string) == length
         
-        if state == "zeros"
-            vector[1] = 1.0
-        elseif state == "ones"
-            if d >= 2
-                vector[2] = 1.0
-            else
-                vector[1] = 1.0 # Fallback
-            end
-        elseif state == "x+"
-            vector[1] = 1.0 / sqrt(2)
-            vector[2] = 1.0 / sqrt(2)
-        elseif state == "x-"
-            vector[1] = 1.0 / sqrt(2)
-            vector[2] = -1.0 / sqrt(2)
-        elseif state == "y+"
-            vector[1] = 1.0 / sqrt(2)
-            vector[2] = 1.0im / sqrt(2)
-        elseif state == "y-"
-            vector[1] = 1.0 / sqrt(2)
-            vector[2] = -1.0im / sqrt(2)
-        elseif state == "Neel"
-            idx = (i % 2 != 0) ? 1 : 2 # 1-based indexing: Odd i -> bit 0, Even i -> bit 1
-            vector[idx] = 1.0
-        elseif state == "wall"
-            idx = (i <= length ÷ 2) ? 1 : 2
-            vector[idx] = 1.0
-        elseif state == "random"
-            vector = rand(T, d)
-            LinearAlgebra.normalize!(vector)
-        else
-            error("Invalid state string: $state")
+        for i in 1:length
+            d = p_dims[i]
+            idx = parse(Int, basis_string[i]) + 1 # 1-based
+            v = zeros(T, 1, d, 1)
+            v[1, idx, 1] = 1.0
+            new_tensors[i] = v
         end
-
-        # Layout: (Left=1, Phys=d, Right=1)
-        # Python: (d, 1, 1) -> Transpose(2, 0, 1) -> (1, d, 1)
-        # We create (1, d, 1) directly.
-        tensor = reshape(vector, (1, d, 1))
-        generated_tensors[i] = tensor
+        
+    elseif state == "random"
+        # Random initialization
+        for i in 1:length
+            d = p_dims[i]
+            chi_l = (i == 1) ? 1 : 4 # Arbitrary small bond dim start
+            chi_r = (i == length) ? 1 : 4
+            new_tensors[i] = randn(T, chi_l, d, chi_r)
+        end
+        mps = MPS(length, new_tensors, p_dims, 1)
+        normalize!(mps) # Puts in canonical form
+        return mps
+        
+    else
+        # Product States
+        for i in 1:length
+            d = p_dims[i]
+            v = zeros(T, d)
+            if state == "zeros"
+                v[1] = 1.0
+            elseif state == "ones"
+                if d > 1; v[2] = 1.0; else; v[1] = 1.0; end
+            elseif state == "x+"
+                v[1] = 1/sqrt(2); v[2] = 1/sqrt(2)
+            elseif state == "x-"
+                v[1] = 1/sqrt(2); v[2] = -1/sqrt(2)
+            elseif state == "y+"
+                v[1] = 1/sqrt(2); v[2] = im/sqrt(2)
+            elseif state == "y-"
+                v[1] = 1/sqrt(2); v[2] = -im/sqrt(2)
+            elseif state == "Neel"
+                idx = (i % 2 != 0) ? 1 : 2
+                v[idx] = 1.0
+            elseif state == "wall"
+                idx = (i <= length ÷ 2) ? 1 : 2
+                v[idx] = 1.0
+            else
+                error("Unknown state: $state")
+            end
+            
+            # Reshape to (1, d, 1)
+            new_tensors[i] = reshape(v, 1, d, 1)
+        end
     end
-
-    mps = MPS(length, generated_tensors, phys_dims)
-
-    if state == "random"
-        normalize!(mps)
-    end
-
+    
+    mps = MPS(length, new_tensors, p_dims, 1)
+    
     if !isnothing(pad)
         pad_bond_dimension!(mps, pad)
     end
-
+    
     return mps
 end
 
-function init_mps_from_basis(basis_string::String, phys_dims::Vector{Int})
-    length = Base.length(basis_string)
-    @assert length == Base.length(phys_dims)
-    
-    tensors = Vector{Array{ComplexF64, 3}}(undef, length)
-    
-    for (i, char) in enumerate(basis_string)
-        idx = parse(Int, char) + 1 # 1-based indexing
-        d = phys_dims[i]
-        
-        # Layout: (Left=1, Phys=d, Right=1)
-        tensor = zeros(ComplexF64, 1, d, 1)
-        tensor[1, idx, 1] = 1.0
-        tensors[i] = tensor
+# --- Core Functionality ---
+
+"""
+    check_if_valid_mps(mps)
+
+Verify consistency of bond dimensions.
+"""
+function check_if_valid_mps(mps::MPS)
+    for i in 1:(mps.length - 1)
+        # T[i]: (L, d, R)
+        # T[i+1]: (L', d', R')
+        # R must equal L'
+        r_bond = size(mps.tensors[i], 3)
+        l_next = size(mps.tensors[i+1], 1)
+        @assert r_bond == l_next "Bond dimension mismatch at site $i ($r_bond) -> $(i+1) ($l_next)"
     end
-    
-    return MPS(length, tensors, phys_dims)
+    return true
 end
 
-# --- Helper Methods ---
-
-function Base.show(io::IO, mps::MPS)
-    print(io, "MPS(length=$(mps.length), max_bond=$(write_max_bond_dim(mps)))")
-end
-
+"""
+    write_max_bond_dim(mps)
+"""
 function write_max_bond_dim(mps::MPS)
-    global_max = 0
-    for tensor in mps.tensors
-        # (Left, Phys, Right). Bond dims are 1 and 3.
-        local_max = max(size(tensor, 1), size(tensor, 3))
-        global_max = max(global_max, local_max)
+    max_chi = 0
+    for T in mps.tensors
+        max_chi = max(max_chi, size(T, 1), size(T, 3))
     end
-    return global_max
+    return max_chi
 end
 
 """
-    flip_network!(mps::MPS)
+    shift_orthogonality_center!(mps, new_center)
 
-Logically flip the network (transpose tensors) to allow Right-to-Left operations.
-Layout change: (L, P, R) -> (R, P, L).
+Shift the orthogonality center to `new_center` using QR (right) or LQ (left).
+No flipping. In-place updates.
 """
-function flip_network!(mps::MPS)
-    new_tensors = Vector{Array{ComplexF64, 3}}(undef, mps.length)
-    for i in 1:mps.length
-        # Permute (Left, Phys, Right) -> (Right, Phys, Left)
-        new_tensors[i] = permutedims(mps.tensors[i], (3, 2, 1))
-    end
-    reverse!(new_tensors)
-    mps.tensors = new_tensors
-    mps.flipped = !mps.flipped
-end
-
-# --- Canonicalization & Linear Algebra ---
-
-"""
-    shift_orthogonality_center_right!(mps::MPS, current_center::Int)
-
-Perform QR/SVD to shift orthogonality center from `current_center` to `current_center + 1`.
-Optimized to avoid full deepcopies.
-"""
-function shift_orthogonality_center_right!(mps::MPS, current_center::Int; decomposition::String="QR", cutoff::Float64=1e-15)
-    A = mps.tensors[current_center]
-    l, p, r = size(A)
-    
-    # Reshape for decomposition: Combine (Left, Phys) into Row
-    # Matrix A_mat: (l*p) x r
-    A_mat = reshape(A, l * p, r)
-    
-    if decomposition == "QR" || current_center == mps.length # QR is standard for shifting
-        # QR Decomposition
-        Q_fact = qr(A_mat)
-        Q = Matrix(Q_fact.Q)
-        R = Matrix(Q_fact.R)
-        
-        # Q has shape (l*p, new_bond). R has shape (new_bond, r).
-        new_bond = size(Q, 2)
-        
-        # Reshape Q back to Tensor (Left, Phys, Right=new_bond)
-        mps.tensors[current_center] = reshape(Q, l, p, new_bond)
-        
-        # Contract R into next site if exists
-        if current_center < mps.length
-            B = mps.tensors[current_center + 1]
-            # B layout: (Left=r, Phys, Right)
-            # R layout: (new_bond, r)
-            # We need C[new_bond, p, next_r] := R[new_bond, k] * B[k, p, next_r]
-            
-            # Using @tensor
-            @tensor B_new[a, b, c] := R[a, k] * B[k, b, c]
-            mps.tensors[current_center + 1] = B_new
-        end
-        
-    elseif decomposition == "SVD"
-        # Only used if we need truncation during shift, but usually shift preserves dim
-        # For shift, QR is preferred. Implementing SVD for completeness.
-        F = svd(A_mat)
-        U, S, Vt = F.U, F.S, F.Vt
-        
-        # Truncate?
-        # (Simple shift usually keeps all)
-        
-        # U: (l*p, bond)
-        # S*Vt: (bond, r)
-        
-        new_bond = length(S)
-        mps.tensors[current_center] = reshape(U, l, p, new_bond)
-        
-        if current_center < mps.length
-            B = mps.tensors[current_center + 1]
-            rem = Diagonal(S) * Vt
-            @tensor B_new[a, b, c] := rem[a, k] * B[k, b, c]
-            mps.tensors[current_center + 1] = B_new
-        end
-    end
-end
-
-"""
-    shift_orthogonality_center_left!(mps::MPS, current_center::Int; decomposition::String="QR", cutoff::Float64=1e-15)
-
-Perform LQ/SVD to shift orthogonality center from `current_center` to `current_center - 1`.
-Native implementation avoiding network flipping for maximum efficiency.
-"""
-function shift_orthogonality_center_left!(mps::MPS, current_center::Int; decomposition::String="QR", cutoff::Float64=1e-15)
-    # Shift from i to i-1
-    # Current Tensor B at i: (L, P, R)
-    # Goal: Decompose B -> L * Q, where Q is Right Canonical (rows orthonormal)
-    # Matrix shape: (L) x (P*R)
-    
-    B = mps.tensors[current_center]
-    l, p, r = size(B)
-    B_mat = reshape(B, l, p * r)
-    
-    if decomposition == "QR" || current_center == 1
-        # LQ Decomposition via QR of transpose
-        # B = L * Q  => B' = Q' * L' = Q_tilde * R_tilde
-        # We perform QR on B' (dims (p*r) x l)
-        # Q_fact = qr(B_mat')
-        
-        # Note: Julia's LQ is available? 
-        # LinearAlgebra.lq exists.
-        F = lq(B_mat)
-        L_factor = Matrix(F.L)
-        Q_ortho = Matrix(F.Q)
-        
-        # Q_ortho shape: (l, p*r) - effectively new bond dim might change if rank deficient
-        new_bond = size(Q_ortho, 1)
-        
-        # Update current site to Right Canonical Form
-        mps.tensors[current_center] = reshape(Q_ortho, new_bond, p, r)
-        
-        # Absorb L_factor into Left Neighbor (i-1)
-        if current_center > 1
-            A_left = mps.tensors[current_center - 1] # (L_prev, P_prev, R_prev=l)
-            # Contract: A_new = A_left * L_factor
-            # A_left: (l_prev, p_prev, k)
-            # L_factor: (k, new_bond) [Since L matches R_prev, and new_bond matches Left of B]
-            # Wait, B was (l, pr). L_factor is (l, new_bond)? No, LQ -> (m,n) = (m,k)*(k,n). 
-            # B (l, pr) = L (l, l) * Q (l, pr) usually.
-            # So L_factor is (l, l).
-            
-            @tensor A_new[l_prev, p_prev, new_r] := A_left[l_prev, p_prev, k] * L_factor[k, new_r]
-            mps.tensors[current_center - 1] = A_new
-        end
-        
-    elseif decomposition == "SVD"
-        # SVD: B = U S V'
-        # Right Canonical: V' is the tensor at site i
-        # Left factor: U S
-        F = svd(B_mat)
-        U, S, Vt = F.U, F.S, F.Vt
-        
-        # Truncation logic could go here
-        new_bond = length(S)
-        
-        # Update site i
-        mps.tensors[current_center] = reshape(Vt, new_bond, p, r)
-        
-        # Update site i-1
-        if current_center > 1
-            A_left = mps.tensors[current_center - 1]
-            US = U * Diagonal(S)
-            @tensor A_new[l_prev, p_prev, new_r] := A_left[l_prev, p_prev, k] * US[k, new_r]
-            mps.tensors[current_center - 1] = A_new
-        end
-    end
-end
-
-"""
-    truncate!(mps::MPS, threshold=1e-12)
-
-In-place truncation using SVD.
-"""
-function truncate!(mps::MPS; threshold::Float64=1e-12, max_bond_dim::Union{Int, Nothing}=nothing)
-    # Assume currently in canonical form or start from center
-    # Simplified: Sweep Right then Left (or just use the current center)
-    
-    if mps.length == 1
+function shift_orthogonality_center!(mps::MPS{T}, new_center::Int) where T
+    oc = mps.orth_center
+    if oc == new_center
         return
     end
     
-    # We need to find the center. For simplicity, assume we start at 1 and sweep to end, then back.
-    # Or just implement the "Two-Site SVD" sweep.
-    
-    # Forward Sweep
-    for i in 1:(mps.length - 1)
-        A = mps.tensors[i]
-        B = mps.tensors[i+1]
-        A_new, B_new = two_site_svd(A, B, threshold; max_bond_dim=max_bond_dim)
-        mps.tensors[i] = A_new
-        mps.tensors[i+1] = B_new
+    if new_center > oc
+        # Move Right: oc -> oc+1 -> ... -> new_center
+        for i in oc:(new_center - 1)
+            # Site i is currently center. Make it Left Canonical (A).
+            # T[i]: (L, d, R)
+            A = mps.tensors[i]
+            L, d, R = size(A)
+            
+            # Reshape for QR: (L*d, R)
+            Mat = reshape(A, L*d, R)
+            
+            # QR
+            F = qr(Mat) # Thin QR by default
+            Q_thin = Matrix(F.Q)
+            R_thin = Matrix(F.R)
+            
+            # Dimensions: Q (L*d, r_new), R (r_new, R)
+            r_new = size(R_thin, 1)
+            
+            # Update current site to Q (reshaped)
+            mps.tensors[i] = reshape(Q_thin, L, d, r_new)
+            
+            # Absorb R into next site (i+1)
+            # Next: (R, d_next, R_next)
+            Next = mps.tensors[i+1]
+            d_next = size(Next, 2)
+            r_next = size(Next, 3)
+            
+            # Optimization: avoid full reshape if not needed, but reshape is cheap
+            Next_mat = reshape(Next, R, d_next * r_next)
+            
+            # Mul: (r_new, R) * (R, dim_rest) -> (r_new, dim_rest)
+            # In-place? R_thin is small usually. Next_mat can be large.
+            # New_Next = R_thin * Next_mat
+            New_Next = similar(Next_mat, r_new, d_next * r_next)
+            mul!(New_Next, R_thin, Next_mat)
+            
+            mps.tensors[i+1] = reshape(New_Next, r_new, d_next, r_next)
+        end
+    else
+        # Move Left: oc -> oc-1 -> ... -> new_center
+        for i in range(oc, stop=new_center+1, step=-1)
+            # Site i is Center. Make it Right Canonical (B).
+            # T[i]: (L, d, R)
+            A = mps.tensors[i]
+            L, d, R = size(A)
+            
+            # Reshape for LQ: (L, d*R)
+            Mat = reshape(A, L, d*R)
+            
+            # LQ
+            F = lq(Mat)
+            L_thin = Matrix(F.L)
+            Q_thin = Matrix(F.Q)
+            
+            # Dimensions: L_thin (L, r_new), Q_thin (r_new, d*R)
+            r_new = size(L_thin, 2)
+            
+            # Update current site to Q (Right Canonical)
+            mps.tensors[i] = reshape(Q_thin, r_new, d, R)
+            
+            # Absorb L into prev site (i-1)
+            # Prev: (L_prev, d_prev, L)
+            Prev = mps.tensors[i-1]
+            l_prev = size(Prev, 1)
+            d_prev = size(Prev, 2)
+            
+            Prev_mat = reshape(Prev, l_prev * d_prev, L)
+            
+            # Mul: (dim_prev, L) * (L, r_new) -> (dim_prev, r_new)
+            New_Prev = similar(Prev_mat, l_prev * d_prev, r_new)
+            mul!(New_Prev, Prev_mat, L_thin)
+            
+            mps.tensors[i-1] = reshape(New_Prev, l_prev, d_prev, r_new)
+        end
     end
     
-    # Backward Sweep
-    flip_network!(mps)
-    for i in 1:(mps.length - 1)
-        A = mps.tensors[i]
-        B = mps.tensors[i+1]
-        A_new, B_new = two_site_svd(A, B, threshold; max_bond_dim=max_bond_dim)
-        mps.tensors[i] = A_new
-        mps.tensors[i+1] = B_new
-    end
-    flip_network!(mps)
-    
-    # Re-normalize to ensure unit norm state
-    normalize!(mps)
+    mps.orth_center = new_center
 end
-
-
-
-function normalize!(mps::MPS; form::String="B")
-    # Normalize to Right Canonical (B-form)
-    # Sweep Right-to-Left (L -> 1)
-    # Shift orthogonality center from L down to 1
-    
-    # We start by assuming the center is at L (or we move it there virtually?)
-    # Actually, to make it Right Canonical, we need all sites 2..L to be B-tensors.
-    # This is achieved by shifting the orthogonality center all the way to site 1.
-    
-    # Wait, if we start with arbitrary state, we first sweep Left->Right to make it Left Canonical (A-form)?
-    # Or we can just sweep Right->Left directly using LQ.
-    
-    # Algorithm for full B-form normalization:
-    # 1. Start at L. Perform LQ. Absorb L into L-1.
-    # 2. Repeat until site 2.
-    # 3. At site 1, normalize the vector.
-    
-    for i in mps.length:-1:2
-        shift_orthogonality_center_left!(mps, i)
-    end
-    
-    # Center is now at site 1.
-    # Explicitly normalize the state (divide by norm)
-    center_tensor = mps.tensors[1]
-    norm_val = norm(center_tensor)
-    if norm_val > 1e-15
-        mps.tensors[1] ./= norm_val
-    end
-end
-
-
-# --- Contractions ---
 
 """
-    scalar_product(a::MPS, b::MPS)
+    normalize!(mps; form="B")
+
+Brings the MPS to right-canonical form (orth_center = 1) and normalizes the state norm to 1.
+`form` argument is ignored but kept for compatibility; strictly enforces right-canonical (B) form which is equivalent to orth_center=1.
+"""
+function normalize!(mps::MPS{T}; form::String="B") where T
+    # Sweep L -> 2. Site 1 absorbs everything.
+    # This ensures sites 2..L are Right Canonical (B).
+    
+    for i in mps.length:-1:2
+        # Site i: (L, d, R). Make B.
+        A = mps.tensors[i]
+        L, d, R = size(A)
+        Mat = reshape(A, L, d*R)
+        
+        F = lq(Mat)
+        L_mat = Matrix(F.L)
+        Q_mat = Matrix(F.Q)
+        
+        r_new = size(L_mat, 2)
+        mps.tensors[i] = reshape(Q_mat, r_new, d, R)
+        
+        # Update i-1
+        Prev = mps.tensors[i-1]
+        l_prev, d_prev, _ = size(Prev)
+        Prev_mat = reshape(Prev, l_prev * d_prev, L)
+        
+        New_Prev = similar(Prev_mat, l_prev * d_prev, r_new)
+        mul!(New_Prev, Prev_mat, L_mat)
+        
+        mps.tensors[i-1] = reshape(New_Prev, l_prev, d_prev, r_new)
+    end
+    
+    # Now orthogonality center is at 1.
+    # Normalize site 1
+    A1 = mps.tensors[1]
+    nrm = norm(A1)
+    if nrm > 1e-13
+        mps.tensors[1] .*= (1.0 / nrm)
+    end
+    
+    mps.orth_center = 1
+end
+
+"""
+    truncate!(mps; threshold, max_bond_dim)
+
+Single sweep truncation (1->L-1). Updates MPS in place. 
+Returns truncation error.
+Center moves 1 -> L.
+"""
+function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{Int, Nothing}=nothing) where T
+    # Ensure we start at 1
+    shift_orthogonality_center!(mps, 1)
+    
+    total_trunc_err = 0.0
+    
+    for i in 1:(mps.length - 1)
+        # Contract A[i] (Center) and A[i+1] (Right Canonical)
+        A = mps.tensors[i]   # (L, d1, k)
+        B = mps.tensors[i+1] # (k, d2, R)
+        
+        l, d1, k = size(A)
+        _, d2, r = size(B)
+        
+        # Merge: (L, d1, d2, R)
+        # Reshape A: (L*d1, k)
+        # Reshape B: (k, d2*R)
+        Amat = reshape(A, l*d1, k)
+        Bmat = reshape(B, k, d2*r)
+        
+        # Theta = Amat * Bmat
+        Theta = similar(Amat, l*d1, d2*r)
+        mul!(Theta, Amat, Bmat)
+        
+        # SVD
+        F = svd(Theta)
+        U, S, Vt = F.U, F.S, F.Vt
+        
+        # Truncate
+        norm_sq = dot(S, S)
+        keep_rank = length(S)
+        
+        # 1. Threshold
+        current_sum = 0.0
+        for k in length(S):-1:1
+            w = S[k]^2
+            current_sum += w
+            if current_sum > threshold * norm_sq
+                keep_rank = k
+                break
+            end
+            if k == 1
+                keep_rank = 1 
+            end
+        end
+        
+        # 2. Max Bond
+        if !isnothing(max_bond_dim)
+            keep_rank = min(keep_rank, max_bond_dim)
+        end
+        
+        # Update Error
+        trunc_S = S[(keep_rank+1):end]
+        total_trunc_err += sum(trunc_S.^2)
+        
+        # Resize
+        U_trunc = U[:, 1:keep_rank]
+        S_trunc = S[1:keep_rank]
+        Vt_trunc = Vt[1:keep_rank, :]
+        
+        # Update A[i]: Left Canonical U
+        mps.tensors[i] = reshape(U_trunc, l, d1, keep_rank)
+        
+        # Update A[i+1]: Center S*V
+        SV = Diagonal(S_trunc) * Vt_trunc
+        mps.tensors[i+1] = reshape(SV, keep_rank, d2, r)
+    end
+    
+    mps.orth_center = mps.length
+    normalize!(mps)
+    return total_trunc_err
+end
+
+"""
+    pad_bond_dimension!(mps, target_dim)
+
+Pad bonds in-place.
+"""
+function pad_bond_dimension!(mps::MPS{T}, target_dim::Int) where T
+    # Ensure canonical at 1? Or just pad?
+    # Usually padding is done on normalized state.
+    normalize!(mps) 
+    
+    for i in 1:(mps.length - 1)
+        A = mps.tensors[i] # (L, d, R)
+        B = mps.tensors[i+1] # (R, d, R_next)
+        
+        chi_current = size(A, 3)
+        if chi_current >= target_dim
+            continue
+        end
+        
+        new_chi = target_dim
+        
+        # A: (L, d, new_chi)
+        L, d, R = size(A)
+        new_A = zeros(T, L, d, new_chi)
+        new_A[:, :, 1:R] .= A
+        mps.tensors[i] = new_A
+        
+        # B: (new_chi, d, R_next)
+        R_b, d_b, R_next = size(B)
+        new_B = zeros(T, new_chi, d_b, R_next)
+        new_B[1:R_b, :, :] .= B
+        mps.tensors[i+1] = new_B
+    end
+end
+
+# --- Measurements ---
+
+"""
+    check_canonical_form(mps)
+
+Returns info about canonical form.
+"""
+function check_canonical_form(mps::MPS)
+    return [mps.orth_center]
+end
+
+"""
+    norm(mps)
+"""
+function LinearAlgebra.norm(mps::MPS)
+    c = mps.tensors[mps.orth_center]
+    return norm(c)
+end
+
+"""
+    scalar_product(a, b)
 
 Compute <a|b>.
 """
-function scalar_product(a::MPS, b::MPS)
-    @assert a.length == b.length
+function scalar_product(psi::MPS{T}, phi::MPS{T}) where T
+    @assert psi.length == phi.length
     
-    # Zipper contraction
-    # Initialize Transfer Matrix E (1x1)
-    # We assume boundary conditions are 1.
-    E = ones(ComplexF64, 1, 1) 
+    # E[a_bond, b_bond]
+    E = ones(T, 1, 1)
     
-    for i in 1:a.length
-        A_ten = a.tensors[i] # (L, P, R)
-        B_ten = b.tensors[i] # (L, P, R)
+    for i in 1:psi.length
+        A = psi.tensors[i] # (La, d, Ra)
+        B = phi.tensors[i] # (Lb, d, Rb)
         
-        # Contract: E[l_a, l_b] * A[l_a, p, r_a] * conj(B[l_b, p, r_b])
-        # Output E_next[r_a, r_b]
-        @tensor E_new[r_a, r_b] := E[l_a, l_b] * A_ten[l_a, p, r_a] * conj(B_ten[l_b, p, r_b])
-        E = E_new
+        La_prev, d, Ra = size(A)
+        Lb_prev, _, Rb = size(B)
+        
+        # Reshape A: (La_prev, d*Ra)
+        A_mat = reshape(A, La_prev, d*Ra)
+        
+        # T1 = E^T * A_mat -> (Lb_prev, d*Ra)
+        # E is (La_prev, Lb_prev).
+        # We want sum_la E[la, lb] * A[la, ...] = sum_la (E^T)[lb, la] * A[la, ...]
+        
+        T1 = transpose(E) * A_mat 
+        
+        # Reshape T1: (Lb_prev, d, Ra) to match B
+        # T1 is (Lb_prev, d*Ra). 
+        # We need to contract with B: (Lb_prev, d, Rb).
+        # Reshape T1 to (Lb_prev*d, Ra).
+        # Reshape B to (Lb_prev*d, Rb).
+        
+        # BUT WAIT! Column major:
+        # T1 (Lb, d*Ra). Layout: lb changes, then (p + d*r).
+        # We want to merge (lb, p).
+        # Does T1 have (lb, p) contiguous?
+        # A_mat (La, d*Ra).
+        # A (La, d, Ra).
+        # A_mat reshape merges d and Ra.
+        # So A_mat layout: la changes, then p, then r.
+        # T1 layout: lb changes, then p, then r.
+        
+        # B (Lb, d, Rb).
+        # B_mat `reshape(B, Lb*d, Rb)`.
+        # B layout: lb changes, then p, then r.
+        # B_mat layout: (lb, p) changes, then r.
+        
+        # T1 (Lb, d*Ra).
+        # Reshape T1 to (Lb*d, Ra).
+        # T1 layout: lb changes, then p, then r.
+        # T1_reshaped layout: (lb, p) changes, then r.
+        # This matches!
+        
+        T1_reshaped = reshape(T1, Lb_prev * d, Ra)
+        B_mat = reshape(B, Lb_prev * d, Rb)
+        
+        # E_next = T1_reshaped^T * conj(B_mat) -> (Ra, Rb)
+        E = transpose(T1_reshaped) * conj(B_mat)
     end
     
     return E[1, 1]
 end
 
 """
-    local_expect(mps::MPS, operator::AbstractMatrix, site::Int)
-
-Compute <ψ|O_i|ψ>. Uses temporary tensor contraction to avoid deepcopy.
+    expect(mps, observable)
 """
-function local_expect(mps::MPS, operator::AbstractMatrix{T}, site::Int) where T
-    # 1. Fetch tensors
-    A = mps.tensors[site] # (L, P, R)
+function expect(mps::MPS, obs)
+    sites = obs.sites
+    gate = obs.gate.matrix
     
-    # 2. Apply gate locally: O[p_new, p_old] * A[l, p_old, r]
-    # Note: Matrix usually (row, col) -> (p_new, p_old)
-    @tensor A_prime[l, p_new, r] := operator[p_new, p_old] * A[l, p_old, r]
-    
-    # 3. Calculate overlap <ψ|ψ'>
-    # We can reuse the scalar product logic but with one modified tensor.
-    # Optimization: If MPS is in canonical form around `site`, we only need to contract locally!
-    # But general case: Contract full zipper.
-    
-    # Zipper from Left
-    E_left = ones(ComplexF64, 1, 1)
-    for i in 1:(site-1)
-        T_tens = mps.tensors[i]
-        @tensor E_next[r1, r2] := E_left[l1, l2] * T_tens[l1, p, r1] * conj(T_tens[l2, p, r2])
-        E_left = E_next
+    if isa(sites, Int) || length(sites) == 1
+        s = (isa(sites, Int)) ? sites : sites[1]
+        return local_expect(mps, gate, s)
+    elseif length(sites) == 2
+        s1, s2 = sort(sites)
+        return local_expect_two_site(mps, gate, s1, s2)
+    else
+        error("Only 1 or 2 site observables supported")
     end
-    
-    # Zipper from Right
-    E_right = ones(ComplexF64, 1, 1)
-    for i in mps.length:-1:(site+1)
-        T_tens = mps.tensors[i]
-        @tensor E_next[l1, l2] := T_tens[l1, p, r1] * conj(T_tens[l2, p, r2]) * E_right[r1, r2]
-        E_right = E_next
-    end
-    
-    # Combine at site
-    # <L| <A| O |A> |R>
-    # E_left[l_a, l_a'] * A'[l_a, p, r_a] * conj(A[l_a', p, r_a']) * E_right[r_a, r_a']
-    
-    A_orig = mps.tensors[site]
-    @tensor val[] := E_left[l1, l2] * A_prime[l1, p, r1] * conj(A_orig[l2, p, r2]) * E_right[r1, r2]
-    
-    return val[]
 end
 
 """
-    evaluate_all_local_expectations(mps::MPS, operators::Vector{<:AbstractMatrix})
-
-Efficiently compute expectation values for a list of local operators (one per site).
-Complexity: O(L) instead of O(L^2).
+    local_expect(mps, op, site)
 """
-function evaluate_all_local_expectations(mps::MPS, operators::Vector{<:AbstractMatrix})
+function local_expect(mps::MPS{T}, op::AbstractMatrix, site::Int) where T
+    shift_orthogonality_center!(mps, site)
+    
+    A = mps.tensors[site] # (L, d, R)
+    L, d, R = size(A)
+    
+    # Permute A to (d, L*R)
+    # A is (L, d, R). 
+    # Permutedims (2, 1, 3) -> (d, L, R). Reshape to (d, L*R).
+    A_perm = reshape(permutedims(A, (2, 1, 3)), d, L*R)
+    
+    # OpA = Op * A_perm -> (d, L*R)
+    OpA = op * A_perm
+    
+    # Overlap
+    return dot(A_perm, OpA)
+end
+
+function local_expect_two_site(mps::MPS{T}, op::AbstractMatrix, s1::Int, s2::Int) where T
+    @assert s2 == s1 + 1 "Only nearest neighbor supported efficiently"
+    
+    shift_orthogonality_center!(mps, s1)
+    
+    A = mps.tensors[s1] # (L, d, k)
+    B = mps.tensors[s2] # (k, d, R)
+    
+    L, d, k = size(A)
+    _, _, R = size(B)
+    
+    # Form Theta (L*d, d*R) -> (L, d, d, R)
+    Amat = reshape(A, L*d, k)
+    Bmat = reshape(B, k, d*R)
+    Theta = Amat * Bmat
+    Theta = reshape(Theta, L, d, d, R)
+    
+    # Op is 4x4 (d1, d2, d1', d2')
+    # Permute Theta to (d1, d2, L, R) -> (d*d, L*R)
+    Theta_perm = reshape(permutedims(Theta, (2, 3, 1, 4)), d*d, L*R)
+    
+    # Apply Op
+    OpTheta = op * Theta_perm
+    
+    return dot(Theta_perm, OpTheta)
+end
+
+"""
+    evaluate_all_local_expectations(mps, operators)
+
+Efficiently compute expectation values of a list of local operators (one per site).
+"""
+function evaluate_all_local_expectations(mps::MPS{T}, operators::Vector{<:AbstractMatrix}) where T
     @assert length(operators) == mps.length
+    results = zeros(ComplexF64, mps.length)
     
-    T_val = eltype(mps.tensors[1])
-    
-    # 1. Pre-calculate Right Environments
-    # E_right[i] is the environment block contracted from site i to L.
-    # We need E_right[i+1] for site i.
-    E_right_storage = Vector{Array{T_val, 2}}(undef, mps.length + 1)
-    E_right_storage[end] = ones(T_val, 1, 1)
-    
-    for i in mps.length:-1:2
-        T = mps.tensors[i]
-        prev_E = E_right_storage[i+1]
-        # Contract: T[l,p,r] * conj(T[l',p,r']) * prev_E[r,r']
-        @tensor next_E[l1, l2] := T[l1, p, r1] * conj(T[l2, p, r2]) * prev_E[r1, r2]
-        E_right_storage[i] = next_E
-    end
-    
-    # 2. Sweep Left-to-Right
-    results = Vector{ComplexF64}(undef, mps.length)
-    E_left = ones(T_val, 1, 1)
+    # We can sweep Center 1->L and measure as we go.
+    shift_orthogonality_center!(mps, 1)
     
     for i in 1:mps.length
-        T = mps.tensors[i]
-        Op = operators[i]
-        R_env = E_right_storage[i+1]
-        
-        # Apply Operator: Op[p_new, p_old] * T[l, p_old, r]
-        @tensor T_op[l, p, r] := Op[p, p_old] * T[l, p_old, r]
-        
-        # Contract Center: E_left * T_op * conj(T) * E_right
-        @tensor val[] := E_left[l1, l2] * T_op[l1, p, r1] * conj(T[l2, p, r2]) * R_env[r1, r2]
-        results[i] = val[]
-        
-        # Update E_left
-        if i < mps.length
-            @tensor E_next[r1, r2] := E_left[l1, l2] * T[l1, p, r1] * conj(T[l2, p, r2])
-            E_left = E_next
+        if i > 1
+            # Shift center i-1 -> i
+            shift_orthogonality_center!(mps, i)
         end
+        
+        # Measure at i
+        results[i] = local_expect(mps, operators[i], i)
     end
     
     return results
 end
 
 """
-    expect(mps::MPS, observable)
+    measure_single_shot(mps)
 
-Generic expectation value. Assumes observable has `.gate.matrix` and `.sites`.
+Return bitstring integer.
 """
-function expect(mps::MPS, observable)
-    # Duck-typing for observable
-    # Assuming observable has field `gate` with `matrix` and field `sites`.
-    # In a real package, use proper types.
+function single_shot_measure(mps::MPS{T}) where T
+    psi = deepcopy(mps)
+    shift_orthogonality_center!(psi, 1)
     
-    gate_matrix = observable.gate.matrix
-    sites = observable.sites
+    bits = 0
     
-    if size(gate_matrix, 1) == 2 # Single site (assuming qubit)
-        site_idx = (sites isa Vector) ? sites[1] : sites
-        return real(local_expect(mps, gate_matrix, site_idx))
-    elseif size(gate_matrix, 1) == 4 # Two site
-        s = (sites isa Vector) ? sites : [sites]
-        @assert length(s) == 2 "Two-site operator requires 2 sites"
-        return real(local_expect_two_site(mps, gate_matrix, s[1], s[2]))
-    else
-        error("Unsupported gate dimension")
+    for i in 1:psi.length
+        A = psi.tensors[i] # (L, d, R)
+        L, d, R = size(A)
+        
+        probs = zeros(Float64, d)
+        for p in 1:d
+            # Norm of slice A[:, p, :]
+            # A is (L, d, R). A[:, p, :] is (L, R).
+            # If L=1, it's just vector norm.
+            probs[p] = real(sum(abs2, @view A[:, p, :]))
+        end
+        
+        # Sample
+        r = rand()
+        accum = 0.0
+        chosen = d
+        for k in 1:d
+            accum += probs[k]
+            if r <= accum
+                chosen = k
+                break
+            end
+        end
+        
+        bits += (chosen - 1) << (i - 1)
+        
+        if i < psi.length
+            # Project A on chosen: A_proj (L, R)
+            A_proj = A[:, chosen, :] 
+            
+            nrm = sqrt(probs[chosen])
+            if nrm > 1e-12
+                A_proj .*= (1.0 / nrm)
+            end
+            
+            # Contract with next
+            Next = psi.tensors[i+1] # (R, d_next, R_next)
+            _, dn, rn = size(Next)
+            Next_mat = reshape(Next, R, dn*rn)
+            
+            New_Next = A_proj * Next_mat
+            psi.tensors[i+1] = reshape(New_Next, L, dn, rn)
+            
+            psi.orth_center = i+1
+        end
     end
+    
+    return bits
 end
 
+# Alias for backward compatibility
+const measure_single_shot = single_shot_measure
 
-# --- Measurements ---
-
-"""
-    measure_shots(mps::MPS, shots::Int)
-
-Perform `shots` parallel measurements. Returns a Dict of outcome -> count.
-"""
 function measure_shots(mps::MPS, shots::Int)
-    # Thread-safe collection
-    results = Vector{Int}(undef, shots)
-    
-    Threads.@threads for i in 1:shots
-        results[i] = single_shot_measure(mps)
-    end
-    
-    # Aggregate
     counts = Dict{Int, Int}()
-    for r in results
-        counts[r] = get(counts, r, 0) + 1
+    for _ in 1:shots
+        b = single_shot_measure(mps)
+        counts[b] = get(counts, b, 0) + 1
     end
     return counts
 end
 
-"""
-    single_shot_measure(mps::MPS)
-
-Perform one projective measurement pass without modifying the original MPS.
-Strategy: Carry the collapsed state forward as a temporary tensor.
-"""
-function single_shot_measure(mps::MPS)
-    bitstring = 0
-    
-    # Start with the first tensor
-    # We maintain a "current_state" which effectively represents the contraction 
-    # of the projected part into the next site.
-    
-    # Actually, we iterate sites.
-    # At site i, we have the rest of the chain to the right.
-    # But we need to know the "effective" input from the left.
-    # Wait, the standard algorithm:
-    # 1. Compute local RDM rho_i. (Requires contracting the whole rest of the network? No, only if canonical).
-    #    Assumption: MPS should be in canonical form (orthogonality center at current site) for efficient sampling.
-    #    But we can't re-canonicalize for every shot in parallel!
-    #
-    #    Correct approach for arbitrary MPS (expensive): Contract full environment.
-    #    Correct approach for Canonical MPS (cheap): Tensors satisfy left/right orthogonality.
-    #
-    #    If we assume the MPS is NOT re-canonicalized for every sample (impossible in parallel),
-    #    we must treat it carefully.
-    #    However, the Python code does `copy.deepcopy(self)` then iterates. 
-    #    It calculates `reduced_density_matrix` using ONLY the current tensor:
-    #    `oe.contract("abc, dbc->ad", tensor, np.conj(tensor))`
-    #    This implies the Python code ASSUMES the MPS is in canonical form (Orthogonality Center at site 0, sweeping right)?
-    #    OR it assumes Left-Canonical form everywhere?
-    #    
-    #    If `tensor` is A (Left Orthogonal), then A^dag A = I. Contraction yields identity.
-    #    If `tensor` is C (Center), contraction yields Rho.
-    #    
-    #    The Python code propagates the projection:
-    #    `temp_state.tensors[site + 1] = 1/norm * contract(projected, next_tensor)`
-    #
-    #    This propagation effectively "pushes" the center to the right!
-    #    So, yes, this algorithm effectively moves the orthogonality center as it measures.
-    #
-    #    So my "Carry Tensor" strategy is exactly correct.
-    
-    # Initial "incoming" Left Block is trivial (1x1 Identity)
-    # But we actually modify the tensors themselves in the Python code.
-    # In Julia, we will carry the MODIFIED tensor `T_curr` into the next step.
-    
-    # We need to handle the FIRST tensor specifically, then loop.
-    # But wait, the tensor at site `i` depends on the projection at `i-1`.
-    
-    # Let's use a variable `current_tensor` that holds the tensor at `site`.
-    # For `site=1`, it is `mps.tensors[1]`.
-    # For `site>1`, it is `contract(proj_prev, mps.tensors[site])`.
-    
-    current_tensor = mps.tensors[1] # Copy? No, array reference. Be careful not to mutate it.
-    # Actually, we will be contracting it, so we get a NEW array every time. Safe.
-    
+function project_onto_bitstring(mps::MPS{T}, bitstring::String) where T
+    vec = ones(T, 1) # (bond_dim)
     for i in 1:mps.length
-        # 1. Compute RDM at current site
-        # Shape: (Left, Phys, Right).
-        # Contract Left and Right indices with Self Conjugate.
-        # rho[p, p'] = sum_{l,r} T[l, p, r] * conj(T[l, p', r])
-        @tensor rho[p, p_prime] := current_tensor[l, p, r] * conj(current_tensor[l, p_prime, r])
+        idx = parse(Int, bitstring[i]) + 1
+        A = mps.tensors[i] # (L, d, R)
         
-        # 2. Probabilities (Diagonal)
-        probs = real.(diag(rho))
+        L, d, R = size(A)
+        A_slice = @view A[:, idx, :] # (L, R)
         
-        # Normalize probs (numerical stability)
-        prob_sum = sum(probs)
-        if prob_sum < 1e-12
-            # Error or very unlikely path
-            probs = ones(length(probs)) ./ length(probs)
-        else
-            probs ./= prob_sum
-        end
-        
-        # 3. Sample
-        outcome = sample_index(probs) # 1-based index
-        bitstring += (outcome - 1) * (1 << (i - 1)) # Python logic: sum(c << i ...)
-        
-        # 4. Project
-        # We select the slice `outcome` from physical index.
-        # projected_T = current_tensor[:, outcome, :] -> Shape (Left, Right)
-        projected_slice = @view current_tensor[:, outcome, :]
-        
-        # 5. Propagate to next site
-        if i < mps.length
-            next_site_tensor = mps.tensors[i+1] # (L_next, P_next, R_next)
-            # L_next matches R of current.
-            # Contract: proj[l, r] * next[r, p, next_r]
-            # Norm factor: 1 / sqrt(probs[outcome])
-            
-            factor = 1.0 / sqrt(probs[outcome])
-            
-            @tensor next_T[l, p, r] := projected_slice[l, k] * next_site_tensor[k, p, r]
-            current_tensor = next_T .* factor
-        end
+        vec = transpose(vec) * A_slice # (1, R)
+        vec = reshape(vec, R)
     end
-    
-    return bitstring
+    return abs2(vec[1])
 end
 
-function sample_index(probs::Vector{Float64})
-    r = rand()
-    cumsum = 0.0
-    for (i, p) in enumerate(probs)
-        cumsum += p
-        if r < cumsum
-            return i
-        end
+function to_vec(mps::MPS{T}) where T
+    v = mps.tensors[1]
+    for i in 2:mps.length
+        T_next = mps.tensors[i]
+        @tensor v_new[l, p_old, p_new, r_new] := v[l, p_old, k] * T_next[k, p_new, r_new]
+        l, p_old, p_new, r_new = size(v_new)
+        v = reshape(v_new, l, p_old * p_new, r_new)
     end
-    return length(probs)
-end
-
-"""
-    project_onto_bitstring(mps::MPS, bitstring::String)
-
-Return probability |<b|psi>|^2.
-"""
-function project_onto_bitstring(mps::MPS, bitstring::String)
-    @assert Base.length(bitstring) == mps.length
-    
-    current_tensor = mps.tensors[1]
-    total_norm_sq = 1.0
-    
-    for (i, char) in enumerate(bitstring)
-        val = parse(Int, char) + 1 # 1-based
-        
-        # Project
-        proj = current_tensor[:, val, :] # (Left, Right)
-        
-        norm_val = norm(proj)
-        if norm_val == 0
-            return ComplexF64(0.0)
-        end
-        total_norm_sq *= norm_val^2
-        
-        if i < mps.length
-            # Propagate
-            next_tensor = mps.tensors[i+1]
-            @tensor next_T[l, p, r] := proj[l, k] * next_tensor[k, p, r]
-            current_tensor = next_T .* (1.0 / norm_val)
-        end
-    end
-    
-    return ComplexF64(total_norm_sq)
-end
-
-# --- Utilities ---
-
-function pad_bond_dimension!(mps::MPS, target_dim::Int)
-    for i in 1:mps.length
-        tensor = mps.tensors[i] # (Left, Phys, Right)
-        l, p, r = size(tensor)
-
-        # Calculate targets
-        if i == 1
-            left_target = 1
-        else
-            exp_left = min(i - 1, mps.length - (i - 1)) # bond index i-1
-            left_target = min(target_dim, 2^exp_left)
-        end
-
-        if i == mps.length
-            right_target = 1
-        else
-            exp_right = min(i, mps.length - i) # bond index i
-            right_target = min(target_dim, 2^exp_right)
-        end
-
-        if l > left_target || r > right_target
-            error("Target bond dim must be at least current bond dim.")
-        end
-
-        if l < left_target || r < right_target
-            T = eltype(tensor)
-            new_tensor = zeros(T, left_target, p, right_target)
-            
-            # Copy data: indices 1:l, 1:p, 1:r
-            # In Julia 1-based indexing
-            new_tensor[1:l, :, 1:r] = tensor
-            
-            mps.tensors[i] = new_tensor
-        end
-    end
-    normalize!(mps)
-end
-
-function check_canonical_form(mps::MPS)
-    a_truth = falses(mps.length)
-    b_truth = falses(mps.length)
-
-    # Check Left Canonical (A-form)
-    # Contract Left and Phys: T^dag * T = I
-    for i in 1:mps.length
-        T = mps.tensors[i] # (L, P, R)
-        l, p, r = size(T)
-        
-        # Contract over L and P
-        @tensor mat[r1, r2] := conj(T[l, p, r1]) * T[l, p, r2]
-        
-        if isapprox(mat, I; atol=1e-10)
-            a_truth[i] = true
-        end
-    end
-
-    # Check Right Canonical (B-form)
-    # Contract Phys and Right: T * T^dag = I
-    for i in mps.length:-1:1
-        T = mps.tensors[i]
-        l, p, r = size(T)
-        
-        # Contract over P and R
-        @tensor mat[l1, l2] := T[l1, p, r] * conj(T[l2, p, r])
-        
-        if isapprox(mat, I; atol=1e-10)
-            b_truth[i] = true
-        end
-    end
-
-    # Identify Center
-    mixed_truth = falses(mps.length)
-    for i in 1:mps.length
-        # If everything to the left is A-form AND everything to the right is B-form
-        # Note: Python logic `all(a_truth[:i])` excludes i. `all(b_truth[i+1:])`.
-        # So site i is the center.
-        left_ok = (i == 1) ? true : all(a_truth[1:i-1])
-        right_ok = (i == mps.length) ? true : all(b_truth[i+1:end])
-        
-        if left_ok && right_ok
-            mixed_truth[i] = true
-        end
-    end
-
-    return findall(mixed_truth)
+    return vec(v)
 end
 
 end # module
-

@@ -9,9 +9,9 @@ def run_qutip_and_plot():
     L = 6
     J = 1.0
     h = 0.5
-    gamma = 0.1
+    gamma = 0.01
     dt = 0.05
-    total_time = 2.0
+    total_time = 1.0
     
     print(f"Running QuTiP Exact Simulation (L={L})...")
 

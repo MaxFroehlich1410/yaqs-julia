@@ -18,12 +18,12 @@ except ImportError:
 
 def run_benchmark():
     # 1. Parameters
-    L = 12
+    L = 6
     J = 1.0
     h = 0.5
     dt = 0.05
     t_total = 1.0
-    num_traj = 500  
+    num_traj = 200  
     strength = 0.01
 
     print(f"Starting Python Analog TJM Benchmark (L=6)...")

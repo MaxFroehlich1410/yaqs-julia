@@ -107,17 +107,17 @@ function matrix(::TGate)
 end
 
 function matrix(::RaisingGate)
-    # |1> -> |0> (Spin Raising / Energy Relaxing in some contexts, usually sigma_plus)
-    # [0 1; 0 0]
-    # Col-Major: (1,1)=0, (2,1)=0, (1,2)=1, (2,2)=0
-    return SMatrix{2,2,C128}(0, 0, 1, 0)
-end
-
-function matrix(::LoweringGate)
-    # |0> -> |1> (Spin Lowering / Energy Exciting, usually sigma_minus)
+    # |0> -> |1> (Raising / Creation / sigma_plus)
     # [0 0; 1 0]
     # Col-Major: (1,1)=0, (2,1)=1, (1,2)=0, (2,2)=0
     return SMatrix{2,2,C128}(0, 1, 0, 0)
+end
+
+function matrix(::LoweringGate)
+    # |1> -> |0> (Lowering / Annihilation / sigma_minus)
+    # [0 1; 0 0]
+    # Col-Major: (1,1)=0, (2,1)=0, (1,2)=1, (2,2)=0
+    return SMatrix{2,2,C128}(0, 0, 1, 0)
 end
 
 # Rotations
