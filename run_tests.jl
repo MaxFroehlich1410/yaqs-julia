@@ -15,4 +15,8 @@ using .Yaqs
     include("test/test_Dissipation.jl")
     include("test/test_AnalogTJM.jl")
     include("test/test_Simulator.jl")
+    include("test/test_DigitalTJM.jl")
+    include("test/test_CircuitIngestion.jl")
+    include("test/test_CircuitLibrary.jl")
+    include("test/test_Ising_Digital_TJM.jl")
 end

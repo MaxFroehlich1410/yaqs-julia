@@ -1,6 +1,8 @@
 [deps]
 CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+CondaPkg = "992eb4ea-22a4-4c89-a5bb-47a3300528ab"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
+PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 TensorOperations = "6aa20fa7-93e2-5fca-9bc0-fbd0db3c71a2"

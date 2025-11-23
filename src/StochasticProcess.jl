@@ -237,7 +237,7 @@ function solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
             elseif type == "mpo"
                  new_mps = contract_mpo_mps(op, mps)
                  mps.tensors = new_mps.tensors
-                 truncate!(mps)
+                 MPSModule.truncate!(mps)
             end
         end
     end

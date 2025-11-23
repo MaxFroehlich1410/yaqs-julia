@@ -34,7 +34,7 @@ mutable struct MPS{T}
     phys_dims::Vector{Int}
     length::Int
     orth_center::Int
-    
+
     # Inner constructor for specific T
     function MPS{T}(length::Int, tensors::Vector{Array{T, 3}}, phys_dims::Vector{Int}, orth_center::Int=1) where T
         new{T}(tensors, phys_dims, length, orth_center)
@@ -49,8 +49,8 @@ end
 # --- Constructors ---
 
 function MPS(length::Int; 
-             tensors::Union{Vector{Array{ComplexF64, 3}}, Nothing}=nothing, 
-             physical_dimensions::Union{Vector{Int}, Int, Nothing}=nothing, 
+             tensors::Union{Vector{Array{ComplexF64, 3}}, Nothing}=nothing,
+             physical_dimensions::Union{Vector{Int}, Int, Nothing}=nothing,
              state::String="zeros",
              pad::Union{Int, Nothing}=nothing,
              basis_string::Union{String, Nothing}=nothing)
@@ -65,7 +65,7 @@ function MPS(length::Int;
     end
     
     T = ComplexF64
-    
+
     # 2. Tensors
     if !isnothing(tensors)
         @assert Base.length(tensors) == length
@@ -73,9 +73,9 @@ function MPS(length::Int;
         # We default to 1 and let validity checks happen later if needed.
         return MPS(length, tensors, p_dims, 1)
     end
-    
+
     new_tensors = Vector{Array{T, 3}}(undef, length)
-    
+
     # 3. Initialization
     if state == "basis"
         @assert !isnothing(basis_string) "Must provide basis_string for state='basis'"
@@ -91,7 +91,7 @@ function MPS(length::Int;
         
     elseif state == "random"
         # Random initialization
-        for i in 1:length
+    for i in 1:length
             d = p_dims[i]
             chi_l = (i == 1) ? 1 : 4 # Arbitrary small bond dim start
             chi_r = (i == length) ? 1 : 4
@@ -106,39 +106,39 @@ function MPS(length::Int;
         for i in 1:length
             d = p_dims[i]
             v = zeros(T, d)
-            if state == "zeros"
+        if state == "zeros"
                 v[1] = 1.0
-            elseif state == "ones"
+        elseif state == "ones"
                 if d > 1; v[2] = 1.0; else; v[1] = 1.0; end
-            elseif state == "x+"
+        elseif state == "x+"
                 v[1] = 1/sqrt(2); v[2] = 1/sqrt(2)
-            elseif state == "x-"
+        elseif state == "x-"
                 v[1] = 1/sqrt(2); v[2] = -1/sqrt(2)
-            elseif state == "y+"
+        elseif state == "y+"
                 v[1] = 1/sqrt(2); v[2] = im/sqrt(2)
-            elseif state == "y-"
+        elseif state == "y-"
                 v[1] = 1/sqrt(2); v[2] = -im/sqrt(2)
-            elseif state == "Neel"
+        elseif state == "Neel"
                 idx = (i % 2 != 0) ? 1 : 2
                 v[idx] = 1.0
-            elseif state == "wall"
-                idx = (i <= length ÷ 2) ? 1 : 2
+        elseif state == "wall"
+            idx = (i <= length ÷ 2) ? 1 : 2
                 v[idx] = 1.0
             else
                 error("Unknown state: $state")
-            end
-            
+        end
+
             # Reshape to (1, d, 1)
             new_tensors[i] = reshape(v, 1, d, 1)
         end
     end
-    
+
     mps = MPS(length, new_tensors, p_dims, 1)
-    
+
     if !isnothing(pad)
         pad_bond_dimension!(mps, pad)
     end
-    
+
     return mps
 end
 
@@ -238,13 +238,13 @@ function shift_orthogonality_center!(mps::MPS{T}, new_center::Int) where T
             F = lq(Mat)
             L_thin = Matrix(F.L)
             Q_thin = Matrix(F.Q)
-            
+        
             # Dimensions: L_thin (L, r_new), Q_thin (r_new, d*R)
             r_new = size(L_thin, 2)
-            
+        
             # Update current site to Q (Right Canonical)
             mps.tensors[i] = reshape(Q_thin, r_new, d, R)
-            
+        
             # Absorb L into prev site (i-1)
             # Prev: (L_prev, d_prev, L)
             Prev = mps.tensors[i-1]

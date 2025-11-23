@@ -475,8 +475,8 @@ function Base.:+(a::MPO{T}, b::MPO{T}) where T
         else
             # Diag [A 0; 0 B]
             C = zeros(T, la+lb, po, pi, ra+rb)
-            C[1:la, :, :, 1:ra] = A
-            C[la+1:end, :, :, ra+1:end] = B
+             C[1:la, :, :, 1:ra] = A
+             C[la+1:end, :, :, ra+1:end] = B
         end
         
         new_tensors[i] = C

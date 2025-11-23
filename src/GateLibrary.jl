@@ -3,211 +3,233 @@ module GateLibrary
 using StaticArrays
 using LinearAlgebra
 
-export AbstractOperator
-export XGate, YGate, ZGate, HGate, IdGate, SGate, TGate, SXGate, RaisingGate, LoweringGate
+export AbstractOperator, AbstractGate, AbstractNoise
+export matrix, generator, is_unitary, hamiltonian_coeff
+export XGate, YGate, ZGate, HGate, SGate, TGate, SdgGate, TdgGate
 export RxGate, RyGate, RzGate, PhaseGate, UGate
-export CXGate, CZGate, SwapGate
-export matrix
+export CXGate, CYGate, CZGate, CHGate, CPhaseGate, SWAPGate, iSWAPGate
+export RxxGate, RyyGate, RzzGate
+export Barrier
 
-"""
-    AbstractOperator
+# --- Abstract Types ---
 
-Base type for all quantum operators.
-"""
 abstract type AbstractOperator end
+abstract type AbstractGate <: AbstractOperator end
+abstract type AbstractNoise <: AbstractOperator end
 
-# --- Constant Gates (Singletons) ---
-
-struct XGate <: AbstractOperator end
-struct YGate <: AbstractOperator end
-struct ZGate <: AbstractOperator end
-struct HGate <: AbstractOperator end
-struct IdGate <: AbstractOperator end
-struct SGate <: AbstractOperator end
-struct TGate <: AbstractOperator end
-struct SXGate <: AbstractOperator end
-struct RaisingGate <: AbstractOperator end
-struct LoweringGate <: AbstractOperator end
-
-# --- Parameterized Gates ---
-
-struct RxGate{T<:Real} <: AbstractOperator
-    theta::T
+function matrix(op::AbstractOperator)
+    error("matrix() not implemented for $(typeof(op))")
 end
 
-struct RyGate{T<:Real} <: AbstractOperator
-    theta::T
-end
-
-struct RzGate{T<:Real} <: AbstractOperator
-    theta::T
-end
-
-struct PhaseGate{T<:Real} <: AbstractOperator
-    theta::T
+function generator(op::AbstractOperator)
+    error("generator() not implemented for $(typeof(op))")
 end
 
 """
-    UGate(theta, phi, lambda)
+    hamiltonian_coeff(op)
 
-Generic single-qubit rotation gate U3.
+Returns the scaling coefficient `c` such that the gate is `exp(-i * c * Generator)`.
+Default is 1.0.
 """
-struct UGate{T<:Real} <: AbstractOperator
-    theta::T
-    phi::T
-    lam::T
+function hamiltonian_coeff(op::AbstractOperator)
+    return 1.0
 end
 
-# --- Two Qubit Gates ---
-
-struct CXGate <: AbstractOperator end
-struct CZGate <: AbstractOperator end
-struct SwapGate <: AbstractOperator end
-
-# --- Matrix Definitions (Dispatch) ---
-# Using SMatrix for zero-allocation 2x2 and 4x4 matrices.
-
-const C128 = ComplexF64
-
-# Pauli Matrices
-function matrix(::XGate)
-    return SMatrix{2,2,C128}(0, 1, 1, 0)
+function is_unitary(op::AbstractOperator)
+    return true
 end
 
-function matrix(::YGate)
-    return SMatrix{2,2,C128}(0, 1im, -1im, 0)
+# --- Basic Gates (1 Qubit) ---
+
+struct XGate <: AbstractGate end
+matrix(::XGate) = SMatrix{2,2,ComplexF64}([0 1; 1 0])
+generator(::XGate) = [matrix(XGate())]
+
+struct YGate <: AbstractGate end
+matrix(::YGate) = SMatrix{2,2,ComplexF64}([0 -im; im 0])
+generator(::YGate) = [matrix(YGate())]
+
+struct ZGate <: AbstractGate end
+matrix(::ZGate) = SMatrix{2,2,ComplexF64}([1 0; 0 -1])
+generator(::ZGate) = [matrix(ZGate())]
+
+struct HGate <: AbstractGate end
+matrix(::HGate) = SMatrix{2,2,ComplexF64}([1 1; 1 -1] ./ sqrt(2))
+
+struct SGate <: AbstractGate end
+matrix(::SGate) = SMatrix{2,2,ComplexF64}([1 0; 0 im])
+
+struct TGate <: AbstractGate end
+matrix(::TGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(im*π/4)])
+
+struct SdgGate <: AbstractGate end
+matrix(::SdgGate) = SMatrix{2,2,ComplexF64}([1 0; 0 -im])
+
+struct TdgGate <: AbstractGate end
+matrix(::TdgGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(-im*π/4)])
+
+# --- Parametric Gates (1 Qubit) ---
+
+struct RxGate <: AbstractGate
+    theta::Float64
 end
+matrix(g::RxGate) = SMatrix{2,2,ComplexF64}([cos(g.theta/2) -im*sin(g.theta/2); -im*sin(g.theta/2) cos(g.theta/2)])
+generator(g::RxGate) = [matrix(XGate())]
+hamiltonian_coeff(g::RxGate) = g.theta / 2.0
 
-function matrix(::ZGate)
-    return SMatrix{2,2,C128}(1, 0, 0, -1)
+struct RyGate <: AbstractGate
+    theta::Float64
 end
+matrix(g::RyGate) = SMatrix{2,2,ComplexF64}([cos(g.theta/2) -sin(g.theta/2); sin(g.theta/2) cos(g.theta/2)])
+generator(g::RyGate) = [matrix(YGate())]
+hamiltonian_coeff(g::RyGate) = g.theta / 2.0
 
-function matrix(::IdGate)
-    return SMatrix{2,2,C128}(1, 0, 0, 1)
+struct RzGate <: AbstractGate
+    theta::Float64
 end
+matrix(g::RzGate) = SMatrix{2,2,ComplexF64}([exp(-im*g.theta/2) 0; 0 exp(im*g.theta/2)])
+generator(g::RzGate) = [matrix(ZGate())]
+hamiltonian_coeff(g::RzGate) = g.theta / 2.0
 
-function matrix(::HGate)
-    inv_sqrt2 = 1 / sqrt(2)
-    return SMatrix{2,2,C128}(inv_sqrt2, inv_sqrt2, inv_sqrt2, -inv_sqrt2)
+struct PhaseGate <: AbstractGate
+    theta::Float64
 end
+matrix(g::PhaseGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(im*g.theta)])
 
-function matrix(::SXGate)
-    # Sqrt(X) = 0.5 * [[1+i, 1-i], [1-i, 1+i]]
-    a = 0.5 * (1 + 1im)
-    b = 0.5 * (1 - 1im)
-    return SMatrix{2,2,C128}(a, b, b, a)
+struct UGate <: AbstractGate
+    theta::Float64
+    phi::Float64
+    lam::Float64
 end
-
-function matrix(::SGate)
-    return SMatrix{2,2,C128}(1, 0, 0, 1im)
-end
-
-function matrix(::TGate)
-    return SMatrix{2,2,C128}(1, 0, 0, exp(1im * π/4))
-end
-
-function matrix(::RaisingGate)
-    # |0> -> |1> (Raising / Creation / sigma_plus)
-    # [0 0; 1 0]
-    # Col-Major: (1,1)=0, (2,1)=1, (1,2)=0, (2,2)=0
-    return SMatrix{2,2,C128}(0, 1, 0, 0)
-end
-
-function matrix(::LoweringGate)
-    # |1> -> |0> (Lowering / Annihilation / sigma_minus)
-    # [0 1; 0 0]
-    # Col-Major: (1,1)=0, (2,1)=0, (1,2)=1, (2,2)=0
-    return SMatrix{2,2,C128}(0, 0, 1, 0)
-end
-
-# Rotations
-# Note: Julia SMatrix constructor is Column-Major: (1,1), (2,1), (1,2), (2,2)
-
-function matrix(g::RxGate)
-    c = cos(g.theta / 2)
-    s = -1im * sin(g.theta / 2)
-    # [c s; s c]
-    return SMatrix{2,2,C128}(c, s, s, c)
-end
-
-function matrix(g::RyGate)
-    c = cos(g.theta / 2)
-    s = sin(g.theta / 2)
-    # [c -s; s c] -> Col-Major: c, s, -s, c
-    return SMatrix{2,2,C128}(c, s, -s, c)
-end
-
-function matrix(g::RzGate)
-    e_m = exp(-1im * g.theta / 2)
-    e_p = exp(1im * g.theta / 2)
-    # [e- 0; 0 e+]
-    return SMatrix{2,2,C128}(e_m, 0, 0, e_p)
-end
-
-function matrix(g::PhaseGate)
-    # [1 0; 0 e^iθ]
-    return SMatrix{2,2,C128}(1, 0, 0, exp(1im * g.theta))
-end
-
 function matrix(g::UGate)
-    # U3 definition from Qiskit/Standard
-    # [cos(t/2)          -e^(il)sin(t/2)]
-    # [e^(ip)sin(t/2)    e^(i(p+l))cos(t/2)]
-    
-    t_2 = g.theta / 2
-    c = cos(t_2)
-    s = sin(t_2)
-    
-    # Col-Major inputs: (1,1), (2,1), (1,2), (2,2)
-    return SMatrix{2,2,C128}(
-        c, 
-        exp(1im * g.phi) * s, 
-        -exp(1im * g.lam) * s, 
-        exp(1im * (g.phi + g.lam)) * c
-    )
+    cos_val = cos(g.theta / 2)
+    sin_val = sin(g.theta / 2)
+    return SMatrix{2,2,ComplexF64}([
+        cos_val               -exp(im * g.lam) * sin_val;
+        exp(im * g.phi) * sin_val  exp(im * (g.phi + g.lam)) * cos_val
+    ])
 end
 
-# Two Qubit Gates (4x4)
-# Layout: |00>, |01>, |10>, |11> -> Indices 1, 2, 3, 4
+# --- 2 Qubit Gates ---
 
-function matrix(::CXGate)
-    # CNOT (Control 0, Target 1)
-    # [1 0 0 0]
-    # [0 1 0 0]
-    # [0 0 0 1]
-    # [0 0 1 0]
-    # Sparse constructor or direct?
-    # Direct SMatrix 4x4
-    return SMatrix{4,4,C128}(
-        1,0,0,0, 
-        0,1,0,0,
-        0,0,0,1,
-        0,0,1,0
-    )
-end
+struct CXGate <: AbstractGate end
+matrix(::CXGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 1 0 0;
+    0 0 0 1;
+    0 0 1 0
+])
 
-function matrix(::CZGate)
-    # Diag(1, 1, 1, -1)
-    return SMatrix{4,4,C128}(
-        1,0,0,0,
-        0,1,0,0,
-        0,0,1,0,
-        0,0,0,-1
-    )
-end
+struct CYGate <: AbstractGate end
+matrix(::CYGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 1 0 0;
+    0 0 0 -im;
+    0 0 im 0
+])
 
-function matrix(::SwapGate)
-    # [1 0 0 0]
-    # [0 0 1 0]
-    # [0 1 0 0]
-    # [0 0 0 1]
-    return SMatrix{4,4,C128}(
-        1,0,0,0,
-        0,0,1,0,
-        0,1,0,0,
-        0,0,0,1
-    )
+struct CZGate <: AbstractGate end
+matrix(::CZGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 1 0 0;
+    0 0 1 0;
+    0 0 0 -1
+])
+
+struct CHGate <: AbstractGate end
+matrix(::CHGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 1 0 0;
+    0 0 1/sqrt(2) 1/sqrt(2);
+    0 0 1/sqrt(2) -1/sqrt(2)
+])
+
+struct CPhaseGate <: AbstractGate
+    theta::Float64
 end
+matrix(g::CPhaseGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 1 0 0;
+    0 0 1 0;
+    0 0 0 exp(im*g.theta)
+])
+
+struct SWAPGate <: AbstractGate end
+matrix(::SWAPGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 0 1 0;
+    0 1 0 0;
+    0 0 0 1
+])
+
+struct iSWAPGate <: AbstractGate end
+matrix(::iSWAPGate) = SMatrix{4,4,ComplexF64}([
+    1 0 0 0;
+    0 0 im 0;
+    0 im 0 0;
+    0 0 0 1
+])
+
+# --- Hamiltonian Evolution Gates (Rxx, Ryy, Rzz) ---
+# e^{-i theta/2 P \otimes P}
+
+struct RxxGate <: AbstractGate
+    theta::Float64
+end
+function matrix(g::RxxGate)
+    c = cos(g.theta / 2)
+    s = -im * sin(g.theta / 2)
+    return SMatrix{4,4,ComplexF64}([
+        c 0 0 s;
+        0 c s 0;
+        0 s c 0;
+        s 0 0 c
+    ])
+end
+generator(::RxxGate) = [matrix(XGate()), matrix(XGate())]
+hamiltonian_coeff(g::RxxGate) = g.theta / 2.0
+
+struct RyyGate <: AbstractGate
+    theta::Float64
+end
+function matrix(g::RyyGate)
+    c = cos(g.theta / 2)
+    s = -im * sin(g.theta / 2)
+    return SMatrix{4,4,ComplexF64}([
+        c 0 0 -s;
+        0 c s 0;
+        0 s c 0;
+        -s 0 0 c
+    ])
+end
+generator(::RyyGate) = [matrix(YGate()), matrix(YGate())]
+hamiltonian_coeff(g::RyyGate) = g.theta / 2.0
+
+struct RzzGate <: AbstractGate
+    theta::Float64
+end
+function matrix(g::RzzGate)
+    # exp(-i theta/2 Z Z)
+    # diagonals: exp(-i theta/2), exp(i theta/2), exp(i theta/2), exp(-i theta/2)
+    e_m = exp(-im * g.theta / 2)
+    e_p = exp(im * g.theta / 2)
+    return SMatrix{4,4,ComplexF64}([
+        e_m 0 0 0;
+        0 e_p 0 0;
+        0 0 e_p 0;
+        0 0 0 e_m
+    ])
+end
+generator(::RzzGate) = [matrix(ZGate()), matrix(ZGate())]
+hamiltonian_coeff(g::RzzGate) = g.theta / 2.0
+
+# --- Barrier ---
+struct Barrier <: AbstractGate
+    label::String
+end
+matrix(::Barrier) = error("Barrier has no matrix representation")
+generator(::Barrier) = nothing
+is_unitary(::Barrier) = true # Effectively Identity
+hamiltonian_coeff(::Barrier) = 0.0
 
 end # module
-

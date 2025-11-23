@@ -50,7 +50,7 @@ using ..GateLibrary
         val_x = expect_mpo(H, psi_x)
         @test isapprox(val_x, -1.5; atol=1e-10)
     end
-    
+
     @testset "Orthogonalize & Truncate" begin
         L = 4
         # Create a random MPO with high bond dimension
@@ -91,7 +91,7 @@ using ..GateLibrary
         # Just check it runs and gives a number
         @test !isnan(val_trunc)
     end
-    
+
     @testset "MPO Addition" begin
         L = 3
         H1 = init_ising(L, 1.0, 0.0) # -ZZ
@@ -121,7 +121,7 @@ using ..GateLibrary
         bond_dim = size(H_sum.tensors[2], 4)
         @test bond_dim <= 5 # Should compress down
     end
-    
+
     @testset "MPO Multiplication" begin
         L = 2
         # X * X = I
@@ -142,6 +142,6 @@ using ..GateLibrary
         
         # Bond dim of X is 1. XX is 1.
         @test size(XX.tensors[1], 4) == 1
-    end
+end
 
 end

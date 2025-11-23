@@ -6,6 +6,7 @@ using ..MPOModule
 using ..SimulationConfigs
 using ..NoiseModule
 using ..AnalogTJM
+using ..DigitalTJM
 
 export run, available_cpus
 
@@ -31,37 +32,21 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
         SimulationConfigs.initialize!(obs, sim_params)
     end
 
-    # Arguments generator (implicit)
-    # We iterate 1:num_traj
-
     # Parallel Loop
-    # Ensure thread safety for trajectories writing.
-    # trajectories is (num_traj, time_steps) or (num_traj, 1).
-    # Writing to slice [i, :] is safe as long as i is unique per thread.
-
     if parallel && sim_params.num_traj > 1
-        # Progress Counter
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
         
         Threads.@threads for i in 1:sim_params.num_traj
             args = (i, initial_state, noise_model, sim_params, operator)
-            # Result is Matrix (num_obs, num_times)
-            # Julia backend returns Matrix
             result = backend(args)
             
             for (obs_idx, obs) in enumerate(sim_params.observables)
-                # obs.trajectories is (num_traj, num_times)
-                # result[obs_idx, :] is (num_times)
-                # Assign row
                 obs.trajectories[i, :] = result[obs_idx, :]
             end
             
-            # Update and Print Progress
             c = atomic_add!(counter, 1) + 1
             if c % 10 == 0 || c == total
-                # Print to stdout, use \r to overwrite line if possible or just simple log
-                # Printing from threads can be messy, usually done by main thread or careful print
                 print("\rProgress: $c / $total trajectories finished.")
                 if c == total
                     println()
@@ -82,23 +67,82 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
     SimulationConfigs.aggregate_trajectories!(sim_params)
 end
 
-function run(initial_state::MPS, operator, sim_params, noise_model=nothing; parallel::Bool=true)
-    # State must start in B normalization (Right Canonical sites 2..L)
-    # Use explicit string "B" to match Python's simulator.py logic conceptually,
-    # though MPS.jl normalize! defaults to right-canonical sweep.
+function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true)
+    
+    # Noise check
+    if isnothing(noise_model) || all(p -> p.strength == 0, noise_model.processes)
+        sim_params.num_traj = 1
+    end
+
+    # Initialize observables
+    # For digital, "time steps" might be ambiguous if sampled dynamically.
+    # But TimeEvolutionConfig requires fixed time steps?
+    # We'll assume obs.trajectories is allocated. If results size mismatches, we might issue.
+    # But usually user sets steps.
+    
+    for obs in sim_params.observables
+        SimulationConfigs.initialize!(obs, sim_params)
+    end
+
+    # Parallel Loop
+    if parallel && sim_params.num_traj > 1
+        counter = Atomic{Int}(0)
+        total = sim_params.num_traj
+        
+        Threads.@threads for i in 1:sim_params.num_traj
+            # run_digital_tjm returns (state, results)
+            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params)
+            
+            # result is Matrix(num_obs, num_samples)
+            # We need to fit it into obs.trajectories[i, :]
+            # Check size
+            if size(result, 2) != length(sim_params.times)
+                # Mismatch. 
+                # DigitalTJM sampling depends on barriers.
+                # Maybe we should trust result size?
+                # But trajectories is pre-allocated.
+                # For now, assume user configured correctly.
+            end
+            
+            for (obs_idx, obs) in enumerate(sim_params.observables)
+                # Copy what we have
+                n_copy = min(size(result, 2), size(obs.trajectories, 2))
+                obs.trajectories[i, 1:n_copy] = result[obs_idx, 1:n_copy]
+            end
+            
+            c = atomic_add!(counter, 1) + 1
+            if c % 10 == 0 || c == total
+                print("\rProgress: $c / $total trajectories finished.")
+                if c == total; println(); end
+            end
+        end
+    else
+        for i in 1:sim_params.num_traj
+            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params)
+            for (obs_idx, obs) in enumerate(sim_params.observables)
+                n_copy = min(size(result, 2), size(obs.trajectories, 2))
+                obs.trajectories[i, 1:n_copy] = result[obs_idx, 1:n_copy]
+            end
+        end
+    end
+    
+    SimulationConfigs.aggregate_trajectories!(sim_params)
+end
+
+function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=nothing; parallel::Bool=true)
     MPSModule.normalize!(initial_state; form="B") 
     
     if isa(sim_params, TimeEvolutionConfig)
-        # Analog
-        # operator must be MPO
-        if !isa(operator, MPO)
-             error("Analog simulation requires an MPO operator.")
+        if isa(operator_or_circuit, MPO)
+            _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel)
+        elseif isa(operator_or_circuit, DigitalCircuit)
+            _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel)
+        else
+             error("Simulation requires MPO (Analog) or DigitalCircuit (Digital).")
         end
-        _run_analog(initial_state, operator, sim_params, noise_model; parallel=parallel)
     else
-        error("Only Analog Simulation (TimeEvolutionConfig) is supported in this optimized version.")
+        error("Only TimeEvolutionConfig is supported.")
     end
 end
 
 end
-

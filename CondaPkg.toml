@@ -1,0 +1,12 @@
+[deps]
+qiskit-aer = ""
+matplotlib = ""
+
+    [deps.qiskit]
+    channel = "conda-forge"
+
+[pip]
+mqt-yaqs = ""
+
+    [pip.deps]
+    mqt-yaqs = ""

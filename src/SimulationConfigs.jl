@@ -4,7 +4,7 @@ using ..GateLibrary
 using ..MPSModule
 using LinearAlgebra
 
-export Observable, TimeEvolutionConfig, MeasurementConfig, StrongMeasurementConfig
+export Observable, TimeEvolutionConfig, MeasurementConfig, StrongMeasurementConfig, AbstractSimConfig
 export initialize!, aggregate_trajectories!, aggregate_measurements!, expect
 
 # --- Observable ---
@@ -124,13 +124,15 @@ mutable struct StrongMeasurementConfig <: AbstractSimConfig
     max_bond_dim::Int
     min_bond_dim::Int
     truncation_threshold::Float64
+    sample_layers::Bool
     
     function StrongMeasurementConfig(observables::Vector{<:Observable};
                                      num_traj::Int=1000,
                                      max_bond_dim::Int=4096,
                                      min_bond_dim::Int=2,
-                                     truncation_threshold::Float64=1e-9)
-        new(observables, num_traj, max_bond_dim, min_bond_dim, truncation_threshold)
+                                     truncation_threshold::Float64=1e-9,
+                                     sample_layers::Bool=false)
+        new(observables, num_traj, max_bond_dim, min_bond_dim, truncation_threshold, sample_layers)
     end
 end
 
@@ -151,9 +153,11 @@ function initialize!(obs::Observable, config::TimeEvolutionConfig)
     end
 end
 
-function initialize!(obs::Observable, config::StrongMeasurementConfig)
-    obs.trajectories = zeros(ComplexF64, config.num_traj, 1)
-    obs.results = zeros(Float64, 1)
+function initialize!(obs::Observable, config::StrongMeasurementConfig; num_layers::Int=0)
+    # If sample_layers is true, we need space for each layer (+ initial state)
+    steps = config.sample_layers ? (num_layers + 1) : 1
+    obs.trajectories = zeros(ComplexF64, config.num_traj, steps)
+    obs.results = zeros(Float64, steps)
 end
 
 """
@@ -204,4 +208,3 @@ function aggregate_measurements!(config::MeasurementConfig)
 end
 
 end # module
-
