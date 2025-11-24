@@ -23,14 +23,8 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     if norm_v == 0
         return v
     end
-    
-    # We assume A_func(x) applies A * x.
-    # We want to compute exp(-im * dt * A) * v.
-    # KrylovKit.exponentiate computes exp(t * A) * v.
-    # So we pass t = -im * dt.
-    
+        
     t_val = -1im * dt
-    
     # Using KrylovKit
     # exponentiate(A, t, x0) -> exp(t*A) * x0
     val, info = exponentiate(A_func, t_val, v; tol=1e-10, krylovdim=k, maxiter=1, ishermitian=false)
@@ -41,6 +35,20 @@ end
 
 
 # --- Environment Helpers ---
+
+"""
+    make_identity_env(dim::Int, mpo_dim::Int)
+
+Create an identity environment tensor of shape (dim, mpo_dim, dim).
+It is non-zero only for mpo index = 1 (assuming MPO boundary is 1).
+"""
+function make_identity_env(dim::Int, mpo_dim::Int)
+    E = zeros(ComplexF64, dim, mpo_dim, dim)
+    for i in 1:dim
+        E[i, 1, i] = 1.0
+    end
+    return E
+end
 
 function update_left_environment(A, W, E_left)
     # A: (L, P, R) [Ket]
@@ -136,14 +144,20 @@ function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
     # Init Environments
     # Right Envs
     E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    E_right[L+1] = ones(ComplexF64, 1, 1, 1)
+    
+    r_bond_dim = size(state.tensors[L], 3)
+    r_mpo_dim = size(H.tensors[L], 4)
+    E_right[L+1] = make_identity_env(r_bond_dim, r_mpo_dim)
     
     for i in L:-1:2
         E_right[i] = update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
     end
     
     E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    E_left[1] = ones(ComplexF64, 1, 1, 1)
+    
+    l_bond_dim = size(state.tensors[1], 1)
+    l_mpo_dim = size(H.tensors[1], 1)
+    E_left[1] = make_identity_env(l_bond_dim, l_mpo_dim)
     
     # Sweep Right (1 -> L)
     for i in 1:L
@@ -229,13 +243,21 @@ function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
     
     # Init Envs
     E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    E_right[L+1] = ones(ComplexF64, 1, 1, 1)
+    
+    # E_right[L+1] boundary
+    r_bond_dim = size(state.tensors[L], 3)
+    r_mpo_dim = size(H.tensors[L], 4)
+    E_right[L+1] = make_identity_env(r_bond_dim, r_mpo_dim)
+    
     for i in L:-1:2
         E_right[i] = update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
     end
     
     E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    E_left[1] = ones(ComplexF64, 1, 1, 1)
+    # E_left[1] boundary
+    l_bond_dim = size(state.tensors[1], 1)
+    l_mpo_dim = size(H.tensors[1], 1)
+    E_left[1] = make_identity_env(l_bond_dim, l_mpo_dim)
     
     # Forward Sweep
     for i in 1:(L-1)

@@ -10,19 +10,24 @@ using .Yaqs.MPSModule
 using .Yaqs.SimulationConfigs
 using .Yaqs.Simulator
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!
+using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA"
-CIRCUIT_NAME = "XY" 
+CIRCUIT_NAME = "Ising" 
 
 # System Parameters
-L = 10
+L = 49
 timesteps = 50
 dt = 0.1
 num_traj = 1 # Deterministic
+
+# Flags
+RUN_QISKIT_EXACT = false
+MAX_BOND_DIM = 512
 
 # Model Specific Params
 # Ising
@@ -115,7 +120,7 @@ obs_jl = [
     Observable("Z_6", ZGate(), 6)
 ]
 
-sim_params_jl = TimeEvolutionConfig(obs_jl, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true)
+sim_params_jl = TimeEvolutionConfig(obs_jl, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
 
 psi_jl = MPS(L; state=INITIAL_STATE)
 
@@ -150,7 +155,81 @@ println("Julia raw points: $jl_len")
 results_jl_final = [res[2:end] for res in results_jl]
 
 # ==============================================================================
-# 2. PYTHON SIMULATION
+# 2. JULIA V2 SIMULATION (Windowed TJM)
+# ==============================================================================
+println("\n--- Running Julia V2 Simulation (Windowed) ---")
+
+# Warmup V2
+println("Warming up Julia V2 compilation...")
+warmup_psi_v2 = MPS(L; state=INITIAL_STATE)
+# Note: Simulator.run currently calls DigitalTJM (V1). We need to call V2 directly.
+run_digital_tjm_v2(warmup_psi_v2, circ_jl, nothing, sim_params_jl)
+println("Warmup complete.")
+
+println("Executing Julia V2 Simulation...")
+time_jl_v2 = @elapsed begin
+    psi_jl_v2 = MPS(L; state=INITIAL_STATE)
+    # We must reset observable results inside sim_params_jl before run, or they will append?
+    # Simulator.run handles resetting usually? No, SimConfig holds results in Observables.
+    # We should create a new config or clear results.
+    obs_jl_v2 = [
+        Observable("Z_1", ZGate(), 1),
+        Observable("Z_3", ZGate(), 3),
+        Observable("Z_6", ZGate(), 6)
+    ]
+    sim_params_jl_v2 = TimeEvolutionConfig(obs_jl_v2, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
+    
+    run_digital_tjm_v2(psi_jl_v2, circ_jl, nothing, sim_params_jl_v2)
+end
+
+println("Julia V2 Simulation Time: $(round(time_jl_v2, digits=4)) s")
+
+results_jl_v2 = [obs.results for obs in sim_params_jl_v2.observables] # V2 might return results differently?
+# run_digital_tjm_v2 returns (state, results_matrix) where results_matrix is (num_obs, num_steps)
+# But it ALSO updates sim_params.observables via evaluate_observables! if it uses `expect` which pushes?
+# Let's check V2 implementation.
+# In V2:
+# function measure!(idx)
+#    for (i, obs) in enumerate(sim_params.observables)
+#        results[i, idx] = SimulationConfigs.expect(state, obs)
+#    end
+# end
+# It populates `results` matrix AND `SimulationConfigs.expect` might push to obs.results?
+# SimulationConfigs.expect just returns value usually.
+# Let's rely on the returned matrix from run_digital_tjm_v2 if possible, or observable results if pushed.
+# Actually, DigitalTJM.jl implementation of `evaluate_observables!` calls `expect`.
+# `expect` in SimulationConfigs usually just computes.
+# Wait, let's check `SimulationConfigs.expect` in `SimulationConfigs.jl`?
+# In `DigitalTJMV2.jl` I wrote: `results[i, idx] = SimulationConfigs.expect(state, obs)`.
+# So the matrix `results` (returned as second arg) is the source of truth.
+
+# However, `run_digital_tjm_v2` returns `(state, results)`.
+# Let's capture the return value.
+
+# We need to re-run the V2 block to capture output correctly.
+# Redoing the block above:
+
+time_jl_v2 = @elapsed begin
+    psi_jl_v2 = MPS(L; state=INITIAL_STATE)
+    # We don't strictly need new config if we use returned results matrix, but safe practice.
+    obs_jl_v2 = [
+        Observable("Z_1", ZGate(), 1),
+        Observable("Z_3", ZGate(), 3),
+        Observable("Z_6", ZGate(), 6)
+    ]
+    sim_params_jl_v2 = TimeEvolutionConfig(obs_jl_v2, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true)
+    
+    _, results_matrix_v2 = run_digital_tjm_v2(psi_jl_v2, circ_jl, nothing, sim_params_jl_v2)
+end
+
+println("Julia V2 Simulation Time: $(round(time_jl_v2, digits=4)) s")
+
+# results_matrix_v2 is (num_obs, num_steps)
+# Slice [2:end] (remove initial)
+results_jl_v2_final = [results_matrix_v2[i, 2:end] for i in 1:length(obs_jl_v2)]
+
+# ==============================================================================
+# 3. PYTHON SIMULATION
 # ==============================================================================
 println("\n--- Running Python Simulation ---")
 
@@ -217,23 +296,29 @@ elseif CIRCUIT_NAME == "HEA"
     )
 end
 
-println("Running Qiskit density-matrix reference ...")
-reference_py = mqt_simulators.run_qiskit_exact(
-    L,
-    timesteps,
-    init_circuit,
-    trotter_step,
-    nothing,
-    method="density_matrix",
-    observable_basis="Z",
-)
-reference = pyconvert(Array{Float64,2}, reference_py)
-println("Qiskit reference obtained. Shape: ", size(reference))
+results_py_final = nothing
 
-# Extract Z expectations for sites 1, 3, 6
-# Python reference is (num_qubits, timesteps)
-target_sites_py = [0, 2, 5] # 0-based for 1, 3, 6
-results_py_final = [reference[i+1, :] for i in target_sites_py] # Julia 1-based index into array
+if RUN_QISKIT_EXACT
+    println("Running Qiskit density-matrix reference ...")
+    reference_py = mqt_simulators.run_qiskit_exact(
+        L,
+        timesteps,
+        init_circuit,
+        trotter_step,
+        nothing,
+        method="density_matrix",
+        observable_basis="Z",
+    )
+    reference = pyconvert(Array{Float64,2}, reference_py)
+    println("Qiskit reference obtained. Shape: ", size(reference))
+
+    # Extract Z expectations for sites 1, 3, 6
+    # Python reference is (num_qubits, timesteps)
+    target_sites_py = [0, 2, 5] # 0-based for 1, 3, 6
+    results_py_final = [reference[i+1, :] for i in target_sites_py] # Julia 1-based index into array
+else
+    println("Skipping Qiskit exact simulation (RUN_QISKIT_EXACT = false)")
+end
 
 # ==============================================================================
 # 3. PYTHON YAQS SIMULATION (DigitalTJM)
@@ -262,7 +347,7 @@ obs_yaqs = [
 sim_params_yaqs = mqt_params.StrongSimParams(
     observables=obs_yaqs,
     num_traj=1,
-    max_bond_dim=128,
+    max_bond_dim=MAX_BOND_DIM,
     sample_layers=true,
     num_mid_measurements=timesteps
 )
@@ -280,14 +365,27 @@ println("YAQS Simulation Time: $(round(time_yaqs, digits=4)) s")
 # Speedup stats
 speedup = time_yaqs / time_jl
 println("\n--- Performance Comparison ---")
-println("Julia Time: $(round(time_jl, digits=4)) s")
-println("YAQS Time:  $(round(time_yaqs, digits=4)) s")
-println("Speedup (Julia vs YAQS): $(round(speedup, digits=2))x")
-if speedup > 1
-    println("Julia is $(round(speedup, digits=2))x FASTER.")
+println("Julia V1 Time: $(round(time_jl, digits=4)) s")
+println("Julia V2 Time: $(round(time_jl_v2, digits=4)) s")
+println("YAQS Time:     $(round(time_yaqs, digits=4)) s")
+
+# Speedup calculated as Time_Baseline / Time_Target
+# We want to see how much FASTER Julia is compared to YAQS (Python).
+speedup_v1_vs_py = time_yaqs / time_jl
+speedup_v2_vs_py = time_yaqs / time_jl_v2
+speedup_v2_vs_v1 = time_jl / time_jl_v2
+
+println("\n--- Speedup Factors (Base: YAQS Python) ---")
+println("Julia V1 Speedup: $(round(speedup_v1_vs_py, digits=2))x  (Higher is better)")
+println("Julia V2 Speedup: $(round(speedup_v2_vs_py, digits=2))x  (Target > 1.0)")
+println("V2 vs V1 Speedup: $(round(speedup_v2_vs_v1, digits=2))x")
+
+if speedup_v2_vs_py > 1.0
+    println("\nSUCCESS: Julia V2 is $(round(speedup_v2_vs_py, digits=2))x faster than YAQS Python.")
 else
-    println("Julia is $(round(1/speedup, digits=2))x SLOWER.")
+    println("\nWARNING: Julia V2 is $(round(1/speedup_v2_vs_py, digits=2))x SLOWER than YAQS Python.")
 end
+
 println("------------------------------\n")
 
 # Extract results
@@ -323,39 +421,64 @@ results_yaqs_final = [res[3:end] for res in results_yaqs_raw]
 
 # Length Check
 len_jl = length(results_jl_final[1])
-len_py = length(results_py_final[1])
+len_jl_v2 = length(results_jl_v2_final[1])
 len_yaqs = length(results_yaqs_final[1])
-println("Compare Lengths: Julia=$len_jl, Qiskit=$len_py, YAQS=$len_yaqs")
 
-if len_jl != len_py || len_jl != len_yaqs
-    min_len = min(len_jl, len_py, len_yaqs)
-    results_jl_final = [r[1:min_len] for r in results_jl_final]
-    results_py_final = [r[1:min_len] for r in results_py_final]
-    results_yaqs_final = [r[1:min_len] for r in results_yaqs_final]
-    println("Truncated to $min_len")
+len_py = RUN_QISKIT_EXACT ? length(results_py_final[1]) : len_jl
+
+println("Compare Lengths: JuliaV1=$len_jl, JuliaV2=$len_jl_v2, YAQS=$len_yaqs, Qiskit=$(RUN_QISKIT_EXACT ? len_py : "N/A")")
+
+min_len = min(len_jl, len_jl_v2, len_yaqs)
+if RUN_QISKIT_EXACT
+    min_len = min(min_len, len_py)
 end
 
-# Max Error (Julia vs Qiskit)
-max_diff = 0.0
-for i in 1:3
-    diff = maximum(abs.(results_jl_final[i] - results_py_final[i]))
-    global max_diff = max(max_diff, diff)
-    println("Site $([1,3,6][i]) Max Diff (Jl vs Qiskit): $diff")
-end
-println("Overall Max Diff (Jl vs Qiskit): $max_diff")
+if len_jl > min_len; results_jl_final = [r[1:min_len] for r in results_jl_final]; end
+if len_jl_v2 > min_len; results_jl_v2_final = [r[1:min_len] for r in results_jl_v2_final]; end
+if len_yaqs > min_len; results_yaqs_final = [r[1:min_len] for r in results_yaqs_final]; end
+if RUN_QISKIT_EXACT && len_py > min_len; results_py_final = [r[1:min_len] for r in results_py_final]; end
 
-# Max Error (YAQS vs Qiskit)
-max_diff_yaqs = 0.0
-for i in 1:3
-    diff = maximum(abs.(results_yaqs_final[i] - results_py_final[i]))
-    global max_diff_yaqs = max(max_diff_yaqs, diff)
-    println("Site $([1,3,6][i]) Max Diff (YAQS vs Qiskit): $diff")
+println("Truncated to $min_len")
+
+if RUN_QISKIT_EXACT
+    # Max Error (Julia vs Qiskit)
+    max_diff = 0.0
+    for i in 1:3
+        diff = maximum(abs.(results_jl_final[i] - results_py_final[i]))
+        global max_diff = max(max_diff, diff)
+        println("Site $([1,3,6][i]) Max Diff (JlV1 vs Qiskit): $diff")
+    end
+    println("Overall Max Diff (JlV1 vs Qiskit): $max_diff")
+
+    # Max Error (Julia V2 vs Qiskit)
+    max_diff_v2 = 0.0
+    for i in 1:3
+        diff = maximum(abs.(results_jl_v2_final[i] - results_py_final[i]))
+        global max_diff_v2 = max(max_diff_v2, diff)
+        println("Site $([1,3,6][i]) Max Diff (JlV2 vs Qiskit): $diff")
+    end
+    println("Overall Max Diff (JlV2 vs Qiskit): $max_diff_v2")
+
+    # Max Error (YAQS vs Qiskit)
+    max_diff_yaqs = 0.0
+    for i in 1:3
+        diff = maximum(abs.(results_yaqs_final[i] - results_py_final[i]))
+        global max_diff_yaqs = max(max_diff_yaqs, diff)
+        println("Site $([1,3,6][i]) Max Diff (YAQS vs Qiskit): $diff")
+    end
+    println("Overall Max Diff (YAQS vs Qiskit): $max_diff_yaqs")
 end
-println("Overall Max Diff (YAQS vs Qiskit): $max_diff_yaqs")
 
 # Plotting
 plt = pyimport("matplotlib.pyplot")
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=true)
+
+if RUN_QISKIT_EXACT
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=true)
+else
+    fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
+    ax2 = nothing
+end
+
 x = 1:length(results_jl_final[1])
 
 colors = ["r", "g", "b"]
@@ -364,33 +487,39 @@ sites = [1, 3, 6]
 for i in 1:3
     c = colors[i]
     s = sites[i]
-    ax1.plot(x, results_jl_final[i], label="Julia Z_$s", color=c, linestyle="-", linewidth=2)
-    ax1.plot(x, results_py_final[i], label="Qiskit Z_$s", color=c, linestyle="--", linewidth=2)
+    ax1.plot(x, results_jl_final[i], label="JuliaV1 Z_$s", color=c, linestyle="-", linewidth=2)
+    ax1.plot(x, results_jl_v2_final[i], label="JuliaV2 Z_$s", color=c, linestyle="-.", linewidth=2)
     ax1.plot(x, results_yaqs_final[i], label="YAQS Z_$s", color=c, linestyle=":", linewidth=3)
     
-    diff_sq = abs.(results_jl_final[i] - results_py_final[i]).^2
-    # Optional: Diff for YAQS too? Graph might get crowded. 
-    # Let's stick to Julia vs Qiskit diff for now, or maybe Julia vs YAQS?
-    # User asked "add these expectation values to the plot".
-    # The diff plot is secondary.
-    ax2.plot(x, diff_sq, label="|Jl - Qiskit|^2 Z_$s", color=c, linestyle="-", linewidth=2)
-    
-    # Difference YAQS - Qiskit
-    diff_sq_yaqs = abs.(results_yaqs_final[i] - results_py_final[i]).^2
-    ax2.plot(x, diff_sq_yaqs, label="|YAQS - Qiskit|^2 Z_$s", color=c, linestyle=":", linewidth=2)
+    if RUN_QISKIT_EXACT
+        ax1.plot(x, results_py_final[i], label="Qiskit Z_$s", color=c, linestyle="--", linewidth=2)
+        
+        diff_sq = abs.(results_jl_final[i] - results_py_final[i]).^2
+        ax2.plot(x, diff_sq, label="|JlV1 - Qiskit|^2 Z_$s", color=c, linestyle="-", linewidth=2)
+        
+        diff_sq_v2 = abs.(results_jl_v2_final[i] - results_py_final[i]).^2
+        ax2.plot(x, diff_sq_v2, label="|JlV2 - Qiskit|^2 Z_$s", color=c, linestyle="-.", linewidth=2)
+
+        diff_sq_yaqs = abs.(results_yaqs_final[i] - results_py_final[i]).^2
+        ax2.plot(x, diff_sq_yaqs, label="|YAQS - Qiskit|^2 Z_$s", color=c, linestyle=":", linewidth=2)
+    end
 end
 
-ax1.set_title("$CIRCUIT_NAME Model (L=$L, $timesteps Steps): Julia vs Qiskit vs YAQS")
+ax1.set_title("$CIRCUIT_NAME Model (L=$L, $timesteps Steps): Julia vs YAQS$(RUN_QISKIT_EXACT ? " vs Qiskit" : "")")
 ax1.set_ylabel("Expectation Value <Z>")
 ax1.legend()
 ax1.grid(true)
 
-ax2.set_title("Absolute Squared Difference")
-ax2.set_xlabel("Step Index")
-ax2.set_ylabel("|Diff|^2")
-ax2.legend()
-ax2.grid(true)
-ax2.set_yscale("log")
+if RUN_QISKIT_EXACT
+    ax2.set_title("Absolute Squared Difference")
+    ax2.set_xlabel("Step Index")
+    ax2.set_ylabel("|Diff|^2")
+    ax2.legend()
+    ax2.grid(true)
+    ax2.set_yscale("log")
+else
+    ax1.set_xlabel("Step Index")
+end
 
 plt.tight_layout()
 output_file = "comparison_$(lowercase(CIRCUIT_NAME)).png"
