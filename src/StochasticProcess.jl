@@ -33,7 +33,7 @@ function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) wher
     jump_ops = []
     L = hamiltonian.length
     
-    one_site_terms = [zeros(T, 2, 2) for _ in 1:L]
+    one_site_terms = [zeros(T, 2, 2) for _ in 1:L] # Keep as Matrix
     has_one_site = false
     
     for proc in noise_model.processes
@@ -41,7 +41,8 @@ function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) wher
         
         if proc isa LocalNoiseProcess
             L_op = proc.matrix
-            term = -0.5im * gamma * (L_op' * L_op)
+            # Convert to Matrix for arithmetic with one_site_terms
+            term = -0.5im * gamma * Matrix(L_op' * L_op)
             
             if length(proc.sites) == 1
                 s = proc.sites[1]
@@ -92,8 +93,8 @@ function adjoint_mpo(a::MPO{T}) where T
     return MPO(L, new_tensors, a.phys_dims)
 end
 
-function construct_2site_mpo(L::Int, s1::Int, s2::Int, op::Matrix{ComplexF64})
-    op_tensor = reshape(op, 2, 2, 2, 2) 
+function construct_2site_mpo(L::Int, s1::Int, s2::Int, op::AbstractMatrix)
+    op_tensor = reshape(Matrix(op), 2, 2, 2, 2) 
     op_perm = permutedims(op_tensor, (1, 3, 2, 4))
     op_mat = reshape(op_perm, 4, 4)
     
@@ -119,7 +120,7 @@ function construct_2site_mpo(L::Int, s1::Int, s2::Int, op::Matrix{ComplexF64})
     return MPO(L, tensors, fill(2, L))
 end
 
-function construct_1site_sum_mpo(L::Int, terms::Vector{Matrix{ComplexF64}})
+function construct_1site_sum_mpo(L::Int, terms::Vector{<:AbstractMatrix})
     tensors = Vector{Array{ComplexF64, 4}}(undef, L)
     phys = fill(2, L)
     
@@ -127,7 +128,7 @@ function construct_1site_sum_mpo(L::Int, terms::Vector{Matrix{ComplexF64}})
     Z_op = zeros(ComplexF64, 2, 2)
     
     for i in 1:L
-        term = terms[i]
+        term = Matrix(terms[i])
         W_block = Matrix{Matrix{ComplexF64}}(undef, 2, 2)
         W_block[1, 1] = I_op
         W_block[1, 2] = term

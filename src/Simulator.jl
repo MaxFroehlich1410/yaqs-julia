@@ -8,6 +8,7 @@ using ..NoiseModule
 using ..AnalogTJM
 using ..DigitalTJM
 
+
 export run, available_cpus
 
 function available_cpus()
@@ -89,7 +90,7 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
         
-        Threads.@threads for i in 1:sim_params.num_traj
+        Threads.@threads         for i in 1:sim_params.num_traj
             # run_digital_tjm returns (state, results)
             _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params)
             

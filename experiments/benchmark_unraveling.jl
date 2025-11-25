@@ -30,7 +30,7 @@ NOISE_STRENGTH = 0.01
 ENABLE_Y_ERROR = true
 
 # Unraveling
-NUM_TRAJECTORIES = 1000
+NUM_TRAJECTORIES = 100
 MODE = "DM" # "DM" to verify against Density Matrix, "Large" for just performance
 
 # Observables
@@ -338,10 +338,28 @@ function runner_julia_v2()
     obs = [Observable("Z_$i", ZGate(), i) for i in 1:NUM_QUBITS]
     
     # Sim Config
-    sim_params = TimeEvolutionConfig(obs, 100.0; dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    # Match time steps to layers for Simulator.jl pre-allocation
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
     
-    # Run
-    _, results = run_digital_tjm_v2(psi, circ_jl, noise_model_jl, sim_params)
+    # Run using Simulator interface
+    # This will populate obs[i].trajectories
+    Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false)
+    
+    # Extract results from trajectories
+    # We ran num_traj=1, so we take the first row of trajectories
+    results = zeros(ComplexF64, length(obs), length(sim_params.times))
+    # Note: sim_params.times length might mismatch actual digital steps if not aligned
+    # But Simulator copies min length.
+    
+    # We can infer actual result length from the first observable
+    actual_len = 0
+    # Find max non-zero index? No, DigitalTJM fills it.
+    # Actually TimeEvolutionConfig creates `times` array.
+    # We should trust what's in trajectories.
+    
+    for (i, o) in enumerate(obs)
+        results[i, :] = o.trajectories[1, :]
+    end
     
     # results is ComplexF64 (N_obs x N_steps)
     bond_dim = MPSModule.write_max_bond_dim(psi)
