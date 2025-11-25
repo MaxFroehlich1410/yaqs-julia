@@ -183,8 +183,13 @@ function handle_longrange_scalar!(mps, proc, i, processed_set, processes_here, d
     elseif startswith(nm, "unitary2pt_") || startswith(nm, "unitary_gauss_")
         gamma_comp = proc.strength
         mps.tensors[i] .*= exp(-0.5 * dt * gamma_comp)
+    
+    elseif startswith(nm, "crosstalk_") || startswith(nm, "pauli_")
+        # Standard Pauli MPO dissipation (L†L = I, so it's just scalar decay)
+        gamma = proc.strength
+        mps.tensors[i] .*= exp(-0.5 * dt * gamma)
     else
-        error("Non-Pauli long-range processes not fully implemented")
+        error("Non-Pauli long-range processes not fully implemented for: $nm")
     end
 end
 

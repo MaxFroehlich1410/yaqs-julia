@@ -27,8 +27,10 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     t_val = -1im * dt
     # Using KrylovKit
     # exponentiate(A, t, x0) -> exp(t*A) * x0
-    # TDVP Effective Hamiltonians are Hermitian. Using ishermitian=true (Lanczos) is faster and more stable.
-    val, info = exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=true)
+    # TDVP Effective Hamiltonians should be Hermitian, but numerical noise or loss of canonical form
+    # can introduce small anti-Hermitian parts. 
+    # Using ishermitian=false (Arnoldi) avoids warnings and handles these cases robustly.
+    val, info = exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=false)
     
     return val
 end

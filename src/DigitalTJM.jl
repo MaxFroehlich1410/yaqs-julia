@@ -81,8 +81,49 @@ function solve_local_jumps!(mps::MPS{T}, noise_model::NoiseModel{T}, dt::Float64
                 push!(jump_candidates, (proc, op))
                 
             elseif proc isa MPONoiseProcess
-                # Should not happen in local gate noise typically, but handle if needed
-                # Skipping for now as Digital noise is usually local
+                L_mpo = proc.mpo
+                
+                # Calculate rate <psi| L_dag L |psi>
+                # Efficiently: contract L|psi>, norm sq.
+                # Or expect_mpo(L_dag L).
+                # Let's use L|psi> contraction as it's simpler if we don't have L_dag*L precomputed.
+                # L_mpo is MPO. mps is MPS.
+                
+                # Expectation:
+                # We can use MPOModule.expect_mpo(L_dag * L, mps).
+                # Or create temp_mps = L * mps.
+                # temp_mps = contract_mpo_mps(L_mpo, mps) -- this creates uncompressed MPS (bond dim grows).
+                # norm(temp_mps)^2 is the rate.
+                # This is O(N * D^2 * d^2 * k^2).
+                
+                # Let's use contract_mpo_mps then norm.
+                # Note: contract_mpo_mps might return MPS with large bond dimension.
+                # We don't need to compress it just to get norm.
+                # However, `contract_mpo_mps` in MPO.jl typically returns an MPS.
+                
+                # Wait, we have `expect_mpo(O, mps)`.
+                # If we compute O = L_dag * L once?
+                # But L is specific to this process.
+                # Let's compute L_dag L on the fly or assume it's cheap enough.
+                # Usually L is simple MPO (bond dim 2 or 4).
+                # contract_mpo_mpo might be better.
+                
+                # Let's use `contract_mpo_mps` -> `norm`.
+                
+                # We need to make sure we don't modify `mps` here.
+                # `contract_mpo_mps` creates new MPS.
+                
+                # Optimization: We only need norm. We don't need full MPS?
+                # But let's stick to existing tools.
+                
+                # To avoid import cycle or overhead, we use MPOModule functions.
+                # We assume MPOModule is available.
+                
+                temp_mps = MPOModule.contract_mpo_mps(L_mpo, mps)
+                val = real(MPSModule.scalar_product(temp_mps, temp_mps))
+                
+                push!(rates, max(0.0, val * gamma * dt))
+                push!(jump_candidates, (proc, L_mpo))
             end
         end
         
@@ -105,40 +146,53 @@ function solve_local_jumps!(mps::MPS{T}, noise_model::NoiseModel{T}, dt::Float64
             if chosen_idx > 0
                 (proc, op) = jump_candidates[chosen_idx]
                 
-                # Apply Jump Operator
-                 if length(proc.sites) == 1
-                    site = proc.sites[1]
-                    T_ten = mps.tensors[site]
-                    @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
-                    mps.tensors[site] = T_new
-                elseif length(proc.sites) == 2
-                    # 2-site jump (SVD based application to preserve MPS form)
-                    site1, site2 = proc.sites
-                    # Assuming adjacent for now (DigitalTJM usually adjacent gates)
+                if proc isa LocalNoiseProcess
+                    # ... (existing local logic)
+                    if length(proc.sites) == 1
+                       # ...
+                       site = proc.sites[1]
+                       T_ten = mps.tensors[site]
+                       @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
+                       mps.tensors[site] = T_new
+                   elseif length(proc.sites) == 2
+                       # ... (existing 2-site logic)
+                       site1, site2 = proc.sites
+                       A1 = mps.tensors[site1]
+                       A2 = mps.tensors[site2]
+                       @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+                       
+                       op_tensor = reshape(op, 2, 2, 2, 2)
+                       @tensor Theta_prime[l, p1n, p2n, r] := op_tensor[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+                       
+                       d1, d2 = size(Theta_prime, 2), size(Theta_prime, 3)
+                       L_dim, R_dim = size(Theta_prime, 1), size(Theta_prime, 4)
+                       
+                       Mat = reshape(Theta_prime, L_dim * 2, 2 * R_dim)
+                       F = svd(Mat)
+                       rank = length(F.S)
+                       mps.tensors[site1] = reshape(F.U, L_dim, 2, rank)
+                       mps.tensors[site2] = reshape(Diagonal(F.S) * F.Vt, rank, 2, R_dim)
+                   end
+                elseif proc isa MPONoiseProcess
+                    # Apply MPO Jump
+                    # op is the MPO
+                    new_mps = MPOModule.contract_mpo_mps(op, mps)
+                    # Truncate to keep bond dimension reasonable
+                    # Jumps increase bond dimension.
+                    # We should truncate to max_bond_dim (from where? usually mps.max_bond_dim if stored, or sim_params)
+                    # But solve_local_jumps! signature doesn't have sim_params or max_bond_dim.
+                    # We'll rely on default truncation or just compression.
+                    # MPSModule.truncate!(new_mps)
+                    # Better: check if mps has bond dim info? No.
+                    # Just compress.
+                    MPSModule.truncate!(new_mps; threshold=1e-10)
                     
-                    # Contract 2 sites
-                    A1 = mps.tensors[site1]
-                    A2 = mps.tensors[site2]
-                    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
-                    
-                    # Apply Op
-                    # op is (4,4) matrix acting on (p1, p2) flattened
-                    # Reshape op to (2,2, 2,2) -> (p1_out, p2_out, p1_in, p2_in)
-                    op_tensor = reshape(op, 2, 2, 2, 2)
-                    @tensor Theta_prime[l, p1n, p2n, r] := op_tensor[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
-                    
-                    # SVD to split back
-                    d1, d2 = size(Theta_prime, 2), size(Theta_prime, 3) # 2, 2
-                    L_dim, R_dim = size(Theta_prime, 1), size(Theta_prime, 4)
-                    
-                    Mat = reshape(Theta_prime, L_dim * 2, 2 * R_dim)
-                    F = svd(Mat)
-                    
-                    # No truncation needed for jump, just split
-                    rank = length(F.S)
-                    
-                    mps.tensors[site1] = reshape(F.U, L_dim, 2, rank)
-                    mps.tensors[site2] = reshape(Diagonal(F.S) * F.Vt, rank, 2, R_dim)
+                    # Update mps tensors in-place (replace arrays)
+                    # mps is mutable struct.
+                    mps.tensors = new_mps.tensors
+                    mps.phys_dims = new_mps.phys_dims
+                    mps.orth_center = new_mps.orth_center
+                    mps.length = new_mps.length
                 end
             end
         end
