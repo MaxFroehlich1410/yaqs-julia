@@ -80,18 +80,6 @@ function get_qutip_hamiltonian(L, Jxx, Jyy, Jzz, hx, hy, hz)
     
     # Interaction terms
     for i in 1:(L-1)
-        # Python 0-based indexing
-        # But wait, sx_list is 0-based in my construction?
-        # sx_list = [ ... for i in 0:L-1]. So sx_list[1] is site 0.
-        # Julia 1-based indexing for Jxx[i].
-        # Interaction between site i and i+1 (1-based) -> indices i-1 and i (0-based).
-        # Julia arrays are 1-based.
-        # sx_list is a Julia Vector of PyObjects.
-        # sx_list[i] is the i-th element (site i-1).
-        
-        # Site 1 (Julia) -> index 1 in sx_list -> site 0 operator.
-        # Site i (Julia) -> index i.
-        # Bond (i, i+1) involves sx_list[i] and sx_list[i+1].
         
         H += Jxx[i] * sx_list[i] * sx_list[i+1]
         H += Jyy[i] * sy_list[i] * sy_list[i+1]
@@ -136,9 +124,10 @@ println("\nRunning Julia TDVP...")
 # 1. Initialize MPS |00...0>
 mps_1 = MPS(L; state="zeros")
 pad_bond_dimension!(mps_1, max_bond_dim, noise_scale=1e-12) # Helper to expand bond dim slightly for 1-site
+println("max bond dim MPS1: ", write_max_bond_dim(mps_1))
 
 mps_2 = MPS(L; state="zeros")
-
+println("max bond dim MPS2: ", write_max_bond_dim(mps_2))
 # 2. Construct MPO
 H_mpo = init_general_hamiltonian(L, Jxx, Jyy, Jzz, hx, hy, hz)
 

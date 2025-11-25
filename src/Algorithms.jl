@@ -27,7 +27,8 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     t_val = -1im * dt
     # Using KrylovKit
     # exponentiate(A, t, x0) -> exp(t*A) * x0
-    val, info = exponentiate(A_func, t_val, v; tol=1e-10, krylovdim=k, maxiter=1, ishermitian=false)
+    # TDVP Effective Hamiltonians are Hermitian. Using ishermitian=true (Lanczos) is faster and more stable.
+    val, info = exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=true)
     
     return val
 end
@@ -138,6 +139,9 @@ end
 Perform 1-site TDVP.
 """
 function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
+    # 1. Ensure state is in Right Canonical Form (Center at 1) for initial E_right calculation.
+    shift_orthogonality_center!(state, 1)
+
     dt = config.dt
     L = state.length
     
@@ -145,19 +149,19 @@ function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
     # Right Envs
     E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
     
-    r_bond_dim = size(state.tensors[L], 3)
-    r_mpo_dim = size(H.tensors[L], 4)
-    E_right[L+1] = make_identity_env(r_bond_dim, r_mpo_dim)
+    # Use make_identity_env to correctly match dimensions (in case bond dim > 1)
+    r_bond = size(state.tensors[L], 3)
+    r_mpo = size(H.tensors[L], 4)
+    E_right[L+1] = make_identity_env(r_bond, r_mpo)
     
     for i in L:-1:2
         E_right[i] = update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
     end
     
     E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    
-    l_bond_dim = size(state.tensors[1], 1)
-    l_mpo_dim = size(H.tensors[1], 1)
-    E_left[1] = make_identity_env(l_bond_dim, l_mpo_dim)
+    l_bond = size(state.tensors[1], 1)
+    l_mpo = size(H.tensors[1], 1)
+    E_left[1] = make_identity_env(l_bond, l_mpo)
     
     # Sweep Right (1 -> L)
     for i in 1:L
@@ -174,41 +178,24 @@ function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
             # 2. Split / QR to move center right
             l, p, r = size(A_new)
             A_mat = reshape(A_new, l*p, r)
-            F = qr(A_mat) # Julia's qr defaults to thin but returns full struct.
-           
-            
-
-            # 2. Split / QR to move center right
-            l, p, r = size(A_new)
-            A_mat = reshape(A_new, l*p, r)
             F = qr(A_mat)
+            Q = Matrix(F.Q)
+            R = Matrix(F.R) # This is C (Bond Matrix)
             
-            # Extract Thin Q and R matching numpy.linalg.qr(mode='reduced')
-            # K = min(l*p, r)
-            # Q is (l*p, K)
-            # R is (K, r)
-            
-            K = min(l*p, r)
-            Q_thin = Matrix(F.Q)[:, 1:K]
-            R_thin = Matrix(F.R)[1:K, :]
-            
-            # Update Site i
-            state.tensors[i] = reshape(Q_thin, l, p, K)
+            # Update Site i to Left-Orthogonal Q
+            state.tensors[i] = reshape(Q, l, p, size(Q, 2))
             
             # Update Left Env
             E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
             
             # Evolve Bond Backward (-dt/2)
             func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1]) # Bond is between i and i+1
-            C_new = expm_krylov(func_bond, R_thin, -dt/2, 25)
+            C_new = expm_krylov(func_bond, R, -dt/2, 25)
             
             # Absorb C into next site (i+1)
             Next = state.tensors[i+1]
-            # Next is (r, p_next, r_next). C_new is (K, r).
-            # We contract C_new[k_new, k_old] * Next[k_old, p, r]
             @tensor Next_new[l, p, r] := C_new[l, k] * Next[k, p, r]
             state.tensors[i+1] = Next_new
-
         end
     end
     
@@ -227,38 +214,26 @@ function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
             l, p, r = size(A_new)
             A_mat = reshape(A_new, l, p*r)
             F = lq(A_mat)
+            L_mat = Matrix(F.L) # This is C (Bond Matrix)
+            Q = Matrix(F.Q)
             
-            # Extract Thin L and Q matching numpy logic (if we were doing QR on transpose)
-            # LQ in Julia: L is (l, K), Q is (K, p*r). K = min(l, p*r).
-            # This effectively preserves the bond dimension if it fits.
-            
-            K = min(l, p*r)
-            L_thin = Matrix(F.L)[:, 1:K]
-            Q_thin = Matrix(F.Q)[1:K, :]
-            
-            state.tensors[i] = reshape(Q_thin, K, p, r)
+            # Update Site i to Right-Orthogonal Q
+            state.tensors[i] = reshape(Q, size(Q, 1), p, r)
             
             # Update Right Env
             E_right[i] = update_right_environment(state.tensors[i], W, E_right[i+1])
             
             # Evolve Bond Backward (-dt/2)
             func_bond(x) = project_bond(x, E_left[i], E_right[i]) # Bond between i-1 and i
-            C_new = expm_krylov(func_bond, L_thin, -dt/2, 25)
+            C_new = expm_krylov(func_bond, L_mat, -dt/2, 25)
             
             # Absorb into i-1
             Prev = state.tensors[i-1]
-            # Prev is (l_prev, p_prev, l). C_new is (l, K).
-            # We contract Prev[..., l] * C_new[l, K] -> result (..., K)
-            # Wait. C_new is (l, K)?
-            # L_thin was (l, K).
-            # So C_new is (l, K).
-            # Prev is (l_prev, p_prev, l).
-            # Result (l_prev, p_prev, K).
             @tensor Prev_new[l, p, r] := Prev[l, p, k] * C_new[k, r]
             state.tensors[i-1] = Prev_new
         end
     end
-    
+    println("max bond dim: ", write_max_bond_dim(state))
 end
 
 
@@ -440,4 +415,3 @@ function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
 end
 
 end # module
-
