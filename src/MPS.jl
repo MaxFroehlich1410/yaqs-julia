@@ -4,6 +4,7 @@ using LinearAlgebra
 using StaticArrays
 using Printf
 using TensorOperations
+using Random
 
 export MPS, check_if_valid_mps, check_canonical_form, pad_bond_dimension!
 export write_max_bond_dim, to_vec
@@ -390,18 +391,26 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
 end
 
 """
-    pad_bond_dimension!(mps, target_dim)
+    pad_bond_dimension!(mps, target_dim; noise_scale=1e-8, rng=Random.default_rng())
 
-Pad bonds in-place.
+Pad every internal bond up to `target_dim` and seed freshly added virtual
+subspaces with small complex noise so that single-site TDVP can explore the
+enlarged manifold. The perturbation keeps the physical state unchanged up to
+`noise_scale` (default `1e-8`) but guarantees that all Schmidt values are
+strictly non-zero, which is required for entanglement growth in the 1-site
+algorithm.
 """
-function pad_bond_dimension!(mps::MPS{T}, target_dim::Int) where T
-    # Ensure canonical at 1? Or just pad?
-    # Usually padding is done on normalized state.
-    normalize!(mps) 
+function pad_bond_dimension!(mps::MPS{T}, target_dim::Int;
+                             noise_scale::Real=1e-8,
+                             rng::AbstractRNG=Random.default_rng()) where T
+    @assert target_dim > 0 "target_dim must be positive"
+    normalize!(mps)
+    
+    noise_amp = float(noise_scale)
     
     for i in 1:(mps.length - 1)
-        A = mps.tensors[i] # (L, d, R)
-        B = mps.tensors[i+1] # (R, d, R_next)
+        A = mps.tensors[i]     # (L, d, R)
+        B = mps.tensors[i+1]   # (R, d, R_next)
         
         chi_current = size(A, 3)
         if chi_current >= target_dim
@@ -410,17 +419,35 @@ function pad_bond_dimension!(mps::MPS{T}, target_dim::Int) where T
         
         new_chi = target_dim
         
-        # A: (L, d, new_chi)
-        L, d, R = size(A)
-        new_A = zeros(T, L, d, new_chi)
-        new_A[:, :, 1:R] .= A
+        # Expand site i along its right bond
+        Ldim, dphys, Rdim = size(A)
+        new_A = zeros(T, Ldim, dphys, new_chi)
+        new_A[:, :, 1:Rdim] .= A
+        if noise_amp > 0 && new_chi > Rdim
+            view_cols = @view new_A[:, :, (Rdim+1):new_chi]
+            fill_complex_noise!(rng, view_cols, noise_amp)
+        end
         mps.tensors[i] = new_A
         
-        # B: (new_chi, d, R_next)
-        R_b, d_b, R_next = size(B)
-        new_B = zeros(T, new_chi, d_b, R_next)
-        new_B[1:R_b, :, :] .= B
+        # Expand site i+1 along its left bond
+        Rb, db, Rnext = size(B)
+        new_B = zeros(T, new_chi, db, Rnext)
+        new_B[1:Rb, :, :] .= B
+        if noise_amp > 0 && new_chi > Rb
+            view_rows = @view new_B[(Rb+1):new_chi, :, :]
+            fill_complex_noise!(rng, view_rows, noise_amp)
+        end
         mps.tensors[i+1] = new_B
+    end
+    
+    normalize!(mps)
+end
+
+@inline function fill_complex_noise!(rng::AbstractRNG, A::AbstractArray{T}, scale::Real) where {T}
+    for idx in eachindex(A)
+        real_part = randn(rng)
+        imag_part = randn(rng)
+        A[idx] = T(scale * (real_part + imag_part * im))
     end
 end
 

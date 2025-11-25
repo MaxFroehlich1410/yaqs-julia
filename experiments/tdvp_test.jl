@@ -135,7 +135,7 @@ println("\nRunning Julia TDVP...")
 
 # 1. Initialize MPS |00...0>
 mps_1 = MPS(L; state="zeros")
-pad_bond_dimension!(mps_1, 4) # Helper to expand bond dim slightly for 1-site
+pad_bond_dimension!(mps_1, max_bond_dim, noise_scale=1e-12) # Helper to expand bond dim slightly for 1-site
 
 mps_2 = MPS(L; state="zeros")
 
