@@ -68,6 +68,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/qhull-2020.2-h420ef59_5.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/qiskit-2.2.3-py310h06fc29a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/qiskit-aer-0.17.2-cpu_py313h9eb7195_202.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/qutip-5.2.2-py313h28ea3aa_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.2-h1d1bf99_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/rustworkx-0.17.1-py310h1620c0a_3.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/scipy-1.16.3-py313h0d10b07_1.conda
@@ -763,8 +764,6 @@ packages:
   - python 3.13.* *_cp313
   - __osx >=11.0
   - python_abi 3.13.* *_cp313
-  arch: arm64
-  platform: osx
   license: BSD-3-Clause
   license_family: BSD
   purls:
@@ -910,13 +909,32 @@ packages:
   - python_abi 3.13.* *_cp313
   - qiskit >=0.45.2
   - scipy >=1.0
-  arch: arm64
-  platform: osx
   license: Apache-2.0
   purls:
   - pkg:pypi/qiskit-aer?source=hash-mapping
   size: 1717221
   timestamp: 1763773266703
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/qutip-5.2.2-py313h28ea3aa_0.conda
+  sha256: 9b32d6ae29cfa124db5de155e11ad7ac392f6a81567a9a552dd2d1a89cf8d872
+  md5: 2c6c5dba9a52442791bab80b8dee3ed1
+  depends:
+  - __osx >=11.0
+  - libcxx >=19
+  - numpy >=1.23,<3
+  - packaging
+  - python >=3.13,<3.14.0a0
+  - python >=3.13,<3.14.0a0 *_cp313
+  - python_abi 3.13.* *_cp313
+  - scipy >=1.0
+  - setuptools
+  arch: arm64
+  platform: osx
+  license: BSD-3-Clause
+  license_family: BSD
+  purls:
+  - pkg:pypi/qutip?source=hash-mapping
+  size: 4693512
+  timestamp: 1762454567968
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/readline-8.2-h1d1bf99_2.conda
   sha256: 7db04684d3904f6151eff8673270922d31da1eea7fa73254d01c437f49702e34
   md5: 63ef3f6e6d6d5c589e64f11263dc5676

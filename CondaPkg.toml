@@ -1,6 +1,7 @@
 [deps]
 qiskit-aer = ""
 matplotlib = ""
+qutip = ""
 
     [deps.qiskit]
     channel = "conda-forge"

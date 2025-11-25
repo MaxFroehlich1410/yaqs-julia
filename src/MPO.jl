@@ -6,7 +6,7 @@ using Base.Threads
 using ..MPSModule
 using ..GateLibrary
 
-export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_heisenberg
+export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_general_hamiltonian
 export orthogonalize!, truncate!
 
 abstract type AbstractTensorNetwork end
@@ -162,10 +162,17 @@ function init_ising(length::Int, J::Union{Real, Vector{<:Real}}, g::Union{Real, 
     return MPO(length, tensors, phys_dims, 0)
 end
 
+
 """
-    init_heisenberg(length::Int, Jx, Jy, Jz, h) -> MPO
+    init_general_hamiltonian(length::Int, Jxx, Jyy, Jzz, hx, hy, hz) -> MPO
+
+Construct MPO for general Hamiltonian:
+H = sum_i (Jxx_i X_i X_{i+1} + Jyy_i Y_i Y_{i+1} + Jzz_i Z_i Z_{i+1})
+  + sum_i (hx_i X_i + hy_i Y_i + hz_i Z_i)
+
+Parameters can be Vectors (site-dependent) or Scalars (uniform).
 """
-function init_heisenberg(length::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64)
+function init_general_hamiltonian(length::Int, Jxx, Jyy, Jzz, hx, hy, hz)
     X_op = Matrix(matrix(XGate()))
     Y_op = Matrix(matrix(YGate()))
     Z_op = Matrix(matrix(ZGate()))
@@ -175,36 +182,10 @@ function init_heisenberg(length::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::
     tensors = Vector{Array{ComplexF64, 4}}(undef, length)
     phys_dims = fill(2, length)
 
-    # Bulk (5x5)
-    W_bulk = Matrix{Matrix{ComplexF64}}(undef, 5, 5)
-    for r in 1:5, c in 1:5; W_bulk[r,c] = Zero_op; end
-    
-    W_bulk[1, 1] = I_op
-    W_bulk[1, 2] = -Jx * X_op
-    W_bulk[1, 3] = -Jy * Y_op
-    W_bulk[1, 4] = -Jz * Z_op
-    W_bulk[1, 5] = -h * Z_op
-    W_bulk[2, 5] = X_op
-    W_bulk[3, 5] = Y_op
-    W_bulk[4, 5] = Z_op
-    W_bulk[5, 5] = I_op
-    
-    # Left (1x5)
-    W_left = Matrix{Matrix{ComplexF64}}(undef, 1, 5)
-    W_left[1, 1] = I_op
-    W_left[1, 2] = -Jx * X_op
-    W_left[1, 3] = -Jy * Y_op
-    W_left[1, 4] = -Jz * Z_op
-    W_left[1, 5] = -h * Z_op
-    
-    # Right (5x1)
-    W_right = Matrix{Matrix{ComplexF64}}(undef, 5, 1)
-    W_right[1, 1] = Zero_op
-    W_right[2, 1] = X_op
-    W_right[3, 1] = Y_op
-    W_right[4, 1] = Z_op
-    W_right[5, 1] = I_op
+    # Helper to get parameter at site i
+    get_param(p, i) = isa(p, Vector) ? (i <= Base.length(p) ? p[i] : 0.0) : p
 
+    # Block to tensor helper
     function block_to_tensor(W_block)
         rows, cols = size(W_block)
         T = zeros(ComplexF64, rows, 2, 2, cols)
@@ -214,14 +195,65 @@ function init_heisenberg(length::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::
         return T
     end
 
-    if length == 1
-        tensors[1] = reshape(-h * Z_op, 1, 2, 2, 1)
-    else
-        tensors[1] = block_to_tensor(W_left)
-        for i in 2:(length-1)
-            tensors[i] = block_to_tensor(W_bulk)
+    for i in 1:length
+        # Current site params
+        # Couplings J are for bond (i, i+1). Only valid for i < L.
+        val_Jxx = (i < length) ? get_param(Jxx, i) : 0.0
+        val_Jyy = (i < length) ? get_param(Jyy, i) : 0.0
+        val_Jzz = (i < length) ? get_param(Jzz, i) : 0.0
+        
+        # Fields h are for site i.
+        val_hx = get_param(hx, i)
+        val_hy = get_param(hy, i)
+        val_hz = get_param(hz, i)
+        
+        # Build local field term
+        loc_field = val_hx * X_op + val_hy * Y_op + val_hz * Z_op
+
+        # Matrix size 5x5
+        # 1: Identity (from Left)
+        # 2: X (waiting for X)
+        # 3: Y (waiting for Y)
+        # 4: Z (waiting for Z)
+        # 5: Identity (to Right)
+        
+        W = Matrix{Matrix{ComplexF64}}(undef, 5, 5)
+        for r in 1:5, c in 1:5; W[r,c] = Zero_op; end
+        
+        # Row 1 (Input from Identity)
+        W[1, 1] = I_op
+        W[1, 2] = val_Jxx * X_op
+        W[1, 3] = val_Jyy * Y_op
+        W[1, 4] = val_Jzz * Z_op
+        W[1, 5] = loc_field
+        
+        # Completing interactions
+        W[2, 5] = X_op
+        W[3, 5] = Y_op
+        W[4, 5] = Z_op
+        
+        # Identity passthrough
+        W[5, 5] = I_op
+        
+        # Extract correct block based on boundary
+        if i == 1
+            # First site: Row 1 only
+            # But wait, if L=1, it's just [1, 5] -> loc_field.
+            if length == 1
+                 tensors[i] = reshape(loc_field, 1, 2, 2, 1)
+            else
+                 # Top row (1, :)
+                 W_row = W[1:1, :]
+                 tensors[i] = block_to_tensor(W_row)
+            end
+        elseif i == length
+            # Last site: Column 5 only
+            W_col = W[:, 5:5]
+            tensors[i] = block_to_tensor(W_col)
+        else
+            # Bulk
+            tensors[i] = block_to_tensor(W)
         end
-        tensors[length] = block_to_tensor(W_right)
     end
 
     return MPO(length, tensors, phys_dims, 0)
