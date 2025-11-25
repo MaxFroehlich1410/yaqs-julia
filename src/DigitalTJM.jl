@@ -1,241 +1,281 @@
-module DigitalTJM
+module DigitalTJMV2
 
 using LinearAlgebra
 using Base.Threads
+using TensorOperations
 using ..MPSModule
 using ..MPOModule
 using ..GateLibrary
 using ..NoiseModule
+using ..DissipationModule
 using ..SimulationConfigs
 using ..Algorithms
-using ..DissipationModule
-using ..StochasticProcessModule
+using ..DigitalTJM: DigitalCircuit, DigitalGate, process_circuit
 
-export DigitalCircuit, add_gate!, run_digital_tjm, DigitalGate
+export run_digital_tjm_v2
 
-# --- Circuit Representation ---
-
-struct DigitalGate
-    op::AbstractOperator
-    sites::Vector{Int}
-    # Optional: Custom generator for 2-qubit gates (Hamiltonian term)
-    # If nothing, we assume the GateLibrary defines it or it's a standard unitary.
-    generator::Union{Vector{Matrix{ComplexF64}}, Nothing} 
-end
-
-mutable struct DigitalCircuit
-    num_qubits::Int
-    layers::Vector{Vector{DigitalGate}} # Organized by "time steps"
-    gates::Vector{DigitalGate}
-    
-    function DigitalCircuit(n::Int)
-        new(n, Vector{Vector{DigitalGate}}(), Vector{DigitalGate}())
-    end
-end
-
-function add_gate!(circ::DigitalCircuit, op::AbstractOperator, sites::Vector{Int}; generator=nothing)
-    if isnothing(generator)
-        try
-            generator = GateLibrary.generator(op)
-        catch e
-            # If generator not defined, and it's a 2-qubit gate, this might be an issue later if using TJM.
-            # But for 1-qubit gates, generator is not needed by DigitalTJM (uses contract).
-            # We leave it as nothing.
-        end
-    end
-    push!(circ.gates, DigitalGate(op, sites, generator))
-end
-
-# --- Layer Processing (Commutation/Parallelism) ---
+# --- Noise Helpers ---
 
 """
-    process_circuit(circuit::DigitalCircuit)
+    create_local_noise_model(global_noise_model, sites...)
 
-Organizes gates into parallelizable layers.
-Returns a tuple: (layers, barriers_indices)
-`layers` is a Vector of Vectors of gates.
-`barriers_indices` is a Dict mapping layer_index -> Vector{String} of barrier labels that occur AFTER that layer.
+Creates a new NoiseModel containing only processes that act on the specified sites.
 """
-function process_circuit(circ::DigitalCircuit)
-    # If existing layers are populated, we might need to re-process to find barriers if not already handled.
-    # But DigitalCircuit struct doesn't store barriers separately in layers usually.
-    # We will re-process from flat list `circ.gates` to ensure correct barrier handling.
+function create_local_noise_model(noise_model::NoiseModel{T}, site1::Int, site2::Int) where T
+    affected_sites = Set([site1, site2])
     
-    last_layer_idx = zeros(Int, circ.num_qubits)
-    layers = Vector{Vector{DigitalGate}}()
+    local_procs = Vector{AbstractNoiseProcess{T}}()
     
-    # Map from layer index to list of barrier labels to execute AFTER that layer
-    barrier_map = Dict{Int, Vector{String}}()
-    
-    for gate in circ.gates
-        op = gate.op
-        
-        if isa(op, Barrier)
-            # Barriers act as synchronization points.
-            # They effectively "close" the current layers for the involved qubits.
-            # And we attach the barrier label to the *current max layer* of these qubits.
-            
-            # Find the max layer among involved qubits
-            # If sites is empty (global barrier), use max of all.
-            sites = isempty(gate.sites) ? collect(1:circ.num_qubits) : gate.sites
-            
-            max_l = 0
-            for s in sites
-                max_l = max(max_l, last_layer_idx[s])
+    for proc in noise_model.processes
+        # Check if process sites are subset of affected sites
+        p_sites = proc.sites
+        if length(p_sites) == 1
+            if p_sites[1] == site1 || p_sites[1] == site2
+                push!(local_procs, proc)
             end
-            
-            # If max_l is 0, it means barrier at start. We can mark it at 0.
-            if !haskey(barrier_map, max_l)
-                barrier_map[max_l] = String[]
+        elseif length(p_sites) == 2
+            # Check exact match (ignoring order if needed, but usually sorted)
+            if (p_sites[1] == site1 && p_sites[2] == site2) || (p_sites[1] == site2 && p_sites[2] == site1)
+                 push!(local_procs, proc)
             end
-            push!(barrier_map[max_l], op.label)
-            
-            # All involved qubits must now be at least at max_l (effectively they wait).
-            # But they are already at <= max_l.
-            # We don't increment last_layer_idx for a barrier, just sync?
-            # Actually, future gates on these qubits must start AFTER this barrier.
-            # So effectively, they must start at max_l + 1.
-            # But wait, if we have gates at max_l already, next gate goes to max_l+1 naturally?
-            # Yes, but a barrier forces ALL wires to be at least max_l before proceeding?
-            # No, usually barriers just segment.
-            # For simplicity: We attach the label to `max_l` so we measure after `max_l` is done.
-            # And we update `last_layer_idx` to `max_l` for all sites to ensure synchronization?
-            
-            for s in sites
-                last_layer_idx[s] = max_l
-            end
-            
-            continue
-        end
-        
-        # Normal Gate
-        start_layer = 1
-        for s in gate.sites
-            start_layer = max(start_layer, last_layer_idx[s] + 1)
-        end
-        
-        while length(layers) < start_layer
-            push!(layers, Vector{DigitalGate}())
-        end
-        
-        push!(layers[start_layer], gate)
-        
-        for s in gate.sites
-            last_layer_idx[s] = start_layer
         end
     end
     
-    return layers, barrier_map
+    return NoiseModel(local_procs)
 end
 
-# --- MPO Construction ---
+"""
+    solve_local_jumps!(mps, noise_model, dt)
+
+Performs stochastic jumps based on the local noise model.
+Optimized for local application without full H_eff construction.
+"""
+function solve_local_jumps!(mps::MPS{T}, noise_model::NoiseModel{T}, dt::Float64) where T
+    # 1. Calculate Norm Squared
+    # Since we are in a trajectory, the state might be unnormalized due to dissipation.
+    norm_sq = real(MPSModule.scalar_product(mps, mps))
+    
+    # 2. Random Draw
+    r = rand()
+    
+    if r > norm_sq
+        # A jump occurs!
+        rates = Float64[]
+        jump_candidates = [] # Store (proc, op)
+        
+        for proc in noise_model.processes
+            gamma = proc.strength
+            
+            val = 0.0
+            if proc isa LocalNoiseProcess
+                op = proc.matrix
+                op_sq = op' * op
+                
+                if length(proc.sites) == 1
+                    val = real(MPSModule.local_expect(mps, op_sq, proc.sites[1]))
+                elseif length(proc.sites) == 2
+                     val = real(MPSModule.local_expect_two_site(mps, op_sq, proc.sites[1], proc.sites[2]))
+                end
+                
+                push!(rates, max(0.0, val * gamma * dt))
+                push!(jump_candidates, (proc, op))
+                
+            elseif proc isa MPONoiseProcess
+                # Should not happen in local gate noise typically, but handle if needed
+                # Skipping for now as Digital noise is usually local
+            end
+        end
+        
+        total_rate = sum(rates)
+        
+        if total_rate > 0
+            # Select jump
+            r_jump = rand() * total_rate
+            current_sum = 0.0
+            chosen_idx = 0
+            
+            for (i, rate) in enumerate(rates)
+                current_sum += rate
+                if r_jump <= current_sum
+                    chosen_idx = i
+                    break
+                end
+            end
+            
+            if chosen_idx > 0
+                (proc, op) = jump_candidates[chosen_idx]
+                
+                # Apply Jump Operator
+                 if length(proc.sites) == 1
+                    site = proc.sites[1]
+                    T_ten = mps.tensors[site]
+                    @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
+                    mps.tensors[site] = T_new
+                elseif length(proc.sites) == 2
+                    # 2-site jump (SVD based application to preserve MPS form)
+                    site1, site2 = proc.sites
+                    # Assuming adjacent for now (DigitalTJM usually adjacent gates)
+                    
+                    # Contract 2 sites
+                    A1 = mps.tensors[site1]
+                    A2 = mps.tensors[site2]
+                    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+                    
+                    # Apply Op
+                    # op is (4,4) matrix acting on (p1, p2) flattened
+                    # Reshape op to (2,2, 2,2) -> (p1_out, p2_out, p1_in, p2_in)
+                    op_tensor = reshape(op, 2, 2, 2, 2)
+                    @tensor Theta_prime[l, p1n, p2n, r] := op_tensor[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+                    
+                    # SVD to split back
+                    d1, d2 = size(Theta_prime, 2), size(Theta_prime, 3) # 2, 2
+                    L_dim, R_dim = size(Theta_prime, 1), size(Theta_prime, 4)
+                    
+                    Mat = reshape(Theta_prime, L_dim * 2, 2 * R_dim)
+                    F = svd(Mat)
+                    
+                    # No truncation needed for jump, just split
+                    rank = length(F.S)
+                    
+                    mps.tensors[site1] = reshape(F.U, L_dim, 2, rank)
+                    mps.tensors[site2] = reshape(Diagonal(F.S) * F.Vt, rank, 2, R_dim)
+                end
+            end
+        end
+    end
+    
+    # 3. Normalize
+    # Digital simulation usually enforces normalization after steps
+    MPSModule.normalize!(mps)
+end
+
+# --- Helpers ---
 
 """
-    construct_generator_mpo(gate, L)
+    construct_window_mpo(gate, window_start, window_end)
 
-Constructs an MPO for the generator of a 2-qubit gate.
-Assumes the generator is a single term H = A ⊗ B (bond dim 1).
-Applies the scaling coefficient from the gate op (e.g. theta/2).
+Constructs an MPO for the window [window_start, window_end].
+The gate acts on `gate.sites`.
 """
-function construct_generator_mpo(gate::DigitalGate, L::Int)
-    @assert length(gate.sites) == 2
-    @assert !isnothing(gate.generator) "Gate must have a generator defined for Digital TJM"
+function construct_window_mpo(gate::DigitalGate, window_start::Int, window_end::Int)
+    L_window = window_end - window_start + 1
+    tensors = Vector{Array{ComplexF64, 4}}(undef, L_window)
+    phys_dims = fill(2, L_window)
     
     s1, s2 = sort(gate.sites)
-    gen = gate.generator
+    # Map global sites to window relative indices (1-based)
+    rel_s1 = s1 - window_start + 1
+    rel_s2 = s2 - window_start + 1
     
-    # Get scaling coefficient
+    gen = gate.generator
     coeff = GateLibrary.hamiltonian_coeff(gate.op)
     
-    tensors = Vector{Array{ComplexF64, 4}}(undef, L)
-    phys_dims = fill(2, L)
+    # Check if sites are within window (they MUST be)
+    @assert rel_s1 >= 1 && rel_s2 <= L_window "Gate sites outside window"
     
-    for i in 1:L
+    for i in 1:L_window
+        # Identity default
         T = zeros(ComplexF64, 1, 2, 2, 1)
+        T[1, :, :, 1] = Matrix{ComplexF64}(I, 2, 2)
         
-        if i == s1
-            T[1, :, :, 1] = coeff * gen[1] # Scale first op
-        elseif i == s2
-            T[1, :, :, 1] = gen[2] # Second op (coeff applied once)
-        else
-            T[1, :, :, 1] = Matrix{ComplexF64}(I, 2, 2)
+        if i == rel_s1
+            T[1, :, :, 1] = coeff * gen[1]
+        elseif i == rel_s2
+            T[1, :, :, 1] = gen[2]
         end
+        
         tensors[i] = T
     end
     
-    return MPO(L, tensors, phys_dims)
+    return MPO(L_window, tensors, phys_dims, 0)
 end
 
-# --- Application ---
-
+"""
+    apply_single_qubit_gate!(mps, gate)
+"""
 function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     site = gate.sites[1]
     op_mat = matrix(gate.op)
     
     A = mps.tensors[site] # (L, d, R)
     L, d, R = size(A)
-    A_perm = reshape(permutedims(A, (2, 1, 3)), d, L*R)
     
-    New_A = op_mat * A_perm
-    New_A = permutedims(reshape(New_A, d, L, R), (2, 1, 3))
+    # Contract: NewA[l, d', r] = Op[d', d] * A[l, d, r]
+    # Permute A -> (d, L, R) -> (d, L*R)
+    A_perm = reshape(permutedims(A, (2, 1, 3)), d, L*R)
+    New_A_mat = op_mat * A_perm
+    New_A = permutedims(reshape(New_A_mat, d, L, R), (2, 1, 3))
     
     mps.tensors[site] = New_A
 end
 
-function apply_two_qubit_gate!(mps::MPS, gate::DigitalGate, sim_params::AbstractSimConfig)
-    # sim_params can be TimeEvolutionConfig or StrongMeasurementConfig.
-    # two_site_tdvp! expects TimeEvolutionConfig for parameters like dt and order.
-    # If we have StrongMeasurementConfig, we might need to extract/adapt.
-    # However, the Python code assumes TJM (TDVP) runs with certain integration parameters.
-    # In Julia, StrongMeasurementConfig doesn't carry dt/order/krylov params.
-    # The user likely passed TimeEvolutionConfig for digital simulation anyway.
-    # Let's assume sim_params is compatible or convert.
+"""
+    apply_window!(state, gate, sim_params)
+
+Applies a two-qubit gate using the windowing technique.
+"""
+function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig)
+    s1, s2 = sort(gate.sites)
     
-    H_gate = construct_generator_mpo(gate, mps.length)
+    # Window Logic: Python uses `window_size = 1` padding
+    # Window = [min(s) - 1, max(s) + 1] (clipped)
+    padding = 1
+    win_start = max(1, s1 - padding)
+    win_end = min(state.length, s2 + padding)
     
-    # Create a temporary config for the step
-    # Default dt=1.0 is standard for "Gate as Generator" if H is properly scaled.
-    tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0) 
-    two_site_tdvp!(mps, H_gate, tmp_config)
+    # 1. Shift Orthogonality Center to Window Start
+    # This ensures left env is Identity.
+    MPSModule.shift_orthogonality_center!(state, win_start)
+    
+    # 2. Extract Window
+    win_len = win_end - win_start + 1
+    
+    win_tensors = state.tensors[win_start:win_end] # Shallow copy of the vector of arrays
+    win_phys = state.phys_dims[win_start:win_end]
+    
+    # Create Short MPS
+    # Orth center is at 1 (relative) because we shifted global to win_start.
+    short_state = MPS(win_len, win_tensors, win_phys, 1)
+    
+    # 3. Construct Short MPO
+    short_mpo = construct_window_mpo(gate, win_start, win_end)
+    
+    # 4. Run TDVP
+    # Use temporary config with dt=1.0 (gate application)
+    gate_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, 
+                                      truncation_threshold=sim_params.truncation_threshold,
+                                      max_bond_dim=sim_params.max_bond_dim)
+    
+    two_site_tdvp!(short_state, short_mpo, gate_config)
+    
+    # 5. Update Original State
+    state.tensors[win_start:win_end] .= short_state.tensors
+    
+    # 6. Update Orthogonality Center
+    state.orth_center = win_start
 end
 
-# --- Helper: Observable Evaluation ---
 
-function evaluate_observables!(state::MPS, sim_params::StrongMeasurementConfig, results::Matrix{ComplexF64}, col_idx::Int)
-    for (obs_idx, obs) in enumerate(sim_params.observables)
-        val = SimulationConfigs.expect(state, obs)
-        results[obs_idx, col_idx] = val
-    end
-end
+# --- Main Runner ---
 
-function evaluate_observables!(state::MPS, sim_params::TimeEvolutionConfig, results::Matrix{ComplexF64}, col_idx::Int)
-    for (obs_idx, obs) in enumerate(sim_params.observables)
-        val = SimulationConfigs.expect(state, obs)
-        results[obs_idx, col_idx] = val
-    end
-end
-
-# --- Main Loop ---
-
-function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit, 
-                         noise_model::Union{NoiseModel, Nothing}, 
-                         sim_params::AbstractSimConfig)
+function run_digital_tjm_v2(initial_state::MPS, circuit::DigitalCircuit, 
+                            noise_model::Union{NoiseModel, Nothing}, 
+                            sim_params::AbstractSimConfig)
     
+    # 1. Deepcopy Initial State
     state = deepcopy(initial_state)
+    
+    # 2. Process Circuit into Layers (Reuse V1 logic)
     layers, barrier_map = process_circuit(circuit)
     num_layers = length(layers)
     
-    # Initialize Results Storage
-    # If sim_params is StrongMeasurementConfig or TimeEvolutionConfig with observables
+    # 3. Setup Results
     num_obs = length(sim_params.observables)
     
-    # Pre-calculate how many "SAMPLE_OBSERVABLES" barriers exist
-    # If none, we might default to just final, or standard behavior.
-    # But user request says "measure ONLY when Barrier labeled SAMPLE_OBSERVABLES".
-    
+    # Identify sample points
     sample_indices = Int[]
     
-    # Check layer 0 (before start)
+    # Check layer 0
     if haskey(barrier_map, 0)
         for label in barrier_map[0]
             if uppercase(label) == "SAMPLE_OBSERVABLES"
@@ -256,122 +296,78 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         end
     end
     
-    num_steps = length(sample_indices)
-    
-    # If no explicit barriers found, maybe default to final?
-    # Or should we strictly follow "ONLY when barrier"?
-    # Let's assume if no barriers, we output just final state (1 step).
-    if num_steps == 0
-        num_steps = 1
-        # We will measure at the very end
+    # Default to final measurement if no samples requested
+    if isempty(sample_indices)
+        num_steps = 1 # Final
+    else
+        num_steps = length(sample_indices)
     end
     
     results = zeros(ComplexF64, num_obs, num_steps)
-    
-    # Measurement Counter
     current_meas_idx = 1
     
-    # Handle Layer 0 (Initial)
+    # Helper for measurement
+    function measure!(idx)
+        for (i, obs) in enumerate(sim_params.observables)
+            results[i, idx] = SimulationConfigs.expect(state, obs)
+        end
+    end
+    
+    # Initial Measurement
     if 0 in sample_indices
-        evaluate_observables!(state, sim_params, results, current_meas_idx)
+        measure!(current_meas_idx)
         current_meas_idx += 1
     end
     
     # Loop Layers
-    for (layer_idx, layer) in enumerate(layers)
-        single_q = [g for g in layer if length(g.sites) == 1]
-        two_q = [g for g in layer if length(g.sites) == 2]
+    for (l_idx, layer) in enumerate(layers)
         
         # 1. Single Qubit Gates
-        for gate in single_q
-            apply_single_qubit_gate!(state, gate)
+        for gate in layer
+            if length(gate.sites) == 1
+                apply_single_qubit_gate!(state, gate)
+            end
         end
         
-        # 2. Two Qubit Gates (Even/Odd)
-        even_gates = [g for g in two_q if min(g.sites...) % 2 != 0] # 1-based: 1, 3, 5 are "odd" starts
-        odd_gates = [g for g in two_q if min(g.sites...) % 2 == 0]  # 1-based: 2, 4, 6...
-        
-        if !isempty(even_gates)
-            H_even = construct_combined_mpo(even_gates, state.length)
-            # Apply unitary
-            tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
-            two_site_tdvp!(state, H_even, tmp_config)
-            apply_noise_if_needed!(state, noise_model, even_gates, sim_params)
+        # 2. Two Qubit Gates (Windowed)
+        for gate in layer
+            if length(gate.sites) == 2
+                apply_window!(state, gate, sim_params)
+                
+                # Apply Noise
+                if !isnothing(noise_model) && !isempty(noise_model.processes)
+                    s1, s2 = sort(gate.sites)
+                    local_noise = create_local_noise_model(noise_model, s1, s2)
+                    
+                    if !isempty(local_noise.processes)
+                        # 1. Dissipation (dt=1.0)
+                        apply_dissipation(state, local_noise, 1.0, sim_params)
+                        
+                        # 2. Stochastic Jump (dt=1.0)
+                        solve_local_jumps!(state, local_noise, 1.0)
+                    else
+                         # If no noise, normalize to correct any drift
+                         MPSModule.normalize!(state) 
+                    end
+                else
+                     MPSModule.normalize!(state) 
+                end
+            end
         end
         
-        if !isempty(odd_gates)
-            H_odd = construct_combined_mpo(odd_gates, state.length)
-            tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
-            two_site_tdvp!(state, H_odd, tmp_config)
-            apply_noise_if_needed!(state, noise_model, odd_gates, sim_params)
-        end
-        
-        if isnothing(noise_model)
-             MPSModule.normalize!(state)
-        end
-        
-        # Check if we should sample after this layer
-        if layer_idx in sample_indices
-            evaluate_observables!(state, sim_params, results, current_meas_idx)
+        # Measurement
+        if l_idx in sample_indices
+            measure!(current_meas_idx)
             current_meas_idx += 1
         end
     end
     
-    # If no sample barriers were found at all, measure final
+    # Final Measurement (if no barriers)
     if isempty(sample_indices) && num_obs > 0
-        evaluate_observables!(state, sim_params, results, 1)
+        measure!(1)
     end
     
     return state, results
-end
-
-function construct_combined_mpo(gates::Vector{DigitalGate}, L::Int)
-    if isempty(gates)
-        return MPO(L; identity=true)
-    end
-    
-    H_total = MPO(L) 
-    
-    for gate in gates
-        H_gate = construct_generator_mpo(gate, L)
-        H_total = H_total + H_gate
-    end
-    
-    MPOModule.truncate!(H_total; threshold=1e-12)
-    return H_total
-end
-
-function apply_noise_if_needed!(state::MPS, noise_model::Union{NoiseModel, Nothing}, gates::Vector{DigitalGate}, sim_params)
-    if isnothing(noise_model) return end
-    
-    dt = 1.0
-    if isa(sim_params, TimeEvolutionConfig)
-        dt = sim_params.dt # Usually 1.0 for gates
-    end
-    
-    for gate in gates
-        s1, s2 = sort(gate.sites)
-        
-        relevant_procs = Vector{AbstractNoiseProcess{ComplexF64}}()
-        for p in noise_model.processes
-            if issubset(p.sites, [s1, s2])
-                push!(relevant_procs, p)
-            end
-        end
-        
-        if !isempty(relevant_procs)
-            local_nm = NoiseModel(relevant_procs)
-            sp = StochasticProcess(MPO(state.length), local_nm) 
-            H_dissip = sp.H_eff
-            
-            # Dissipative evolution
-            # Always use a local config for the step
-            tmp = TimeEvolutionConfig(Observable[], 1.0; dt=dt)
-            two_site_tdvp!(state, H_dissip, tmp)
-            
-            solve_jumps!(state, sp, dt) 
-        end
-    end
 end
 
 end # module
