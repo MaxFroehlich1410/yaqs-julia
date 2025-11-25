@@ -243,6 +243,9 @@ end
 Perform 2-site TDVP.
 """
 function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
+    # 1. Ensure state is in Right Canonical Form (Center at 1)
+    shift_orthogonality_center!(state, 1)
+
     dt = config.dt
     L = state.length
     
