@@ -30,16 +30,16 @@ using .SimulationConfigs
 using .Algorithms
 
 # --- Configuration ---
-const L = 4
-const dt = 0.05
-const t_max = 4.0
+const L = 10
+const dt = 0.1
+const t_max = 2.0
 const steps = Int(floor(t_max / dt))
-const max_bond_dim = 8
+const max_bond_dim = 32
 const trunc_err = 1e-12
 
 # Local Observable to Plot
 const OBS_TYPE = "Z" # "X", "Y", "Z"
-const SITES_TO_PLOT = [1, 2, 3, 4]
+const SITES_TO_PLOT = [1, 5, 10]
 
 # Hamiltonian Parameters
 # J terms (size L-1)
