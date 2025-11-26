@@ -1,11 +1,12 @@
 using Test
 using LinearAlgebra
-using ..Yaqs.GateLibrary
-using ..Yaqs.MPSModule
-using ..Yaqs.DigitalTJM
-using ..Yaqs.SimulationConfigs
-using ..Yaqs.CircuitLibrary
-using ..Yaqs.NoiseModule
+using Yaqs
+using Yaqs.GateLibrary
+using Yaqs.MPSModule
+using Yaqs.DigitalTJM
+using Yaqs.SimulationConfigs
+using Yaqs.CircuitLibrary
+using Yaqs.NoiseModule
 
 @testset "Digital TJM Simulation - 6 Qubit Ising with Noise" begin
 

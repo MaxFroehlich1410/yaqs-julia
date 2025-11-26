@@ -1,12 +1,12 @@
 using Test
 using LinearAlgebra
-# using Yaqs # Removing this
-using ..CircuitLibrary
-using ..GateLibrary
-using ..MPSModule
-using ..SimulationConfigs
-using ..Simulator
-using ..NoiseModule
+using Yaqs
+using Yaqs.CircuitLibrary
+using Yaqs.GateLibrary
+using Yaqs.MPSModule
+using Yaqs.SimulationConfigs
+using Yaqs.Simulator
+using Yaqs.NoiseModule
 
 @testset "Ising Digital TJM 200 Trajectories" begin
     L = 6

@@ -1,7 +1,8 @@
 using Test
-using ..CircuitLibrary
-using ..DigitalTJM
-using ..GateLibrary
+using Yaqs
+using Yaqs.CircuitLibrary
+using Yaqs.DigitalTJM
+using Yaqs.GateLibrary
 
 @testset "CircuitLibrary Tests" begin
     @testset "Ising Circuit" begin
@@ -12,8 +13,9 @@ using ..GateLibrary
         timesteps = 2
         circ = ising_circuit(L, J, g, dt, timesteps; periodic=false)
         @test circ.num_qubits == L
-        # Check 2-site gate
-        @test circ.gates[5].op isa RzzGate
+        # Check 2-site gate. 
+        # Gates: 1 Barrier, 4 Rx, then Rzz. So index 6.
+        @test circ.gates[6].op isa RzzGate
     end
     
     @testset "2D Ising Circuit" begin

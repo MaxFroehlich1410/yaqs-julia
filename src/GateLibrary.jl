@@ -9,7 +9,7 @@ export XGate, YGate, ZGate, HGate, SGate, TGate, SdgGate, TdgGate
 export RxGate, RyGate, RzGate, PhaseGate, UGate
 export CXGate, CYGate, CZGate, CHGate, CPhaseGate, SWAPGate, iSWAPGate
 export RxxGate, RyyGate, RzzGate
-export Barrier
+export Barrier, IdGate, RaisingGate, LoweringGate
 
 # --- Abstract Types ---
 
@@ -41,60 +41,87 @@ end
 
 # --- Basic Gates (1 Qubit) ---
 
+struct IdGate <: AbstractGate end
+matrix(::IdGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, 1)
+generator(::IdGate) = [matrix(IdGate())]
+
 struct XGate <: AbstractGate end
-matrix(::XGate) = SMatrix{2,2,ComplexF64}([0 1; 1 0])
+matrix(::XGate) = SMatrix{2,2,ComplexF64}(0, 1, 1, 0)
 generator(::XGate) = [matrix(XGate())]
 
 struct YGate <: AbstractGate end
-matrix(::YGate) = SMatrix{2,2,ComplexF64}([0 -im; im 0])
+matrix(::YGate) = SMatrix{2,2,ComplexF64}(0, im, -im, 0)
 generator(::YGate) = [matrix(YGate())]
 
 struct ZGate <: AbstractGate end
-matrix(::ZGate) = SMatrix{2,2,ComplexF64}([1 0; 0 -1])
+matrix(::ZGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, -1)
 generator(::ZGate) = [matrix(ZGate())]
 
 struct HGate <: AbstractGate end
-matrix(::HGate) = SMatrix{2,2,ComplexF64}([1 1; 1 -1] ./ sqrt(2))
+matrix(::HGate) = SMatrix{2,2,ComplexF64}(1/sqrt(2), 1/sqrt(2), 1/sqrt(2), -1/sqrt(2))
 
 struct SGate <: AbstractGate end
-matrix(::SGate) = SMatrix{2,2,ComplexF64}([1 0; 0 im])
+matrix(::SGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, im)
 
 struct TGate <: AbstractGate end
-matrix(::TGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(im*π/4)])
+matrix(::TGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, exp(im*π/4))
 
 struct SdgGate <: AbstractGate end
-matrix(::SdgGate) = SMatrix{2,2,ComplexF64}([1 0; 0 -im])
+matrix(::SdgGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, -im)
 
 struct TdgGate <: AbstractGate end
-matrix(::TdgGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(-im*π/4)])
+matrix(::TdgGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, exp(-im*π/4))
+
+# --- Non-Unitary / Noise Operators ---
+
+struct RaisingGate <: AbstractOperator end
+matrix(::RaisingGate) = SMatrix{2,2,ComplexF64}(0, 1, 0, 0) # |1><0| = [0 0; 1 0] (Col-major: 0, 1, 0, 0)
+
+struct LoweringGate <: AbstractOperator end
+matrix(::LoweringGate) = SMatrix{2,2,ComplexF64}(0, 0, 1, 0) # |0><1| = [0 1; 0 0] (Col-major: 0, 0, 1, 0)
+
+is_unitary(::RaisingGate) = false
+is_unitary(::LoweringGate) = false
 
 # --- Parametric Gates (1 Qubit) ---
 
 struct RxGate <: AbstractGate
     theta::Float64
 end
-matrix(g::RxGate) = SMatrix{2,2,ComplexF64}([cos(g.theta/2) -im*sin(g.theta/2); -im*sin(g.theta/2) cos(g.theta/2)])
+function matrix(g::RxGate)
+    c = cos(g.theta/2)
+    s = -im*sin(g.theta/2)
+    return SMatrix{2,2,ComplexF64}(c, s, s, c)
+end
 generator(g::RxGate) = [matrix(XGate())]
 hamiltonian_coeff(g::RxGate) = g.theta / 2.0
 
 struct RyGate <: AbstractGate
     theta::Float64
 end
-matrix(g::RyGate) = SMatrix{2,2,ComplexF64}([cos(g.theta/2) -sin(g.theta/2); sin(g.theta/2) cos(g.theta/2)])
+function matrix(g::RyGate)
+    c = cos(g.theta/2)
+    s = sin(g.theta/2)
+    return SMatrix{2,2,ComplexF64}(c, s, -s, c)
+end
 generator(g::RyGate) = [matrix(YGate())]
 hamiltonian_coeff(g::RyGate) = g.theta / 2.0
 
 struct RzGate <: AbstractGate
     theta::Float64
 end
-matrix(g::RzGate) = SMatrix{2,2,ComplexF64}([exp(-im*g.theta/2) 0; 0 exp(im*g.theta/2)])
+function matrix(g::RzGate)
+    e_m = exp(-im*g.theta/2)
+    e_p = exp(im*g.theta/2)
+    return SMatrix{2,2,ComplexF64}(e_m, 0, 0, e_p)
+end
 generator(g::RzGate) = [matrix(ZGate())]
 hamiltonian_coeff(g::RzGate) = g.theta / 2.0
 
 struct PhaseGate <: AbstractGate
     theta::Float64
 end
-matrix(g::PhaseGate) = SMatrix{2,2,ComplexF64}([1 0; 0 exp(im*g.theta)])
+matrix(g::PhaseGate) = SMatrix{2,2,ComplexF64}(1, 0, 0, exp(im*g.theta))
 
 struct UGate <: AbstractGate
     theta::Float64
@@ -104,71 +131,73 @@ end
 function matrix(g::UGate)
     cos_val = cos(g.theta / 2)
     sin_val = sin(g.theta / 2)
-    return SMatrix{2,2,ComplexF64}([
-        cos_val               -exp(im * g.lam) * sin_val;
-        exp(im * g.phi) * sin_val  exp(im * (g.phi + g.lam)) * cos_val
-    ])
+    return SMatrix{2,2,ComplexF64}(
+        cos_val, 
+        exp(im * g.phi) * sin_val,
+        -exp(im * g.lam) * sin_val,
+        exp(im * (g.phi + g.lam)) * cos_val
+    )
 end
 
 # --- 2 Qubit Gates ---
 
 struct CXGate <: AbstractGate end
-matrix(::CXGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 1 0 0;
-    0 0 0 1;
-    0 0 1 0
-])
+matrix(::CXGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,1,0,0,
+    0,0,0,1,
+    0,0,1,0
+)
 
 struct CYGate <: AbstractGate end
-matrix(::CYGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 1 0 0;
-    0 0 0 -im;
-    0 0 im 0
-])
+matrix(::CYGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,1,0,0,
+    0,0,0,im,
+    0,0,-im,0
+)
 
 struct CZGate <: AbstractGate end
-matrix(::CZGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 1 0 0;
-    0 0 1 0;
-    0 0 0 -1
-])
+matrix(::CZGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,-1
+)
 
 struct CHGate <: AbstractGate end
-matrix(::CHGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 1 0 0;
-    0 0 1/sqrt(2) 1/sqrt(2);
-    0 0 1/sqrt(2) -1/sqrt(2)
-])
+matrix(::CHGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1/sqrt(2),1/sqrt(2),
+    0,0,1/sqrt(2),-1/sqrt(2)
+)
 
 struct CPhaseGate <: AbstractGate
     theta::Float64
 end
-matrix(g::CPhaseGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 1 0 0;
-    0 0 1 0;
-    0 0 0 exp(im*g.theta)
-])
+matrix(g::CPhaseGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,1,0,0,
+    0,0,1,0,
+    0,0,0,exp(im*g.theta)
+)
 
 struct SWAPGate <: AbstractGate end
-matrix(::SWAPGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 0 1 0;
-    0 1 0 0;
-    0 0 0 1
-])
+matrix(::SWAPGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,0,1,0,
+    0,1,0,0,
+    0,0,0,1
+)
 
 struct iSWAPGate <: AbstractGate end
-matrix(::iSWAPGate) = SMatrix{4,4,ComplexF64}([
-    1 0 0 0;
-    0 0 im 0;
-    0 im 0 0;
-    0 0 0 1
-])
+matrix(::iSWAPGate) = SMatrix{4,4,ComplexF64}(
+    1,0,0,0,
+    0,0,im,0,
+    0,im,0,0,
+    0,0,0,1
+)
 
 # --- Hamiltonian Evolution Gates (Rxx, Ryy, Rzz) ---
 # e^{-i theta/2 P \otimes P}
@@ -179,12 +208,12 @@ end
 function matrix(g::RxxGate)
     c = cos(g.theta / 2)
     s = -im * sin(g.theta / 2)
-    return SMatrix{4,4,ComplexF64}([
-        c 0 0 s;
-        0 c s 0;
-        0 s c 0;
-        s 0 0 c
-    ])
+    return SMatrix{4,4,ComplexF64}(
+        c,0,0,s,
+        0,c,s,0,
+        0,s,c,0,
+        s,0,0,c
+    )
 end
 generator(::RxxGate) = [matrix(XGate()), matrix(XGate())]
 hamiltonian_coeff(g::RxxGate) = g.theta / 2.0
@@ -195,12 +224,12 @@ end
 function matrix(g::RyyGate)
     c = cos(g.theta / 2)
     s = -im * sin(g.theta / 2)
-    return SMatrix{4,4,ComplexF64}([
-        c 0 0 -s;
-        0 c s 0;
-        0 s c 0;
-        -s 0 0 c
-    ])
+    return SMatrix{4,4,ComplexF64}(
+        c,0,0,-s,
+        0,c,s,0,
+        0,s,c,0,
+        -s,0,0,c
+    )
 end
 generator(::RyyGate) = [matrix(YGate()), matrix(YGate())]
 hamiltonian_coeff(g::RyyGate) = g.theta / 2.0
@@ -213,12 +242,12 @@ function matrix(g::RzzGate)
     # diagonals: exp(-i theta/2), exp(i theta/2), exp(i theta/2), exp(-i theta/2)
     e_m = exp(-im * g.theta / 2)
     e_p = exp(im * g.theta / 2)
-    return SMatrix{4,4,ComplexF64}([
-        e_m 0 0 0;
-        0 e_p 0 0;
-        0 0 e_p 0;
-        0 0 0 e_m
-    ])
+    return SMatrix{4,4,ComplexF64}(
+        e_m,0,0,0,
+        0,e_p,0,0,
+        0,0,e_p,0,
+        0,0,0,e_m
+    )
 end
 generator(::RzzGate) = [matrix(ZGate()), matrix(ZGate())]
 hamiltonian_coeff(g::RzzGate) = g.theta / 2.0

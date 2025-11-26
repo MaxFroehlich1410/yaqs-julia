@@ -4,7 +4,7 @@ using PythonCall
 using ..DigitalTJM
 using ..GateLibrary
 
-export ingest_qiskit_circuit
+export ingest_qiskit_circuit, map_qiskit_name, convert_instruction_to_gate
 
 """
     ingest_qiskit_circuit(qc::Py)::DigitalCircuit
@@ -140,15 +140,12 @@ function ingest_qiskit_circuit(qc::Py)
             if !pyconvert(Bool, dag.op_nodes())
                 break
             end
-            # If we are stuck?
-            # Measures/Barriers should have been in current_layer if they are at front.
-            # If we processed nothing and removed nothing, we might be in infinite loop.
-            # But we remove measures/barriers found in current_layer.
         end
         
         for node in all_nodes
             gate = convert_node_to_gate(node)
             push!(layer_gates, gate)
+            push!(circ.gates, gate) # Populate flat list for process_circuit
             push!(nodes_to_remove, node)
         end
         
@@ -165,6 +162,74 @@ function ingest_qiskit_circuit(qc::Py)
     circ.layers = processed_layers
     return circ
 end
+
+"""
+    convert_instruction_to_gate(instr::Py, circuit::Py)
+
+Convert a Qiskit CircuitInstruction (as in `circuit.data`) to a Julia `DigitalGate`.
+Also handles Barriers by returning a Barrier gate (unlike `process_layer` which might consume them).
+Returns `nothing` if the gate is not supported (e.g. not in GateLibrary and no mapping).
+"""
+function convert_instruction_to_gate(instr::Py, circuit::Py)
+    op = instr.operation
+    
+    # Try to extract qubits. instr.qubits is a tuple/list of Qubit objects.
+    # Qubit objects usually have `_index`?
+    # circuit.find_bit(q).index is safer if Qubit is detached, but usually it works.
+    # We will try `_index` first, then fallback to `circuit.find_bit`.
+    
+    qubits_py = instr.qubits
+    sites = Int[]
+    
+    # Helper to get index
+    function get_idx(q)
+        # Try _index attribute
+        if pyhasattr(q, "_index")
+            return pyconvert(Int, q._index)
+        else
+            # Use circuit.find_bit
+            return pyconvert(Int, circuit.find_bit(q).index)
+        end
+    end
+    
+    for q in qubits_py
+        push!(sites, get_idx(q) + 1) # 1-based indexing
+    end
+    
+    name = pyconvert(String, op.name)
+    params = [pyconvert(Float64, p) for p in op.params]
+    
+    # Handle Barrier specifically
+    if name == "barrier"
+        label = pygetattr(op, "label", nothing)
+        label_str = pyis(label, nothing) ? "" : pyconvert(String, str(label))
+        # Use SAMPLE_OBSERVABLES as default if empty?
+        if isempty(label_str)
+            label_str = "SAMPLE_OBSERVABLES" 
+        end
+        return DigitalGate(GateLibrary.Barrier(label_str), sites, nothing)
+    end
+    
+    # Map Name
+    julia_op = nothing
+    try
+        julia_op = map_qiskit_name(name, params)
+    catch
+        # If unknown gate, return nothing?
+        # Benchmark scripts rely on returning nothing for unknown gates (like 'measure' or unsupported ones).
+        return nothing
+    end
+    
+    # Generator
+    gen = nothing
+    try
+        gen = GateLibrary.generator(julia_op)
+    catch
+    end
+    
+    return DigitalGate(julia_op, sites, gen)
+end
+
 
 function convert_node_to_gate(node::Py)::DigitalGate
     op = node.op

@@ -1,12 +1,13 @@
 using Test
 using LinearAlgebra
 using PythonCall
-using ..CircuitIngestion
-using ..DigitalTJM
-using ..GateLibrary
-using ..MPSModule
-using ..SimulationConfigs
-using ..MPOModule
+using Yaqs
+using Yaqs.CircuitIngestion
+using Yaqs.DigitalTJM
+using Yaqs.GateLibrary
+using Yaqs.MPSModule
+using Yaqs.SimulationConfigs
+using Yaqs.MPOModule
 
 @testset "Circuit Ingestion" begin
 

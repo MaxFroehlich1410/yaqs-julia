@@ -2,6 +2,7 @@ module DigitalTJM
 
 using LinearAlgebra
 using Base.Threads
+using TensorOperations
 using ..MPSModule
 using ..MPOModule
 using ..GateLibrary
@@ -91,16 +92,7 @@ function process_circuit(circ::DigitalCircuit)
             push!(barrier_map[max_l], op.label)
             
             # All involved qubits must now be at least at max_l (effectively they wait).
-            # But they are already at <= max_l.
-            # We don't increment last_layer_idx for a barrier, just sync?
-            # Actually, future gates on these qubits must start AFTER this barrier.
-            # So effectively, they must start at max_l + 1.
-            # But wait, if we have gates at max_l already, next gate goes to max_l+1 naturally?
-            # Yes, but a barrier forces ALL wires to be at least max_l before proceeding?
-            # No, usually barriers just segment.
-            # For simplicity: We attach the label to `max_l` so we measure after `max_l` is done.
-            # And we update `last_layer_idx` to `max_l` for all sites to ensure synchronization?
-            
+            # We update `last_layer_idx` to `max_l` for all sites to ensure synchronization.
             for s in sites
                 last_layer_idx[s] = max_l
             end
@@ -182,21 +174,59 @@ function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     mps.tensors[site] = New_A
 end
 
-function apply_two_qubit_gate!(mps::MPS, gate::DigitalGate, sim_params::AbstractSimConfig)
-    # sim_params can be TimeEvolutionConfig or StrongMeasurementConfig.
-    # two_site_tdvp! expects TimeEvolutionConfig for parameters like dt and order.
-    # If we have StrongMeasurementConfig, we might need to extract/adapt.
-    # However, the Python code assumes TJM (TDVP) runs with certain integration parameters.
-    # In Julia, StrongMeasurementConfig doesn't carry dt/order/krylov params.
-    # The user likely passed TimeEvolutionConfig for digital simulation anyway.
-    # Let's assume sim_params is compatible or convert.
+function apply_two_site_unitary!(mps::MPS, gate::DigitalGate)
+    @assert length(gate.sites) == 2
+    s1, s2 = sort(gate.sites)
     
-    H_gate = construct_generator_mpo(gate, mps.length)
+    if abs(s1 - s2) != 1
+        error("DigitalTJM currently only supports adjacent unitary gates without generators (e.g. CX). Non-adjacent gates require MPO generator. Gate: $(gate.op) on $s1, $s2")
+    end
     
-    # Create a temporary config for the step
-    # Default dt=1.0 is standard for "Gate as Generator" if H is properly scaled.
-    tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0) 
-    two_site_tdvp!(mps, H_gate, tmp_config)
+    # Move orthogonality center to s1 (left site)
+    MPSModule.shift_orthogonality_center!(mps, s1)
+    
+    # Contract A1 and A2
+    A1 = mps.tensors[s1] # (Dl, d, Dmid)
+    A2 = mps.tensors[s2] # (Dmid, d, Dr)
+    
+    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    
+    # Apply Gate
+    # Gate matrix is 4x4 (p1_out p2_out, p1_in p2_in)
+    op = matrix(gate.op)
+    op_tensor = reshape(op, 2, 2, 2, 2) # (LSB_out, MSB_out, LSB_in, MSB_in)
+    
+    # We map Site 1 (p1) to MSB, Site 2 (p2) to LSB.
+    # This matches standard CX definition: C(MSB) X(LSB) -> C(1) X(2).
+    # So op_tensor indices are [p2n, p1n, p2, p1].
+    @tensor Theta_prime[l, p1n, p2n, r] := op_tensor[p2n, p1n, p2, p1] * Theta[l, p1, p2, r]
+    
+    # SVD to restore MPS form
+    d1, d2 = size(Theta_prime, 2), size(Theta_prime, 3)
+    L_dim, R_dim = size(Theta_prime, 1), size(Theta_prime, 4)
+    
+    Mat = reshape(Theta_prime, L_dim * d1, d2 * R_dim)
+    F = svd(Mat)
+    
+    # Truncate? Using basic compression based on singular values or keep full if no params passed.
+    # Usually we should truncate to some tolerance.
+    # For unitary gate, we keep full rank or truncate small values.
+    threshold = 1e-12
+    
+    S = F.S
+    # Filter small S
+    rank = count(x -> x > threshold, S)
+    rank = max(1, rank)
+    
+    U = F.U[:, 1:rank]
+    S_trunc = S[1:rank]
+    Vt = F.Vt[1:rank, :]
+    
+    mps.tensors[s1] = reshape(U, L_dim, d1, rank)
+    mps.tensors[s2] = reshape(Diagonal(S_trunc) * Vt, rank, d2, R_dim)
+    
+    # Orthogonality center is now at s2 (because we multiplied S into V)
+    mps.orth_center = s2
 end
 
 # --- Helper: Observable Evaluation ---
@@ -226,12 +256,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     num_layers = length(layers)
     
     # Initialize Results Storage
-    # If sim_params is StrongMeasurementConfig or TimeEvolutionConfig with observables
     num_obs = length(sim_params.observables)
-    
-    # Pre-calculate how many "SAMPLE_OBSERVABLES" barriers exist
-    # If none, we might default to just final, or standard behavior.
-    # But user request says "measure ONLY when Barrier labeled SAMPLE_OBSERVABLES".
     
     sample_indices = Int[]
     
@@ -257,18 +282,12 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     end
     
     num_steps = length(sample_indices)
-    
-    # If no explicit barriers found, maybe default to final?
-    # Or should we strictly follow "ONLY when barrier"?
-    # Let's assume if no barriers, we output just final state (1 step).
     if num_steps == 0
         num_steps = 1
-        # We will measure at the very end
     end
     
     results = zeros(ComplexF64, num_obs, num_steps)
     
-    # Measurement Counter
     current_meas_idx = 1
     
     # Handle Layer 0 (Initial)
@@ -279,6 +298,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     
     # Loop Layers
     for (layer_idx, layer) in enumerate(layers)
+        # println("Processing Layer $layer_idx / $num_layers. Gates: ", length(layer))
         single_q = [g for g in layer if length(g.sites) == 1]
         two_q = [g for g in layer if length(g.sites) == 2]
         
@@ -287,13 +307,22 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
             apply_single_qubit_gate!(state, gate)
         end
         
-        # 2. Two Qubit Gates (Even/Odd)
-        even_gates = [g for g in two_q if min(g.sites...) % 2 != 0] # 1-based: 1, 3, 5 are "odd" starts
-        odd_gates = [g for g in two_q if min(g.sites...) % 2 == 0]  # 1-based: 2, 4, 6...
+        # 2. Two Qubit Gates
+        # Split into Hamiltonian (Generator) and Unitary (No Generator)
+        hamiltonian_gates = [g for g in two_q if !isnothing(g.generator)]
+        unitary_gates = [g for g in two_q if isnothing(g.generator)]
+        
+        # Apply Unitaries (Sequential)
+        for gate in unitary_gates
+            apply_two_site_unitary!(state, gate)
+        end
+        
+        # Apply Hamiltonians (Parallel/Trotter)
+        even_gates = [g for g in hamiltonian_gates if min(g.sites...) % 2 != 0] 
+        odd_gates = [g for g in hamiltonian_gates if min(g.sites...) % 2 == 0]  
         
         if !isempty(even_gates)
             H_even = construct_combined_mpo(even_gates, state.length)
-            # Apply unitary
             tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
             two_site_tdvp!(state, H_even, tmp_config)
             apply_noise_if_needed!(state, noise_model, even_gates, sim_params)
@@ -304,6 +333,15 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
             tmp_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
             two_site_tdvp!(state, H_odd, tmp_config)
             apply_noise_if_needed!(state, noise_model, odd_gates, sim_params)
+        end
+        
+        # Apply Noise for Unitary Gates?
+        # If a unitary gate had noise, we should apply it.
+        # The existing 'apply_noise_if_needed!' takes a list of gates.
+        # We can pass unitary_gates to it.
+        # It applies noise AFTER the gate.
+        if !isempty(unitary_gates)
+            apply_noise_if_needed!(state, noise_model, unitary_gates, sim_params)
         end
         
         if isnothing(noise_model)

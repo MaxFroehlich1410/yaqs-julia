@@ -1,9 +1,10 @@
 using Test
 using LinearAlgebra
 using StaticArrays
-using ..NoiseModule
-using ..GateLibrary
-using ..MPOModule
+using Yaqs
+using Yaqs.NoiseModule
+using Yaqs.GateLibrary
+using Yaqs.MPOModule
 
 @testset "Noise Model & Unraveling" begin
 

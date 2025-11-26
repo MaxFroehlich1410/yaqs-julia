@@ -1,8 +1,9 @@
 using Test
 using LinearAlgebra
-using ..MPOModule
-using ..MPSModule
-using ..GateLibrary
+using Yaqs
+using Yaqs.MPOModule
+using Yaqs.MPSModule
+using Yaqs.GateLibrary
 
 @testset "MPO Tests" begin
 

@@ -428,4 +428,3 @@ function get_operator_from_proc(proc::Dict)
 end
 
 end
-

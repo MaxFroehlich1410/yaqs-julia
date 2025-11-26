@@ -1,18 +1,14 @@
 using Test
 using LinearAlgebra
 using Random
-
-# Robust include path handling
-include(joinpath(@__DIR__, "../src/Yaqs.jl"))
-
-using .Yaqs
-using .Yaqs.MPSModule
-using .Yaqs.MPOModule
-using .Yaqs.NoiseModule
-using .Yaqs.GateLibrary
-using .Yaqs.SimulationConfigs
-using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!
-using .Yaqs.DigitalTJMV2
+using Yaqs
+using Yaqs.MPSModule
+using Yaqs.MPOModule
+using Yaqs.NoiseModule
+using Yaqs.GateLibrary
+using Yaqs.SimulationConfigs
+using Yaqs.DigitalTJM: DigitalCircuit, add_gate!
+using Yaqs.DigitalTJMV2
 
 # Access internal functions for testing
 const create_local_noise_model = Yaqs.DigitalTJMV2.create_local_noise_model

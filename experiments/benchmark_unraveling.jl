@@ -98,55 +98,6 @@ function compute_mse(pred_series::Vector{Float64}, exact_series::Vector{Float64}
     return mean((pred_series .- exact_series).^2)
 end
 
-function convert_qiskit_gate_to_julia(instruction, circuit)
-    op_name = pyconvert(String, instruction.operation.name)
-    qubits = instruction.qubits
-    # Use circuit.find_bit(q).index to get 0-based index, then +1 for Julia
-    indices = [pyconvert(Int, circuit.find_bit(q).index) + 1 for q in qubits]
-    
-    op = nothing
-    generator = nothing
-    
-    if op_name == "rz"
-        # Not used in Heisenberg usually, but for completeness
-        # Return nothing to skip
-        return nothing
-    elseif op_name == "rxx"
-        theta = pyconvert(Float64, instruction.operation.params[0])
-        op = GateLibrary.RxxGate(theta)
-        generator = GateLibrary.generator(op)
-    elseif op_name == "ryy"
-        theta = pyconvert(Float64, instruction.operation.params[0])
-        op = GateLibrary.RyyGate(theta)
-        generator = GateLibrary.generator(op)
-    elseif op_name == "rzz"
-        theta = pyconvert(Float64, instruction.operation.params[0])
-        op = GateLibrary.RzzGate(theta)
-        generator = GateLibrary.generator(op)
-    elseif op_name == "x"
-        op = XGate()
-        generator = nothing # Single qubit, no generator needed for window
-    elseif op_name == "y"
-        op = YGate()
-        generator = nothing
-    elseif op_name == "z"
-        op = ZGate()
-        generator = nothing
-    elseif op_name == "barrier"
-        op = GateLibrary.Barrier("SAMPLE_OBSERVABLES")
-        generator = nothing
-    else
-        println("Warning: Unknown gate $op_name")
-        return nothing
-    end
-    
-    if isnothing(op)
-        return nothing
-    end
-
-    return DigitalGate(op, indices, generator)
-end
-
 # ==============================================================================
 # TRAJECTORY FINDER
 # ==============================================================================
@@ -228,8 +179,12 @@ circ_jl = DigitalCircuit(NUM_QUBITS)
 py_instructions = trotter_step.data
 jl_gates_step = []
 for instr in py_instructions
-    g = convert_qiskit_gate_to_julia(instr, trotter_step)
+    g = CircuitIngestion.convert_instruction_to_gate(instr, trotter_step)
     if !isnothing(g)
+        # Skip Rz for completeness/consistency with previous logic
+        if g.op isa GateLibrary.RzGate
+            continue
+        end
         push!(jl_gates_step, g)
     end
 end

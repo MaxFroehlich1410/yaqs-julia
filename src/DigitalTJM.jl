@@ -312,7 +312,7 @@ end
 
 # --- Main Runner ---
 
-function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit, 
+function run_digital_tjm_v2(initial_state::MPS, circuit::DigitalCircuit, 
                             noise_model::Union{NoiseModel, Nothing}, 
                             sim_params::AbstractSimConfig)
     

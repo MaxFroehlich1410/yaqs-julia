@@ -449,6 +449,8 @@ function expect_mpo(w::MPO, psi::MPS)
         A = psi.tensors[i]       # (L_k, p, R_k)
         W = w.tensors[i]         # (L_w, po, pi, R_w)
         
+        # println("Debug Expect i=$i. E size: ", size(E))
+        
         # E * A -> T1
         # E: (lb, lw, lk)
         # A: (lk, pi, rk)
@@ -468,6 +470,7 @@ function expect_mpo(w::MPO, psi::MPS)
         @tensor E_new[rb, rw, rk] := T2[c_lb, rk, c_po, rw] * conj(A[c_lb, c_po, rb])
         
         E = E_new
+        # println("Debug Expect i=$i. E_new: ", E)
     end
     
     return E[1, 1, 1]

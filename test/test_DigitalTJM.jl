@@ -1,11 +1,12 @@
 using Test
 using LinearAlgebra
-using ..DigitalTJM
-using ..MPSModule
-using ..MPOModule
-using ..GateLibrary
-using ..SimulationConfigs
-using ..NoiseModule
+using Yaqs
+using Yaqs.DigitalTJM
+using Yaqs.MPSModule
+using Yaqs.MPOModule
+using Yaqs.GateLibrary
+using Yaqs.SimulationConfigs
+using Yaqs.NoiseModule
 
 @testset "DigitalTJM Tests" begin
 
@@ -19,7 +20,12 @@ using ..NoiseModule
         add_gate!(circ, RzzGate(π/2), [1, 2])
         add_gate!(circ, XGate(), [3])
         
-        layers = DigitalTJM.process_circuit(circ)
+        result = DigitalTJM.process_circuit(circ)
+        if result isa Tuple
+            layers = result[1]
+        else
+            layers = result
+        end
         
         # X(1), X(2), X(3) depend on nothing, should be layer 1?
         # Rzz(1,2) depends on X(1), X(2).

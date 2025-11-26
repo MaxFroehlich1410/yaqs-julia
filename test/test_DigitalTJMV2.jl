@@ -1,15 +1,11 @@
 using Test
 using LinearAlgebra
-
-# Robust include
-include(joinpath(@__DIR__, "../src/Yaqs.jl"))
-
-using .Yaqs
-using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate, run_digital_tjm, process_circuit
-using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
-using .Yaqs.MPSModule
-using .Yaqs.GateLibrary
-using .Yaqs.SimulationConfigs
+using Yaqs
+using Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate, run_digital_tjm, process_circuit
+using Yaqs.DigitalTJMV2: run_digital_tjm_v2
+using Yaqs.MPSModule
+using Yaqs.GateLibrary
+using Yaqs.SimulationConfigs
 
 @testset "DigitalTJMV2 Tests" begin
 

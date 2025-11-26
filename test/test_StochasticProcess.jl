@@ -1,12 +1,13 @@
 using Test
 using LinearAlgebra
 using Statistics
-using ..StochasticProcessModule
-using ..MPSModule
-using ..MPOModule
-using ..NoiseModule
-using ..GateLibrary
-using ..SimulationConfigs
+using Yaqs
+using Yaqs.StochasticProcessModule
+using Yaqs.MPSModule
+using Yaqs.MPOModule
+using Yaqs.NoiseModule
+using Yaqs.GateLibrary
+using Yaqs.SimulationConfigs
 
 @testset "Stochastic Process" begin
 
@@ -24,6 +25,8 @@ using ..SimulationConfigs
         
         val = expect_mpo(sp.H_eff, psi)
         target = -0.5im * gamma
+        
+        println("Debug H_eff test: val=$val, target=$target")
         
         # Relax tolerance slightly if needed, but it should be exact
         @test isapprox(val, target; atol=1e-10)
