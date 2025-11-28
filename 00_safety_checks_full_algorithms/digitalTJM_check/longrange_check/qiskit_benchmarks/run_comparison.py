@@ -97,16 +97,20 @@ def plot_results(
         print("No data to plot.")
         return
 
-    # Plotting
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # Plotting - now with 3 subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
     t_axis = np.arange(num_layers + 1)
     
     # Colors/Styles for known keys, generic for others
+    # Set opacity to 50% for Julia and Qiskit MPS to distinguish from Exact
     styles = {
-        "Qiskit MPS": {"color": "blue", "ls": "-", "marker": "o", "markevery": 5},
-        "Julia V2":   {"color": "red",  "ls": "-", "marker": "o", "markevery": 5},
-        "Exact":      {"color": "black", "ls": "--", "linewidth": 1.5}
+        "Qiskit MPS": {"color": "blue", "ls": "-", "marker": "o", "markevery": 5, "alpha": 0.5},
+        "Julia V2":   {"color": "red",  "ls": "-", "marker": "o", "markevery": 5, "alpha": 0.5},
+        "Exact":      {"color": "black", "ls": "--", "linewidth": 2.0, "alpha": 1.0}
     }
+    
+    # Store local expectation values for MSE calculation
+    local_expvals_dict = {}
     
     for method_name, res in data_map.items():
         style = styles.get(method_name, {})
@@ -131,6 +135,7 @@ def plot_results(
             # Python script: list of (num_qubits,) arrays -> (time, qubits)
             # Julia script: list of (num_qubits,) arrays -> (time, qubits)
             loc = np.array(res["local_expvals"]) # Shape (T, N)
+            local_expvals_dict[method_name] = loc
             
             for q in plot_qubits:
                 if q < loc.shape[1]:
@@ -145,6 +150,45 @@ def plot_results(
                     y_data = loc[:, q]
                     ax2.plot(t_axis[:len(y_data)], y_data, **q_style)
 
+    # 3. MSE Plot: Compare Julia V2 and Qiskit MPS against Exact
+    if "Exact" in local_expvals_dict:
+        exact_expvals = local_expvals_dict["Exact"]  # Shape (T, N)
+        
+        for method_name in ["Julia V2", "Qiskit MPS"]:
+            if method_name in local_expvals_dict:
+                method_expvals = local_expvals_dict[method_name]  # Shape (T, N)
+                
+                # Calculate MSE per qubit per time step, then average over selected qubits
+                # MSE = mean((method - exact)^2) over selected qubits
+                mse_per_time = []
+                
+                # Find minimum time dimension
+                min_time = min(exact_expvals.shape[0], method_expvals.shape[0])
+                
+                for t in range(min_time):
+                    # Extract values for selected qubits at time t
+                    exact_vals = exact_expvals[t, plot_qubits]
+                    method_vals = method_expvals[t, plot_qubits]
+                    
+                    # Calculate MSE: mean squared error over selected qubits
+                    mse = np.mean((method_vals - exact_vals)**2)
+                    mse_per_time.append(mse)
+                
+                # Plot MSE
+                mse_style = styles.get(method_name, {}).copy()
+                mse_style["label"] = f"{method_name} vs Exact"
+                # Remove marker for cleaner MSE plot
+                if "marker" in mse_style:
+                    del mse_style["marker"]
+                if "markevery" in mse_style:
+                    del mse_style["markevery"]
+                
+                ax3.plot(t_axis[:len(mse_per_time)], mse_per_time, **mse_style)
+    else:
+        ax3.text(0.5, 0.5, "Exact reference not available", 
+                ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title("MSE vs Exact\n(Exact data missing)")
+
     ax1.set_title(f"Staggered Magnetization\n(N={num_qubits}, Noise={noise_strength})")
     ax1.set_xlabel("Layer")
     ax1.set_ylabel("Staggered Mag.")
@@ -156,6 +200,13 @@ def plot_results(
     ax2.set_ylabel("<Z>")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+
+    ax3.set_title(f"MSE vs Exact\nQubits: {plot_qubits}")
+    ax3.set_xlabel("Layer")
+    ax3.set_ylabel("Mean Squared Error")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    ax3.set_yscale('log')  # Use log scale for MSE to better visualize differences
 
     plt.tight_layout()
     
@@ -277,9 +328,14 @@ def update_python_script(filepath, n, L, tau, noise, model, circ, traj):
         elif stripped.startswith("enable_qiskit_z_error ="):
             new_lines.append(f"    enable_qiskit_z_error = {z_err}\n")
         elif stripped.startswith('circuit_configs = [{"label":'):
-            if circ != "XY_longrange":
-                print(f"Warning: Changing circuit type in Python script to '{circ}' is complex via regex. Using default XY_longrange logic but labeling might differ.")
-            new_lines.append(line) 
+            # Update circuit configs to include the requested circuit
+            if circ == "longrange_test":
+                new_lines.append(f'    circuit_configs = [\n')
+                new_lines.append(f'        {{"label": "XY_longrange", "builder": lambda: xy_trotter_layer_longrange(num_qubits, tau, order="YX")}},\n')
+                new_lines.append(f'        {{"label": "longrange_test", "builder": lambda: longrange_test_circuit(num_qubits, np.pi/4)}}\n')
+                new_lines.append(f'    ]\n')
+            else:
+                new_lines.append(line) 
         else:
             new_lines.append(line)
             
@@ -319,6 +375,13 @@ def update_julia_script(filepath, n, L, tau, noise, model, circ, traj):
             new_lines.append(f"pauli_y_error = {y_err}\n")
         elif stripped.startswith("pauli_z_error ="):
             new_lines.append(f"pauli_z_error = {z_err}\n")
+        elif stripped.startswith('CIRCUIT_TYPE ='):
+            # Update CIRCUIT_TYPE, preserving any comment
+            comment_part = ""
+            if '#' in line:
+                comment_idx = line.find('#')
+                comment_part = " " + line[comment_idx:].rstrip()
+            new_lines.append(f"CIRCUIT_TYPE = \"{circ}\"{comment_part}\n")
         else:
             # Handle indented lines
             if "NUM_TRAJECTORIES =" in line and "nothing" not in line:

@@ -24,11 +24,14 @@ using .Yaqs.CircuitLibrary
 # CONFIGURATION
 # ==============================================================================
 
-NUM_QUBITS = 8
-NUM_LAYERS = 20
+NUM_QUBITS = 6
+NUM_LAYERS = 15
 TAU = 0.1
-NOISE_STRENGTH = 0.1
+NOISE_STRENGTH = 1e-05
 NUM_TRAJECTORIES = 500
+
+# Circuit selection: "XY_longrange" or "longrange_test"
+CIRCUIT_TYPE = "longrange_test" # Use "longrange_test" to test long-range noise isolation
 
 pauli_y_error = false
 pauli_x_error = true
@@ -99,39 +102,76 @@ println("Configuration: N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH
 
 # 1. Prepare Circuits (Using Python Qiskit for definition)
 println("Building Circuits...")
-# Using XY_longrange as in Python script default
-basis_label = "XY_longrange"
-trotter_step = circuit_lib.xy_trotter_layer_longrange(NUM_QUBITS, TAU, order="YX")
+println("Circuit type: $CIRCUIT_TYPE")
 
-init_circuit = qiskit.QuantumCircuit(NUM_QUBITS)
-for i in 0:(NUM_QUBITS-1)
-    if i % 4 == 3
-        init_circuit.x(i)
-    end
-end
-
-# Julia Circuit Construction
-circ_jl = DigitalCircuit(NUM_QUBITS)
-# Add initial sample barrier for t=0
-add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
-
-py_instructions = trotter_step.data
-jl_gates_step = []
-for instr in py_instructions
-    g = CircuitIngestion.convert_instruction_to_gate(instr, trotter_step)
-    if !isnothing(g)
-        # Skip Rz if returned (for consistency with original benchmark logic if needed)
-        # The Python script uses xy_trotter_layer_longrange which uses RXX, RYY.
-        push!(jl_gates_step, g)
-    end
-end
-
-for _ in 1:NUM_LAYERS
-    for g in jl_gates_step
-        add_gate!(circ_jl, g.op, g.sites; generator=g.generator)
-    end
-    # Add sample barrier after each step
+if CIRCUIT_TYPE == "longrange_test"
+    # Use the test circuit that isolates long-range noise effects
+    basis_label = "longrange_test"
+    # Use π/4 as a standard test angle
+    test_theta = π/4
+    trotter_step = circuit_lib.longrange_test_circuit(NUM_QUBITS, test_theta)
+    
+    # For test circuit, start from |0...0⟩ (all zeros)
+    init_circuit = qiskit.QuantumCircuit(NUM_QUBITS)
+    
+    # Julia Circuit Construction
+    circ_jl = DigitalCircuit(NUM_QUBITS)
+    # Add initial sample barrier for t=0
     add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    
+    # Convert Python circuit to Julia gates
+    py_instructions = trotter_step.data
+    jl_gates_step = []
+    for instr in py_instructions
+        g = CircuitIngestion.convert_instruction_to_gate(instr, trotter_step)
+        if !isnothing(g)
+            push!(jl_gates_step, g)
+        end
+    end
+    
+    # For test circuit, we repeat the same layer multiple times
+    for _ in 1:NUM_LAYERS
+        for g in jl_gates_step
+            add_gate!(circ_jl, g.op, g.sites; generator=g.generator)
+        end
+        # Add sample barrier after each step
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
+else
+    # Original XY_longrange circuit
+    basis_label = "XY_longrange"
+    trotter_step = circuit_lib.xy_trotter_layer_longrange(NUM_QUBITS, TAU, order="YX")
+    
+    init_circuit = qiskit.QuantumCircuit(NUM_QUBITS)
+    for i in 0:(NUM_QUBITS-1)
+        if i % 4 == 3
+            init_circuit.x(i)
+        end
+    end
+    
+    # Julia Circuit Construction
+    circ_jl = DigitalCircuit(NUM_QUBITS)
+    # Add initial sample barrier for t=0
+    add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    
+    py_instructions = trotter_step.data
+    jl_gates_step = []
+    for instr in py_instructions
+        g = CircuitIngestion.convert_instruction_to_gate(instr, trotter_step)
+        if !isnothing(g)
+            # Skip Rz if returned (for consistency with original benchmark logic if needed)
+            # The Python script uses xy_trotter_layer_longrange which uses RXX, RYY.
+            push!(jl_gates_step, g)
+        end
+    end
+    
+    for _ in 1:NUM_LAYERS
+        for g in jl_gates_step
+            add_gate!(circ_jl, g.op, g.sites; generator=g.generator)
+        end
+        # Add sample barrier after each step
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
 end
 
 # 2. Noise Setup
@@ -237,19 +277,25 @@ function run_simulation_julia()
     # Initial State
     psi = MPS(NUM_QUBITS; state="zeros")
 
-    # Apply initial X gates to match Qiskit setup (indices 3, 7, ... in 0-based => 4, 8, ... in 1-based)
-    # Qiskit: if i % 4 == 3 -> X(i)
-    println("Applying initial state preparation (X gates)...")
-    for i in 1:NUM_QUBITS
-        if (i - 1) % 4 == 3
-            println("  Applying X to site $i")
-            T = psi.tensors[i]
-            # Apply X gate: Swap physical indices 1 and 2
-            # T is (Left, Phys, Right)
-            T_new = zeros(ComplexF64, size(T))
-            T_new[:, 1, :] = T[:, 2, :]
-            T_new[:, 2, :] = T[:, 1, :]
-            psi.tensors[i] = T_new
+    # Apply initial state preparation based on circuit type
+    if CIRCUIT_TYPE == "longrange_test"
+        # Test circuit starts from |0...0⟩, no X gates needed
+        println("Initial state: |0...0⟩ (all zeros)")
+    else
+        # XY_longrange: Apply initial X gates to match Qiskit setup (indices 3, 7, ... in 0-based => 4, 8, ... in 1-based)
+        # Qiskit: if i % 4 == 3 -> X(i)
+        println("Applying initial state preparation (X gates)...")
+        for i in 1:NUM_QUBITS
+            if (i - 1) % 4 == 3
+                println("  Applying X to site $i")
+                T = psi.tensors[i]
+                # Apply X gate: Swap physical indices 1 and 2
+                # T is (Left, Phys, Right)
+                T_new = zeros(ComplexF64, size(T))
+                T_new[:, 1, :] = T[:, 2, :]
+                T_new[:, 2, :] = T[:, 1, :]
+                psi.tensors[i] = T_new
+            end
         end
     end
 

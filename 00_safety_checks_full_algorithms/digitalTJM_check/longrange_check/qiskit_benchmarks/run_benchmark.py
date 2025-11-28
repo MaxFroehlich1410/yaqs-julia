@@ -235,10 +235,10 @@ def find_required_trajectories(
 if __name__ == "__main__":
 
     # Parameters
-    num_qubits = 8
-    num_layers = 20
+    num_qubits = 6
+    num_layers = 15
     tau = 0.1
-    noise_strengths = [0.1]
+    noise_strengths = [1e-05]
     observable_basis = "Z"
     
     # Toggle Methods
@@ -275,7 +275,8 @@ if __name__ == "__main__":
         create_ising_circuit, 
         create_heisenberg_circuit, 
         xy_trotter_layer, 
-        xy_trotter_layer_longrange, 
+        xy_trotter_layer_longrange,
+        longrange_test_circuit,
         create_clifford_cz_frame_circuit, 
         create_echoed_xx_pi_over_2, 
         create_sy_cz_parity_frame,
@@ -332,7 +333,12 @@ if __name__ == "__main__":
         return create_2d_ising_circuit(num_rows=num_rows, num_cols=num_cols, J=1.0, g=0.5, dt=tau, timesteps=1)
 
 
-    circuit_configs = [{"label": "XY_longrange", "builder": lambda: xy_trotter_layer_longrange(num_qubits, tau, order="YX")}]
+    # Circuit selection: can add "longrange_test" to test long-range noise isolation
+    circuit_configs = [
+        {"label": "longrange_test", "builder": lambda: longrange_test_circuit(num_qubits, np.pi/4)}
+    ]
+    
+    
 
 
     # Prepare base output directory for large-system runs
@@ -386,9 +392,14 @@ if __name__ == "__main__":
 
             # Prepare initial state circuit
             init_circuit = QuantumCircuit(num_qubits)
-            for i in range(num_qubits):
-                if i % 4 == 3:
-                    init_circuit.x(i)
+            if basis_label == "longrange_test":
+                # Test circuit starts from |0...0⟩, no X gates needed
+                pass
+            else:
+                # XY_longrange: Apply X gates on specific qubits
+                for i in range(num_qubits):
+                    if i % 4 == 3:
+                        init_circuit.x(i)
 
             # Build one Trotter step for this circuit
             trotter_step = cfg["builder"]()
@@ -433,12 +444,20 @@ if __name__ == "__main__":
                     )
 
             # Compute initial expectation values and staggered magnetization
-            if observable_basis == "Z":
-                expvals_initial = np.array([1.0 if i % 4 != 3 else -1.0 for i in range(num_qubits)])
-            elif observable_basis == "X":
-                expvals_initial = np.zeros(num_qubits)
-            else:  # Y basis
-                expvals_initial = np.zeros(num_qubits)
+            if basis_label == "longrange_test":
+                # Test circuit: all qubits start in |0⟩, so <Z> = 1 for all
+                if observable_basis == "Z":
+                    expvals_initial = np.ones(num_qubits)
+                else:
+                    expvals_initial = np.zeros(num_qubits)
+            else:
+                # XY_longrange: initial state has X gates on qubits where i % 4 == 3
+                if observable_basis == "Z":
+                    expvals_initial = np.array([1.0 if i % 4 != 3 else -1.0 for i in range(num_qubits)])
+                elif observable_basis == "X":
+                    expvals_initial = np.zeros(num_qubits)
+                else:  # Y basis
+                    expvals_initial = np.zeros(num_qubits)
             stag_initial = staggered_magnetization(expvals_initial, num_qubits)
 
             # Run exact density matrix simulation (reference) if enabled

@@ -6,7 +6,7 @@ using ..GateLibrary
 export ising_circuit, ising_2d_circuit, heisenberg_circuit, heisenberg_2d_circuit
 export fermi_hubbard_1d_circuit, fermi_hubbard_2d_circuit
 export nearest_neighbour_random_circuit, qaoa_ising_layer, hea_layer
-export xy_trotter_layer, xy_trotter_layer_longrange
+export xy_trotter_layer, xy_trotter_layer_longrange, longrange_test_circuit
 export clifford_cz_frame_circuit, echoed_xx_pi_over_2_circuit, sy_cz_parity_frame_circuit
 export cz_brickwork_circuit, rzz_pi_over_2_brickwork_circuit
 
@@ -735,6 +735,37 @@ function xy_trotter_layer_longrange(N::Int, tau::Float64, order::String="YX")
         add_gate!(base_circ, RyyGate(2*tau), [N, 1])
     end
     return base_circ
+end
+
+"""
+    longrange_test_circuit(N, theta)
+
+Creates a test circuit designed to isolate the effect of long-range noise.
+The circuit has:
+- Single-qubit H gates on all qubits (creates superposition)
+- Exactly ONE two-qubit gate: a long-range RXX gate between qubits N and 1 (periodic boundary)
+- This makes the noise effect on the long-range gate very clear and measurable.
+
+Args:
+    N: Number of qubits
+    theta: Rotation angle for the RXX gate (typically π/4 or similar)
+
+Returns:
+    DigitalCircuit with the test structure
+"""
+function longrange_test_circuit(N::Int, theta::Float64)
+    circ = DigitalCircuit(N)
+    
+    # 1. Apply H gates to all qubits to create superposition
+    for q in 1:N
+        add_gate!(circ, HGate(), [q])
+    end
+    
+    # 2. Apply exactly ONE long-range two-qubit gate: RXX between qubits N and 1
+    # This is the periodic boundary (N-1, 0) in 0-based = (N, 1) in 1-based
+    add_gate!(circ, RxxGate(theta), [N, 1])
+    
+    return circ
 end
 
 """

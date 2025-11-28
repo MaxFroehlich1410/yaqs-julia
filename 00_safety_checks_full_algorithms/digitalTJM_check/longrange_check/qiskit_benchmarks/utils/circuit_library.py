@@ -797,6 +797,37 @@ def xy_trotter_layer_longrange(
 
     return qc
 
+
+def longrange_test_circuit(N: int, theta: float) -> "QuantumCircuit":
+    """Create a test circuit designed to isolate the effect of long-range noise.
+    
+    The circuit has:
+    - Single-qubit H gates on all qubits (creates superposition)
+    - Exactly ONE two-qubit gate: a long-range RXX gate between qubits N-1 and 0 (periodic boundary)
+    - This makes the noise effect on the long-range gate very clear and measurable.
+    
+    Args:
+        N: Number of qubits
+        theta: Rotation angle for the RXX gate (typically π/4 or similar)
+    
+    Returns:
+        QuantumCircuit with the test structure
+    """
+    from qiskit import QuantumCircuit
+    
+    qc = QuantumCircuit(N)
+    
+    # 1. Apply H gates to all qubits to create superposition
+    for q in range(N):
+        qc.h(q)
+    
+    # 2. Apply exactly ONE long-range two-qubit gate: RXX between qubits N-1 and 0
+    # This is the periodic boundary (N-1, 0) in 0-based indexing
+    qc.rxx(theta, N - 1, 0)
+    
+    return qc
+
+
 def create_clifford_cz_frame_circuit(L: int, timesteps: int) -> QuantumCircuit:
     """H-all then CZ brickwork (even/odd). Barrier after each CZ layer."""
     qc = QuantumCircuit(L, name="H-CZ-frame")
