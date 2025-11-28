@@ -21,6 +21,7 @@ Does NOT hold the MPS state (to avoid re-creation).
 struct StochasticProcess{T}
     H_eff::MPO{T}
     jump_ops::Vector{Any} 
+    pauli_decays::Vector{Tuple{Int, Float64}}
 end
 
 """
@@ -31,6 +32,7 @@ Constructor that pre-calculates H_eff and jump_ops.
 function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) where T
     H_eff = deepcopy(hamiltonian)
     jump_ops = []
+    pauli_decays = Tuple{Int, Float64}[]
     L = hamiltonian.length
     
     one_site_terms = [zeros(T, 2, 2) for _ in 1:L] # Keep as Matrix
@@ -62,15 +64,31 @@ function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) wher
             end
             
         elseif proc isa MPONoiseProcess
-            L_mpo = proc.mpo
-            L_dag = adjoint_mpo(L_mpo)
-            
-            term_mpo = contract_mpo_mpo(L_dag, L_mpo)
-            term_mpo = (-0.5im * gamma) * term_mpo
-            
-            H_eff = H_eff + term_mpo
-            
-            push!(jump_ops, (proc, L_mpo, "mpo"))
+            # Check for optimized Pauli/Crosstalk case
+            if hasproperty(proc, :factors) && !isempty(proc.factors)
+                # Optimization: Don't add to H_eff (handle via scalar decay)
+                # Store jump ops as factors
+                push!(jump_ops, (proc, proc.factors, "pauli_long_range"))
+                
+                # Store decay for manual application
+                # Apply decay to the second site (standard convention for right-to-left sweep or just consistently)
+                # But here we apply globally or to specific site.
+                # Let's apply to the max site index to be safe with sweeps or just last site.
+                target_site = maximum(proc.sites)
+                push!(pauli_decays, (target_site, gamma))
+                
+            else
+                # Standard MPO processing
+                L_mpo = proc.mpo
+                L_dag = adjoint_mpo(L_mpo)
+                
+                term_mpo = contract_mpo_mpo(L_dag, L_mpo)
+                term_mpo = (-0.5im * gamma) * term_mpo
+                
+                H_eff = H_eff + term_mpo
+                
+                push!(jump_ops, (proc, L_mpo, "mpo"))
+            end
         end
     end
     
@@ -79,7 +97,7 @@ function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) wher
         H_eff = H_eff + decay_mpo
     end
     
-    return StochasticProcess(H_eff, jump_ops)
+    return StochasticProcess(H_eff, jump_ops, pauli_decays)
 end
 
 function adjoint_mpo(a::MPO{T}) where T
@@ -162,6 +180,7 @@ end
 Perform the MCWF jump logic on `mps` using pre-calculated `process`.
 """
 function solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
+    # Norm is already decayed by H_eff AND by manual pauli_decays
     norm_sq = real(scalar_product(mps, mps))
     
     r = rand()
@@ -184,11 +203,36 @@ function solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
                 L_dag = adjoint_mpo(op)
                 L_sq = contract_mpo_mpo(L_dag, op)
                 val = real(expect_mpo(L_sq, mps))
+            elseif type == "pauli_long_range"
+                # For Pauli: L'L = I. Expectation is norm_sq.
+                # However, we need the rate relative to the *current* state.
+                # The jump probability for channel k is dt * <psi|L_k' L_k|psi> / norm_sq (conditioned on jump)
+                # But here we accumulate raw rates to choose ONE jump.
+                # rate_k = <psi|L_k' L_k|psi>.
+                # Since we already applied decay, psi is unnormalized.
+                # val = <psi|psi> = norm_sq.
+                val = norm_sq
             end
             
-            push!(rates, max(0.0, val * gamma * dt)) # Multiply by dt here? Original code multiplied later?
-            # Wait, original code: push!(rates, val * gamma * dt)
-            # Yes.
+            # rate = <psi|L'L|psi> * dt ?
+            # Wait. The total jump probability P_jump = Sum(rates) * dt.
+            # And P_jump = 1 - norm_sq.
+            # If norm_sq ~ 1 - Sum(gamma)*dt (for pure decay).
+            # Then 1 - norm_sq ~ Sum(gamma)*dt.
+            # So rates should be roughly gamma * norm_sq? or gamma?
+            # If psi is normalized, rate = gamma.
+            # If psi is decayed, rate = gamma * norm_sq.
+            # The standard MCWF algorithm:
+            # Probability of jump in dt is dp = sum_k dp_k. dp_k = dt * <psi|L_k' L_k|psi>.
+            # If NO jump, we normalize.
+            # If JUMP, we choose k with prob dp_k / dp.
+            # Here we are INSIDE "if r > norm_sq" (so jump occurred).
+            # We need to pick k with prob proportional to dp_k.
+            # dp_k = dt * gamma * <psi|L_op' L_op|psi> (if strength separated).
+            # For Pauli, <psi|L'L|psi> = <psi|psi> = norm_sq.
+            # So rate propto gamma * norm_sq.
+            
+            push!(rates, max(0.0, val * gamma * dt)) 
         end
         
         total_rate = sum(rates)
@@ -239,6 +283,24 @@ function solve_jumps!(mps::MPS, process::StochasticProcess, dt::Float64)
                  new_mps = contract_mpo_mps(op, mps)
                  mps.tensors = new_mps.tensors
                  MPSModule.truncate!(mps)
+                 
+            elseif type == "pauli_long_range"
+                # Apply local factors directly
+                factors = op # op is factors vector
+                sites = proc.sites
+                s1, s2 = sort(sites) # Assuming factors are [sigma, tau] for s1, s2
+                
+                # Apply to s1
+                T1 = mps.tensors[s1]
+                op1 = factors[1]
+                @tensor T1_new[l, p, r] := op1[p, k] * T1[l, k, r]
+                mps.tensors[s1] = T1_new
+                
+                # Apply to s2
+                T2 = mps.tensors[s2]
+                op2 = factors[2]
+                @tensor T2_new[l, p, r] := op2[p, k] * T2[l, k, r]
+                mps.tensors[s2] = T2_new
             end
         end
     end
@@ -267,7 +329,13 @@ function trajectory_evolution(process::StochasticProcess, mps::MPS, t_final::Flo
         config = TimeEvolutionConfig(dummy_obs, dt; dt=dt, truncation_threshold=1e-10, max_bond_dim=64)
         two_site_tdvp!(current_mps, process.H_eff, config)
         
-        # 2. Jumps
+        # 2. Apply Pauli Decays (Manual non-unitary evolution)
+        for (site, gamma) in process.pauli_decays
+            factor = exp(-0.5 * dt * gamma)
+            current_mps.tensors[site] .*= factor
+        end
+        
+        # 3. Jumps
         solve_jumps!(current_mps, process, dt)
         
         # Measurements

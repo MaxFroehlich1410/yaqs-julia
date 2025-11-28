@@ -24,6 +24,12 @@ struct MPONoiseProcess{T} <: AbstractNoiseProcess{T}
     sites::Vector{Int}
     strength::Float64
     mpo::MPO{T}
+    factors::Vector{Matrix{T}} # Optional: Stores local factors for optimization if jump is a tensor product
+end
+
+# Constructor for backward compatibility or when factors are not available
+function MPONoiseProcess(name::String, sites::Vector{Int}, strength::Float64, mpo::MPO{T}) where T
+    return MPONoiseProcess(name, sites, strength, mpo, Vector{Matrix{T}}())
 end
 
 struct NoiseModel{T}
@@ -401,7 +407,10 @@ function NoiseModel(processes_info::Vector{Dict{String, Any}}, num_qubits::Int;
             # Build MPO for O = sigma_i ⊗ tau_j
             # a=0, b=1
             mpo = build_mpo_phys(num_qubits, sites[1], sites[2], sigma, tau, 0.0, 1.0)
-            push!(final_processes, MPONoiseProcess(name, sites, strength, mpo))
+            
+            # Store factors for optimization
+            factors = Matrix{C128}[Matrix(sigma), Matrix(tau)]
+            push!(final_processes, MPONoiseProcess(name, sites, strength, mpo, factors))
             
         else
             # Local

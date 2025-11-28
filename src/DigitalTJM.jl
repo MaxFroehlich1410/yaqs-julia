@@ -369,6 +369,8 @@ function run_digital_tjm_v2(initial_state::MPS, circuit::DigitalCircuit,
     
     # Initial Measurement
     if 0 in sample_indices
+        # We must populate the result array, but check indices carefully.
+        # If barrier 0 exists, it corresponds to time index 1 in the output arrays.
         measure!(current_meas_idx)
         current_meas_idx += 1
     end

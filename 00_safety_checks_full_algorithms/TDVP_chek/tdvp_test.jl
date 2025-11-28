@@ -5,22 +5,22 @@ using TensorOperations
 
 # Ensure src modules are available
 if !isdefined(Main, :GateLibrary)
-    include("../src/GateLibrary.jl")
+    include("../../src/GateLibrary.jl")
 end
 if !isdefined(Main, :Decompositions)
-    include("../src/Decompositions.jl")
+    include("../../src/Decompositions.jl")
 end
 if !isdefined(Main, :MPSModule)
-    include("../src/MPS.jl")
+    include("../../src/MPS.jl")
 end
 if !isdefined(Main, :MPOModule)
-    include("../src/MPO.jl")
+    include("../../src/MPO.jl")
 end
 if !isdefined(Main, :SimulationConfigs)
-    include("../src/SimulationConfigs.jl")
+    include("../../src/SimulationConfigs.jl")
 end
 if !isdefined(Main, :Algorithms)
-    include("../src/Algorithms.jl")
+    include("../../src/Algorithms.jl")
 end
 
 using .GateLibrary
@@ -202,6 +202,13 @@ end
 
 axes_py[length(SITES_TO_PLOT)-1].set_xlabel("Time")
 plt.tight_layout()
-plt.savefig("general_tdvp_comparison.png")
-println("Plot saved to general_tdvp_comparison.png")
+
+# Save results
+results_dir = "results"
+if !isdir(results_dir)
+    mkpath(results_dir)
+end
+output_path = joinpath(results_dir, "general_tdvp_comparison.png")
+plt.savefig(output_path)
+println("Plot saved to $output_path")
 

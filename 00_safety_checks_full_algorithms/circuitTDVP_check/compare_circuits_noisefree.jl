@@ -2,7 +2,7 @@ using LinearAlgebra
 using PythonCall
 
 # Include Yaqs source
-include("../src/Yaqs.jl")
+include("../../src/Yaqs.jl")
 using .Yaqs
 using .Yaqs.CircuitLibrary
 using .Yaqs.GateLibrary
@@ -10,7 +10,7 @@ using .Yaqs.MPSModule
 using .Yaqs.SimulationConfigs
 using .Yaqs.Simulator
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
-using .Yaqs.DigitalTJMFullLayerMPO: run_digital_tjm_full_layer
+using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
 
 # ==============================================================================
 # CONFIGURATION
@@ -20,8 +20,8 @@ using .Yaqs.DigitalTJMFullLayerMPO: run_digital_tjm_full_layer
 CIRCUIT_NAME = "Heisenberg" 
 
 # System Parameters
-L = 25
-timesteps = 50
+L = 10
+timesteps = 30
 dt = 0.1
 num_traj = 1 # Deterministic
 
@@ -133,10 +133,17 @@ if RUN_JULIA_V2_WINDOWED
     
     # Warmup
     println("Warming up V2...")
-    warmup_psi = MPS(L; state=INITIAL_STATE)
+    # Create a minimal warmup circuit to trigger compilation of the relevant methods
+    # without running the full heavy simulation.
+    warmup_L = L 
+    warmup_psi = MPS(warmup_L; state="zeros") 
+    warmup_circ = DigitalCircuit(warmup_L)
+    # Add just one gate of each type if possible, or just a dummy gate
+    add_gate!(warmup_circ, XGate(), [1])
+    
     # Need config
-    warmup_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=MAX_BOND_DIM)
-    run_digital_tjm(warmup_psi, circ_jl, nothing, warmup_config)
+    warmup_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=4)
+    run_digital_tjm_v2(warmup_psi, warmup_circ, nothing, warmup_config)
     println("Warmup complete.")
     
     println("Executing V2...")
@@ -147,7 +154,7 @@ if RUN_JULIA_V2_WINDOWED
         obs_v2 = deepcopy(obs_list)
         sim_params_v2 = TimeEvolutionConfig(obs_v2, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
         
-        _, res_matrix_v2 = run_digital_tjm(psi_v2, circ_jl, nothing, sim_params_v2)
+        _, res_matrix_v2 = run_digital_tjm_v2(psi_v2, circ_jl, nothing, sim_params_v2)
     end
     println("V2 Time: $(round(time_jl_v2, digits=4)) s")
     
@@ -165,7 +172,7 @@ if RUN_JULIA_V1_FULL_MPO
     println("Warming up V1...")
     warmup_psi = MPS(L; state=INITIAL_STATE)
     warmup_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=MAX_BOND_DIM)
-    run_digital_tjm_full_layer(warmup_psi, circ_jl, nothing, warmup_config)
+    run_digital_tjm(warmup_psi, circ_jl, nothing, warmup_config)
     println("Warmup complete.")
     
     println("Executing V1...")
@@ -175,7 +182,7 @@ if RUN_JULIA_V1_FULL_MPO
         obs_v1 = deepcopy(obs_list)
         sim_params_v1 = TimeEvolutionConfig(obs_v1, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
         
-        _, res_matrix_v1 = run_digital_tjm_full_layer(psi_v1, circ_jl, nothing, sim_params_v1)
+        _, res_matrix_v1 = run_digital_tjm(psi_v1, circ_jl, nothing, sim_params_v1)
     end
     println("V1 Time: $(round(time_jl_v1, digits=4)) s")
     
@@ -187,12 +194,15 @@ end
 # ==============================================================================
 if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
     sys = pyimport("sys")
-    local_src = normpath(joinpath(@__DIR__, "../src"))
-    mqt_src = normpath(joinpath(@__DIR__, "..", "..", "mqt-yaqs", "src"))
+    local_src = normpath(joinpath(@__DIR__, "../../src"))
+    # Adjusted to ../../../ because mqt-yaqs is a sibling of yaqs-julia
+    mqt_src = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src"))
+    mqt_inner = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src/mqt/yaqs"))
 
     paths = pyconvert(Vector{String}, sys.path)
     if !(local_src in paths); sys.path.insert(0, local_src); end
     if !(mqt_src in paths); sys.path.insert(0, mqt_src); end
+    if !(mqt_inner in paths); sys.path.insert(0, mqt_inner); end
 
     qiskit = pyimport("qiskit")
     mqt_circuit_lib = pyimport("mqt.yaqs.core.libraries.circuit_library")
@@ -369,5 +379,10 @@ else
 end
 
 plt.tight_layout()
-plt.savefig("comparison_$(lowercase(CIRCUIT_NAME)).png")
-println("Plot saved.")
+results_dir = "results"
+if !isdir(results_dir)
+    mkpath(results_dir)
+end
+fname = joinpath(results_dir, "comparison_$(lowercase(CIRCUIT_NAME)).png")
+plt.savefig(fname)
+println("Plot saved to $fname")
