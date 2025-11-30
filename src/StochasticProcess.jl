@@ -327,7 +327,12 @@ function trajectory_evolution(process::StochasticProcess, mps::MPS, t_final::Flo
         # 1. TDVP Step with H_eff
         dummy_obs = Vector{Observable{AbstractOperator}}()
         config = TimeEvolutionConfig(dummy_obs, dt; dt=dt, truncation_threshold=1e-10, max_bond_dim=64)
-        two_site_tdvp!(current_mps, process.H_eff, config)
+        
+        if current_mps.length == 1
+            single_site_tdvp!(current_mps, process.H_eff, config)
+        else
+            two_site_tdvp!(current_mps, process.H_eff, config)
+        end
         
         # 2. Apply Pauli Decays (Manual non-unitary evolution)
         for (site, gamma) in process.pauli_decays

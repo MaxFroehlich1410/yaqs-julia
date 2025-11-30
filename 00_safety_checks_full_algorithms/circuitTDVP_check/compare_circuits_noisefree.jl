@@ -17,17 +17,16 @@ using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "XY" 
+CIRCUIT_NAME = "longrange_test" 
 
 # System Parameters
-L = 25
-timesteps = 40
+L = 90
+timesteps = 10
 dt = 0.1
 num_traj = 1 # Deterministic
 
 # Flags for Execution
 RUN_JULIA_V2_WINDOWED = true # New Default
-RUN_JULIA_V1_FULL_MPO = false # Old V1
 RUN_PYTHON_YAQS = true
 RUN_QISKIT_EXACT = false
 
@@ -69,7 +68,7 @@ end
 
 println("Comparing Simulation: $CIRCUIT_NAME")
 println("L=$L, dt=$dt, steps=$timesteps, Initial=$INITIAL_STATE")
-println("Run Config: V2_Windowed=$RUN_JULIA_V2_WINDOWED, V1_FullMPO=$RUN_JULIA_V1_FULL_MPO, Python_YAQS=$RUN_PYTHON_YAQS, Qiskit_Exact=$RUN_QISKIT_EXACT")
+println("Run Config: V2_Windowed=$RUN_JULIA_V2_WINDOWED, Python_YAQS=$RUN_PYTHON_YAQS, Qiskit_Exact=$RUN_QISKIT_EXACT")
 
 # ==============================================================================
 # 1. CIRCUIT SETUP
@@ -178,34 +177,7 @@ if RUN_JULIA_V2_WINDOWED
 end
 
 # ==============================================================================
-# 3. JULIA V1 (FULL LAYER MPO - OLD)
-# ==============================================================================
-if RUN_JULIA_V1_FULL_MPO
-    println("\n--- Running Julia V1 (Full Layer MPO) ---")
-    
-    # Warmup
-    println("Warming up V1...")
-    warmup_psi = MPS(L; state=INITIAL_STATE)
-    warmup_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=MAX_BOND_DIM)
-    run_digital_tjm(warmup_psi, circ_jl, nothing, warmup_config)
-    println("Warmup complete.")
-    
-    println("Executing V1...")
-    time_jl_v1 = @elapsed begin
-        psi_v1 = MPS(L; state=INITIAL_STATE)
-        
-        obs_v1 = deepcopy(obs_list)
-        sim_params_v1 = TimeEvolutionConfig(obs_v1, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
-        
-        _, res_matrix_v1 = run_digital_tjm(psi_v1, circ_jl, nothing, sim_params_v1)
-    end
-    println("V1 Time: $(round(time_jl_v1, digits=4)) s")
-    
-    results_jl_v1 = [res_matrix_v1[i, 2:end] for i in 1:length(obs_list)]
-end
-
-# ==============================================================================
-# 4. PYTHON SIMULATION SETUP
+# 3. PYTHON SIMULATION SETUP
 # ==============================================================================
 if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
     sys = pyimport("sys")
@@ -313,7 +285,6 @@ end
 
 println("\n--- Performance Summary ---")
 if RUN_JULIA_V2_WINDOWED; println("Julia V2 (Windowed): $(round(time_jl_v2, digits=4)) s"); end
-if RUN_JULIA_V1_FULL_MPO; println("Julia V1 (Full MPO): $(round(time_jl_v1, digits=4)) s"); end
 if RUN_PYTHON_YAQS;       println("Python YAQS:       $(round(time_py_yaqs, digits=4)) s"); end
 
 if RUN_JULIA_V2_WINDOWED && RUN_PYTHON_YAQS
@@ -334,14 +305,12 @@ end
 # Determine X axis length from available results
 len_x = 0
 if RUN_JULIA_V2_WINDOWED; len_x = length(results_jl_v2[1]); end
-if RUN_JULIA_V1_FULL_MPO; len_x = length(results_jl_v1[1]); end
 if RUN_PYTHON_YAQS;       len_x = length(results_py_yaqs[1]); end
 if RUN_QISKIT_EXACT;      len_x = length(results_py_exact[1]); end
 
 # Truncate all to minimum length
 min_len = len_x
 if RUN_JULIA_V2_WINDOWED; min_len = min(min_len, length(results_jl_v2[1])); end
-if RUN_JULIA_V1_FULL_MPO; min_len = min(min_len, length(results_jl_v1[1])); end
 if RUN_PYTHON_YAQS;       min_len = min(min_len, length(results_py_yaqs[1])); end
 if RUN_QISKIT_EXACT;      min_len = min(min_len, length(results_py_exact[1])); end
 
@@ -355,10 +324,6 @@ for i in 1:3
     
     if RUN_JULIA_V2_WINDOWED
         ax1.plot(x, results_jl_v2[i][1:min_len], label="JuliaV2 Z_$s", color=c, linestyle="-", linewidth=2)
-    end
-    
-    if RUN_JULIA_V1_FULL_MPO
-        ax1.plot(x, results_jl_v1[i][1:min_len], label="JuliaV1 Z_$s", color=c, linestyle="-.", linewidth=1)
     end
     
     if RUN_PYTHON_YAQS

@@ -16,7 +16,6 @@ export single_site_tdvp!, two_site_tdvp!
     expm_krylov(A_func, v, dt, k)
 
 Compute exp(-im * dt * A) * v using Krylov subspace.
-Wrapper around KrylovKit.exponentiate.
 """
 function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) where T
     norm_v = norm(v)
@@ -25,26 +24,12 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     end
         
     t_val = -1im * dt
-    # Using KrylovKit
-    # exponentiate(A, t, x0) -> exp(t*A) * x0
-    # TDVP Effective Hamiltonians should be Hermitian, but numerical noise or loss of canonical form
-    # can introduce small anti-Hermitian parts. 
-    # Using ishermitian=false (Arnoldi) avoids warnings and handles these cases robustly.
     val, info = exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=false)
-    
     return val
 end
 
-
-
 # --- Environment Helpers ---
 
-"""
-    make_identity_env(dim::Int, mpo_dim::Int)
-
-Create an identity environment tensor of shape (dim, mpo_dim, dim).
-It is non-zero only for mpo index = 1 (assuming MPO boundary is 1).
-"""
 function make_identity_env(dim::Int, mpo_dim::Int)
     E = zeros(ComplexF64, dim, mpo_dim, dim)
     for i in 1:dim
@@ -54,104 +39,416 @@ function make_identity_env(dim::Int, mpo_dim::Int)
 end
 
 function update_left_environment(A, W, E_left)
-    # A: (L, P, R) [Ket]
-    # W: (L_w, P_out, P_in, R_w)
-    # E_left: (Bra_L, MPO_L, Ket_L)
-    
-    # Contract E_left * A
-    # E[bra_l, mpo_l, ket_l] * A[ket_l, p_in, ket_r]
-    # -> T1[bra_l, mpo_l, p_in, ket_r]
     @tensor T1[bra_l, mpo_l, p_in, ket_r] := E_left[bra_l, mpo_l, k] * A[k, p_in, ket_r]
-    
-    # Contract T1 * W
-    # T1[bra_l, mpo_l, p_in, ket_r] * W[mpo_l, p_out, p_in, mpo_r]
-    # -> T2[bra_l, ket_r, p_out, mpo_r]
     @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
-    
-    # Contract T2 * conj(A) (Bra)
-    # T2[bra_l, ket_r, p_out, mpo_r] * conj(A)[bra_l, p_out, bra_r]
-    # -> E_next[bra_r, mpo_r, ket_r]
     @tensor E_next[bra_r, mpo_r, ket_r] := T2[k_bl, ket_r, k_pout, mpo_r] * conj(A[k_bl, k_pout, bra_r])
-    
     return E_next
 end
 
 function update_right_environment(A, W, E_right)
-    # A: (L, P, R) [Ket]
-    # W: (L_w, P_out, P_in, R_w)
-    # E_right: (Bra_R, MPO_R, Ket_R)
-    
-    # Contract A * E_right
-    # A[ket_l, p_in, ket_r] * E[bra_r, mpo_r, ket_r]
-    # -> T1[ket_l, p_in, bra_r, mpo_r]
     @tensor T1[ket_l, p_in, bra_r, mpo_r] := A[ket_l, p_in, k] * E_right[bra_r, mpo_r, k]
-    
-    # Contract W * T1
-    # W[mpo_l, p_out, p_in, mpo_r] * T1[ket_l, p_in, bra_r, mpo_r]
-    # -> T2[mpo_l, p_out, ket_l, bra_r]
     @tensor T2[mpo_l, p_out, ket_l, bra_r] := W[mpo_l, p_out, k_pin, k_mr] * T1[ket_l, k_pin, bra_r, k_mr]
-    
-    # Contract T2 * conj(A)
-    # T2[mpo_l, p_out, ket_l, bra_r] * conj(A)[bra_l, p_out, bra_r]
-    # -> E_next[bra_l, mpo_l, ket_l]
     @tensor E_next[bra_l, mpo_l, ket_l] := T2[mpo_l, k_pout, ket_l, k_br] * conj(A[bra_l, k_pout, k_br])
-    
     return E_next
 end
 
-# --- Projectors (Matrix-Free Operators) ---
+# --- Projectors ---
 
 function project_site(A, L, R, W)
-    # L: (Bra_L, MPO_L, Ket_L)
-    # R: (Bra_R, MPO_R, Ket_R)
-    # W: (MPO_L, P_out, P_in, MPO_R)
-    # A: (Ket_L, P_in, Ket_R)
-    
-    # L * A
     @tensor T1[bra_l, mpo_l, p_in, ket_r] := L[bra_l, mpo_l, k] * A[k, p_in, ket_r]
-    
-    # T1 * W
     @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
-    
-    # T2 * R
     @tensor A_new[bra_l, p_out, bra_r] := T2[bra_l, k_kr, p_out, k_mr] * R[bra_r, k_mr, k_kr]
-    
     return A_new
 end
 
 function project_bond(C, L, R)
-    # C: (Ket_L, Ket_R)
-    # L: (Bra_L, MPO, Ket_L)
-    # R: (Bra_R, MPO, Ket_R)
-    
-    # L * C
     @tensor T1[bra_l, mpo, ket_r] := L[bra_l, mpo, k] * C[k, ket_r]
-    
-    # T1 * R
     @tensor C_new[bra_l, bra_r] := T1[bra_l, k_mpo, k_kr] * R[bra_r, k_mpo, k_kr]
-    
     return C_new
 end
 
-# --- TDVP Sweeps ---
+# --- SVD Helper ---
 
-"""
-    single_site_tdvp!(state, H, config)
+function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
+    # Reshape for SVD (L*p1, p2*R)
+    Mat = reshape(Theta, l_virt*p1, p2*r_virt)
+    F = svd(Mat)
+    
+    # Truncation
+    discarded_sq = 0.0
+    keep_rank = length(F.S)
+    threshold = config.truncation_threshold
+    min_keep = 2
+    
+    for k in length(F.S):-1:1
+        discarded_sq += F.S[k]^2
+        if discarded_sq >= threshold
+            keep_rank = max(k, min_keep)
+            break
+        end
+    end
+    
+    keep = clamp(keep_rank, 1, config.max_bond_dim)
+    
+    U = F.U[:, 1:keep]
+    S = F.S[1:keep]
+    Vt = F.Vt[1:keep, :]
+    
+    return U, S, Vt, keep
+end
 
-Perform 1-site TDVP.
-"""
+# --- Main Dispatch Functions ---
+
 function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
-    # 1. Ensure state is in Right Canonical Form (Center at 1) for initial E_right calculation.
-    shift_orthogonality_center!(state, 1)
+    # Hamiltonian Simulation: Symmetric Sweep (Forward + Backward) with dt/2
+    _tdvp_sweep_hamiltonian_1site!(state, H, config)
+end
 
+function single_site_tdvp!(state::MPS, H::MPO, config::Union{MeasurementConfig, StrongMeasurementConfig})
+    # Circuit Simulation: Single Forward Sweep with dt=2 logic
+    _tdvp_sweep_circuit_1site!(state, H, config)
+end
+
+function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
+    # Hamiltonian Simulation: Symmetric Sweep
+    _tdvp_sweep_hamiltonian_2site!(state, H, config)
+end
+
+function two_site_tdvp!(state::MPS, H::MPO, config::Union{MeasurementConfig, StrongMeasurementConfig})
+    # Circuit Simulation: Single Forward Sweep
+    _tdvp_sweep_circuit_2site!(state, H, config)
+end
+
+# --- Implementation of Sweeps ---
+
+# 1. Hamiltonian 1-Site (Forward + Backward)
+function _tdvp_sweep_hamiltonian_1site!(state, H, config)
+    shift_orthogonality_center!(state, 1)
+    L = state.length
     dt = config.dt
+    
+    # Init Envs
+    E_left, E_right = _init_envs(state, H)
+    
+    # Forward (1 -> L)
+    for i in 1:L
+        W = H.tensors[i]
+        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        
+        # Evolve Site (dt/2)
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
+        
+        if i < L
+            l, p, r = size(state.tensors[i])
+            A_mat = reshape(state.tensors[i], l*p, r)
+            F = qr(A_mat)
+            Q_mat = Matrix(F.Q)
+            state.tensors[i] = reshape(Q_mat, l, p, size(Q_mat, 2))
+            R_mat = Matrix(F.R)
+            
+            E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
+            
+            # Evolve Bond Backward (-dt/2)
+            func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1])
+            C_new = expm_krylov(func_bond, R_mat, -dt/2, 25)
+            
+            @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
+            state.tensors[i+1] = Next
+        end
+    end
+    
+    # Backward (L -> 1)
+    for i in L:-1:1
+        W = H.tensors[i]
+        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
+        
+        if i > 1
+            l, p, r = size(state.tensors[i])
+            A_mat = reshape(state.tensors[i], l, p*r)
+            F = lq(A_mat)
+            Q_mat = Matrix(F.Q)
+            state.tensors[i] = reshape(Q_mat, size(Q_mat, 1), p, r)
+            L_mat = Matrix(F.L)
+            
+            E_right[i] = update_right_environment(state.tensors[i], W, E_right[i+1])
+            
+            func_bond(x) = project_bond(x, E_left[i], E_right[i])
+            C_new = expm_krylov(func_bond, L_mat, -dt/2, 25)
+            
+            @tensor Prev[l, p, r] := state.tensors[i-1][l, p, k] * C_new[k, r]
+            state.tensors[i-1] = Prev
+        end
+    end
+    println("max bond dim: ", write_max_bond_dim(state))
+end
+
+# 2. Circuit 1-Site (Forward Only, dt=2 logic)
+function _tdvp_sweep_circuit_1site!(state, H, config)
+    shift_orthogonality_center!(state, 1)
     L = state.length
     
-    # Init Environments
-    # Right Envs
-    E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
+    # Circuit Logic: dt starts at 2.0
+    dt = 2.0
     
-    # Use make_identity_env to correctly match dimensions (in case bond dim > 1)
+    E_left, E_right = _init_envs(state, H)
+    
+    # Forward Sweep (1 -> L-1)
+    for i in 1:(L-1)
+        W = H.tensors[i]
+        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        
+        # Evolve Site (0.5 * dt = 1.0)
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], 0.5 * dt, 25)
+        
+        l, p, r = size(state.tensors[i])
+        A_mat = reshape(state.tensors[i], l*p, r)
+        F = qr(A_mat)
+        state.tensors[i] = reshape(Matrix(F.Q), l, p, size(F.Q, 2))
+        R_mat = Matrix(F.R)
+        
+        E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
+        
+        # Evolve Bond (-0.5 * dt = -1.0)
+        func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1])
+        C_new = expm_krylov(func_bond, R_mat, -0.5 * dt, 25)
+        
+        @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
+        state.tensors[i+1] = Next
+    end
+    
+    # Final Site Update (dt becomes 1.0)
+    dt = 1.0
+    W = H.tensors[L]
+    func_site_last(x) = project_site(x, E_left[L], E_right[L+1], W)
+    state.tensors[L] = expm_krylov(func_site_last, state.tensors[L], dt, 25)
+    
+    # No Backward Sweep
+end
+
+# 3. Hamiltonian 2-Site
+function _tdvp_sweep_hamiltonian_2site!(state, H, config)
+    shift_orthogonality_center!(state, 1)
+    L = state.length
+    dt = config.dt
+    E_left, E_right = _init_envs(state, H)
+    
+    # Forward Sweep (1 -> L-2)
+    # Evolve 2-site by dt/2, Split Right, Evolve Bond/RightSite back by -dt/2
+    for i in 1:(L-2)
+        _two_site_update_forward!(state, H, E_left, E_right, i, dt/2, config, true)
+    end
+    
+    # Edge Step (L-1)
+    if L >= 2
+        # Evolve 2-site by FULL dt. Split Left. NO backward evolution.
+        _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, L-1, dt, config)
+    end
+    
+    # Backward Sweep (L-2 -> 1)
+    # Python: Evolve RightSite back -dt/2, Merge, Evolve dt/2, Split Left
+    for i in (L-2):-1:1
+        _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt/2, config)
+    end
+end
+
+# 4. Circuit 2-Site (Forward Only)
+function _tdvp_sweep_circuit_2site!(state, H, config)
+    shift_orthogonality_center!(state, 1)
+    L = state.length
+    
+    E_left, E_right = _init_envs(state, H)
+    
+    # Circuit Logic: 
+    # Bulk dt=2.0 (split into +1.0, -1.0)
+    # Edge dt=1.0 (just +1.0)
+    
+    # Forward Sweep (1 -> L-2)
+    for i in 1:(L-2)
+        # Evolve +1.0, Back -1.0
+        _two_site_update_forward!(state, H, E_left, E_right, i, 1.0, config, true)
+    end
+    
+    # Edge Step (L-1)
+    # Evolve +1.0
+    _two_site_update_edge_circuit!(state, H, E_left, E_right, L-1, 1.0, config)
+    
+    # No Backward
+end
+
+# --- Helpers for 2-Site ---
+
+function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
+    A1 = state.tensors[i]
+    A2 = state.tensors[i+1]
+    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    
+    W1 = H.tensors[i]
+    W2 = H.tensors[i+1]
+    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    l1, p1o, p1i, b1 = size(W1)
+    l2, p2o, p2i, b2 = size(W2)
+    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    
+    l_theta, p1, p2, r_theta = size(Theta)
+    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    
+    # Evolve Theta
+    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    
+    # Split (Move Center Right: Keep S with V)
+    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    
+    # Assign Left (U) -> Left Canonical
+    state.tensors[i] = reshape(U, l_theta, p1, keep)
+    
+    # Update Left Env for next site
+    E_left[i+1] = update_left_environment(state.tensors[i], W1, E_left[i])
+    
+    # Form Right (S*V) -> Center
+    A2_temp = reshape(Diagonal(S) * Vt, keep, p2, r_theta)
+    
+    if evolve_back
+        func_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
+        A2_new = expm_krylov(func_back, A2_temp, -dt_step, 25)
+        state.tensors[i+1] = A2_new
+    else
+        state.tensors[i+1] = A2_temp
+    end
+end
+
+function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_step, config)
+    # Edge Step: Evolve by dt_step. Split Left (Center moves to L-1).
+    
+    A1 = state.tensors[i]
+    A2 = state.tensors[i+1]
+    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    
+    W1 = H.tensors[i]
+    W2 = H.tensors[i+1]
+    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    l1, p1o, p1i, b1 = size(W1)
+    l2, p2o, p2i, b2 = size(W2)
+    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    
+    l_theta, p1, p2, r_theta = size(Theta)
+    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    
+    # Evolve Theta (Full dt)
+    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    
+    # Split Left (Move Center Left: Keep S with U)
+    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    
+    # Assign Right (Vt) -> Right Canonical
+    state.tensors[i+1] = reshape(Vt, keep, p2, r_theta)
+    
+    # Update Right Env
+    E_right[i+1] = update_right_environment(state.tensors[i+1], W2, E_right[i+2])
+    
+    # Assign Left (U*S) -> Center
+    state.tensors[i] = reshape(U * Diagonal(S), l_theta, p1, keep)
+    
+    # No Backward evolution at edge
+end
+
+function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_step, config)
+    # Python Backward Loop Logic:
+    # 1. Evolve Right Site (i+1) by -dt_step (Pre-correction)
+    # 2. Merge (i, i+1)
+    # 3. Evolve Theta by +dt_step
+    # 4. Split Left
+    
+    # 1. Pre-correct Right Site (state[i+1])
+    W2 = H.tensors[i+1]
+    # Note: state[i+1] is currently Right Canonical (from prev step split).
+    # Is it okay to evolve it? Yes, we treat it as the "Center" of the previous bond that needs time adjustment.
+    
+    func_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
+    state.tensors[i+1] = expm_krylov(func_back, state.tensors[i+1], -dt_step, 25)
+    
+    # 2. Merge
+    A1 = state.tensors[i]
+    A2 = state.tensors[i+1]
+    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    
+    W1 = H.tensors[i]
+    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    l1, p1o, p1i, b1 = size(W1)
+    l2, p2o, p2i, b2 = size(W2)
+    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    
+    l_theta, p1, p2, r_theta = size(Theta)
+    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    
+    # 3. Evolve Theta
+    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    
+    # 4. Split Left (Center moves to i)
+    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    
+    # Assign Right (Vt) -> Right Canonical
+    state.tensors[i+1] = reshape(Vt, keep, p2, r_theta)
+    
+    # Update Right Env
+    E_right[i+1] = update_right_environment(state.tensors[i+1], W2, E_right[i+2])
+    
+    # Assign Left (U*S) -> Center
+    state.tensors[i] = reshape(U * Diagonal(S), l_theta, p1, keep)
+end
+
+function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, config)
+    # Circuit Edge: Evolve by dt_step. Split Right. No Back.
+    # Note: Python splits "right" here!
+    # "state.tensors[i], state.tensors[i+1] = split_mps_tensor(..., "right", ...)"
+    # So Center stays at Right (i+1).
+    
+    A1 = state.tensors[i]
+    A2 = state.tensors[i+1]
+    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    
+    W1 = H.tensors[i]
+    W2 = H.tensors[i+1]
+    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    l1, p1o, p1i, b1 = size(W1)
+    l2, p2o, p2i, b2 = size(W2)
+    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    
+    l_theta, p1, p2, r_theta = size(Theta)
+    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    
+    # Evolve Theta
+    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    
+    # Split Right (Center moves to i+1)
+    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    
+    # Assign Left (U) -> Left Canonical
+    state.tensors[i] = reshape(U, l_theta, p1, keep)
+    
+    # Update Left Env
+    E_left[i+1] = update_left_environment(state.tensors[i], W1, E_left[i])
+    
+    # Assign Right (S*V) -> Center
+    state.tensors[i+1] = reshape(Diagonal(S) * Vt, keep, p2, r_theta)
+end
+
+function _init_envs(state, H)
+    L = state.length
+    E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
     r_bond = size(state.tensors[L], 3)
     r_mpo = size(H.tensors[L], 4)
     E_right[L+1] = make_identity_env(r_bond, r_mpo)
@@ -165,301 +462,7 @@ function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
     l_mpo = size(H.tensors[1], 1)
     E_left[1] = make_identity_env(l_bond, l_mpo)
     
-    # Sweep Right (1 -> L)
-    for i in 1:L
-        # 1. Evolve Site Forward
-        W = H.tensors[i]
-        A = state.tensors[i]
-        
-        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
-        A_new = expm_krylov(func_site, A, dt/2, 25) 
-        
-        state.tensors[i] = A_new
-        
-        if i < L
-            # 2. Split / QR to move center right
-            l, p, r = size(A_new)
-            A_mat = reshape(A_new, l*p, r)
-            F = qr(A_mat)
-            Q = Matrix(F.Q)
-            R = Matrix(F.R) # This is C (Bond Matrix)
-            
-            # Update Site i to Left-Orthogonal Q
-            state.tensors[i] = reshape(Q, l, p, size(Q, 2))
-            
-            # Update Left Env
-            E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
-            
-            # Evolve Bond Backward (-dt/2)
-            func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1]) # Bond is between i and i+1
-            C_new = expm_krylov(func_bond, R, -dt/2, 25)
-            
-            # Absorb C into next site (i+1)
-            Next = state.tensors[i+1]
-            @tensor Next_new[l, p, r] := C_new[l, k] * Next[k, p, r]
-            state.tensors[i+1] = Next_new
-        end
-    end
-    
-    # Sweep Left (L -> 1)
-    for i in L:-1:1
-        # Evolve Site Forward (+dt/2)
-        W = H.tensors[i]
-        A = state.tensors[i]
-        
-        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
-        A_new = expm_krylov(func_site, A, dt/2, 25)
-        state.tensors[i] = A_new
-        
-        if i > 1
-            # Split / LQ to move center left
-            l, p, r = size(A_new)
-            A_mat = reshape(A_new, l, p*r)
-            F = lq(A_mat)
-            L_mat = Matrix(F.L) # This is C (Bond Matrix)
-            Q = Matrix(F.Q)
-            
-            # Update Site i to Right-Orthogonal Q
-            state.tensors[i] = reshape(Q, size(Q, 1), p, r)
-            
-            # Update Right Env
-            E_right[i] = update_right_environment(state.tensors[i], W, E_right[i+1])
-            
-            # Evolve Bond Backward (-dt/2)
-            func_bond(x) = project_bond(x, E_left[i], E_right[i]) # Bond between i-1 and i
-            C_new = expm_krylov(func_bond, L_mat, -dt/2, 25)
-            
-            # Absorb into i-1
-            Prev = state.tensors[i-1]
-            @tensor Prev_new[l, p, r] := Prev[l, p, k] * C_new[k, r]
-            state.tensors[i-1] = Prev_new
-        end
-    end
-    println("max bond dim: ", write_max_bond_dim(state))
-end
-
-
-"""
-    two_site_tdvp!(state, H, config)
-
-Perform 2-site TDVP.
-"""
-function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
-    # 1. Ensure state is in Right Canonical Form (Center at 1)
-    shift_orthogonality_center!(state, 1)
-
-    dt = config.dt
-    L = state.length
-    
-    # Init Envs
-    E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    
-    # E_right[L+1] boundary
-    r_bond_dim = size(state.tensors[L], 3)
-    r_mpo_dim = size(H.tensors[L], 4)
-    E_right[L+1] = make_identity_env(r_bond_dim, r_mpo_dim)
-    
-    for i in L:-1:2
-        E_right[i] = update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
-    end
-    
-    E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
-    # E_left[1] boundary
-    l_bond_dim = size(state.tensors[1], 1)
-    l_mpo_dim = size(H.tensors[1], 1)
-    E_left[1] = make_identity_env(l_bond_dim, l_mpo_dim)
-    
-    # Forward Sweep
-    for i in 1:(L-1)
-        # 1. Merge Sites A[i] and A[i+1]
-        A1 = state.tensors[i]
-        A2 = state.tensors[i+1]
-        @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
-        
-        # 2. Merge MPO W[i] and W[i+1]
-        W1 = H.tensors[i]
-        W2 = H.tensors[i+1]
-        # W1: (L, p1o, p1i, B)
-        # W2: (B, p2o, p2i, R)
-        # Result: (L, p1o, p1i, p2o, p2i, R)
-        @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
-        
-        # Reshape Theta -> (L, (p1,p2), R)
-        l_theta, p1, p2, r_theta = size(Theta)
-        Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
-        
-        # Reshape W_merge -> (L, (p1o, p2o), (p1i, p2i), R)
-        # Requires permuting (l, p1o, p1i, p2o, p2i, r) -> (l, p1o, p2o, p1i, p2i, r)
-        W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
-        W_group = reshape(W_perm, size(W1, 1), p1*p2, p1*p2, size(W2, 4))
-        
-        # 3. Evolve Theta (+dt/2)
-        func_two_site(x) = project_site(x, E_left[i], E_right[i+2], W_group)
-        Theta_new = expm_krylov(func_two_site, Theta_group, dt/2, 25)
-        
-        # 4. Split Theta (SVD) -> A1_new, S, A2_new
-        # Reshape back to (L, p1, p2, R)
-        Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
-        
-        # SVD
-        # Group (L, p1) and (p2, R)
-        Mat = reshape(Theta_split, l_theta*p1, p2*r_theta)
-        F = svd(Mat)
-        
-        # Truncation
-        # Match Python YAQS exactly: absolute threshold, not relative
-        # Python logic:
-        # discard = 0.0
-        # keep = len(s_vec)
-        # min_keep = 2
-        # for idx, s in enumerate(reversed(s_vec)):
-        #     discard += s**2
-        #     if discard >= threshold:
-        #         keep = max(len(s_vec) - idx, min_keep)
-        #         break
-        #
-        # In Julia: k goes from length(S) (smallest) down to 1 (largest)
-        # Python idx=0 corresponds to Julia k=length(S)
-        # Python idx corresponds to Julia k = length(S) - idx
-        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
-        
-        discarded_sq = 0.0
-        keep_rank = length(F.S)
-        threshold = config.truncation_threshold
-        min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
-        
-        # Accumulate discarded weight from smallest singular values
-        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
-        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
-        # Mapping: Python idx corresponds to Julia k = length(S) - idx
-        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
-        for k in length(F.S):-1:1
-            discarded_sq += F.S[k]^2
-            if discarded_sq >= threshold
-                # Python: keep = max(len(s_vec) - idx, min_keep)
-                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
-                keep_rank = max(k, min_keep)
-                break
-            end
-        end
-        
-        max_D = config.max_bond_dim
-        keep = clamp(keep_rank, 1, max_D)
-        
-        U = F.U[:, 1:keep]
-        S = F.S[1:keep]
-        Vt = F.Vt[1:keep, :]
-        
-        # 5. Assign A1_new (left canonical U)
-        state.tensors[i] = reshape(U, l_theta, p1, keep)
-        
-        # Update Left Env (for i+1)
-        E_left[i+1] = update_left_environment(state.tensors[i], W1, E_left[i])
-        
-        # 6. Form A2 (Right) = S * Vt
-        # A2_temp is effectively the "Bond-Center" tensor for the next step
-        A2_temp = reshape(Diagonal(S) * Vt, keep, p2, r_theta)
-        
-        # Evolve A2 Backward (-dt/2) ONLY if not at the last bond
-        if i < L - 1
-            func_site_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
-            A2_new = expm_krylov(func_site_back, A2_temp, -dt/2, 25)
-            state.tensors[i+1] = A2_new
-        else
-            # At the edge, A2 stays at t+dt/2
-            state.tensors[i+1] = A2_temp
-        end
-    end
-    
-    # Backward Sweep (L-1 -> 1)
-    
-    for i in (L-1):-1:1
-        # 1. Merge
-        A1 = state.tensors[i]
-        A2 = state.tensors[i+1]
-        @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
-        
-        W1 = H.tensors[i]
-        W2 = H.tensors[i+1]
-        @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
-        l_theta, p1, p2, r_theta = size(Theta)
-        Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
-        W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
-        W_group = reshape(W_perm, size(W1, 1), p1*p2, p1*p2, size(W2, 4))
-        
-        # Evolve (+dt/2)
-        func_two_site(x) = project_site(x, E_left[i], E_right[i+2], W_group)
-        Theta_new = expm_krylov(func_two_site, Theta_group, dt/2, 25)
-        
-        # Split (SVD)
-        Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
-        Mat = reshape(Theta_split, l_theta*p1, p2*r_theta)
-        F = svd(Mat)
-        
-        # Truncation
-        # Match Python YAQS exactly: absolute threshold, not relative
-        # Python logic:
-        # discard = 0.0
-        # keep = len(s_vec)
-        # min_keep = 2
-        # for idx, s in enumerate(reversed(s_vec)):
-        #     discard += s**2
-        #     if discard >= threshold:
-        #         keep = max(len(s_vec) - idx, min_keep)
-        #         break
-        #
-        # In Julia: k goes from length(S) (smallest) down to 1 (largest)
-        # Python idx=0 corresponds to Julia k=length(S)
-        # Python idx corresponds to Julia k = length(S) - idx
-        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
-        
-        discarded_sq = 0.0
-        keep_rank = length(F.S)
-        threshold = config.truncation_threshold
-        min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
-        
-        # Accumulate discarded weight from smallest singular values
-        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
-        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
-        # Mapping: Python idx corresponds to Julia k = length(S) - idx
-        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
-        for k in length(F.S):-1:1
-            discarded_sq += F.S[k]^2
-            if discarded_sq >= threshold
-                # Python: keep = max(len(s_vec) - idx, min_keep)
-                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
-                keep_rank = max(k, min_keep)
-                break
-            end
-        end
-        
-        max_D = config.max_bond_dim
-        keep = clamp(keep_rank, 1, max_D)
-        
-        U = F.U[:, 1:keep]
-        S = F.S[1:keep]
-        Vt = F.Vt[1:keep, :]
-        
-        # Assign A2 (Right Canonical Vt)
-        state.tensors[i+1] = reshape(Vt, keep, p2, r_theta)
-        
-        # Update Right Env (for i)
-        E_right[i+1] = update_right_environment(state.tensors[i+1], W2, E_right[i+2])
-        
-        # Form A1 = U * S
-        A1_temp = reshape(U * Diagonal(S), l_theta, p1, keep)
-        
-        # Evolve A1 Backward (-dt/2) ONLY if not at the first bond
-        if i > 1
-            func_site_back(x) = project_site(x, E_left[i], E_right[i+1], W1)
-            A1_new = expm_krylov(func_site_back, A1_temp, -dt/2, 25)
-            state.tensors[i] = A1_new
-        else
-             # At the edge, A1 stays at t+dt (dt/2 total)
-             state.tensors[i] = A1_temp
-        end
-    end
-    
+    return E_left, E_right
 end
 
 end # module
