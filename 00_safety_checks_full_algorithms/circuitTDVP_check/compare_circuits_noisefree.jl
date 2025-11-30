@@ -16,12 +16,12 @@ using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
 # CONFIGURATION
 # ==============================================================================
 
-# Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA"
-CIRCUIT_NAME = "Heisenberg" 
+# Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
+CIRCUIT_NAME = "XY" 
 
 # System Parameters
-L = 10
-timesteps = 30
+L = 25
+timesteps = 40
 dt = 0.1
 num_traj = 1 # Deterministic
 
@@ -54,6 +54,9 @@ phi_hea = 0.2
 theta_hea = 0.4
 lam_hea = 0.6
 start_parity_hea = 0
+
+# Longrange Test
+longrange_theta = π/4  # Rotation angle for the RXX gate
 
 # Initial State
 # "zeros" for Ising/Heisenberg (if h != 0)
@@ -106,6 +109,18 @@ elseif CIRCUIT_NAME == "HEA"
         for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
+
+elseif CIRCUIT_NAME == "longrange_test"
+    # Longrange test circuit: H gates on all qubits, then one RXX gate between qubits L and 1
+    for _ in 1:timesteps
+        # Apply H gates to all qubits
+        for q in 1:L
+            add_gate!(circ_jl, HGate(), [q])
+        end
+        # Apply exactly ONE long-range two-qubit gate: RXX between qubits L and 1
+        add_gate!(circ_jl, RxxGate(longrange_theta), [L, 1])
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
 end
 
 # Observables (Sites 1, 3, 6)
@@ -129,10 +144,10 @@ time_py_yaqs = 0.0
 # 2. JULIA V2 (WINDOWED - NEW DEFAULT)
 # ==============================================================================
 if RUN_JULIA_V2_WINDOWED
-    println("\n--- Running Julia V2 (Windowed) ---")
+    println("\n--- Running Julia (Windowed) ---")
     
     # Warmup
-    println("Warming up V2...")
+    println("Warming up...")
     # Create a minimal warmup circuit to trigger compilation of the relevant methods
     # without running the full heavy simulation.
     warmup_L = L 
@@ -206,6 +221,8 @@ if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
 
     qiskit = pyimport("qiskit")
     mqt_circuit_lib = pyimport("mqt.yaqs.core.libraries.circuit_library")
+    # Local Qiskit_simulator module for longrange_test_circuit
+    local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
     mqt_simulators = pyimport("mqt.yaqs.codex_experiments.worker_functions.qiskit_simulators")
     mqt_sim = pyimport("mqt.yaqs.simulator")
     mqt_networks = pyimport("mqt.yaqs.core.data_structures.networks")
@@ -235,6 +252,8 @@ if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
         thetas_list = [theta_hea for _ in 1:L]
         lams_list = [lam_hea for _ in 1:L]
         trotter_step = mqt_circuit_lib.hea_layer(L, phis=phis_list, thetas=thetas_list, lams=lams_list, start_parity=start_parity_hea)
+    elseif CIRCUIT_NAME == "longrange_test"
+        trotter_step = local_circuit_lib.longrange_test_circuit(L, longrange_theta)
     end
 end
 
@@ -379,7 +398,7 @@ else
 end
 
 plt.tight_layout()
-results_dir = "results"
+results_dir = joinpath(@__DIR__, "results")
 if !isdir(results_dir)
     mkpath(results_dir)
 end

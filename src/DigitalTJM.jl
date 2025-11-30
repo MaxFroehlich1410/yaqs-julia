@@ -82,42 +82,7 @@ function solve_local_jumps!(mps::MPS{T}, noise_model::NoiseModel{T}, dt::Float64
                 
             elseif proc isa MPONoiseProcess
                 L_mpo = proc.mpo
-                
-                # Calculate rate <psi| L_dag L |psi>
-                # Efficiently: contract L|psi>, norm sq.
-                # Or expect_mpo(L_dag L).
-                # Let's use L|psi> contraction as it's simpler if we don't have L_dag*L precomputed.
-                # L_mpo is MPO. mps is MPS.
-                
-                # Expectation:
-                # We can use MPOModule.expect_mpo(L_dag * L, mps).
-                # Or create temp_mps = L * mps.
-                # temp_mps = contract_mpo_mps(L_mpo, mps) -- this creates uncompressed MPS (bond dim grows).
-                # norm(temp_mps)^2 is the rate.
-                # This is O(N * D^2 * d^2 * k^2).
-                
-                # Let's use contract_mpo_mps then norm.
-                # Note: contract_mpo_mps might return MPS with large bond dimension.
-                # We don't need to compress it just to get norm.
-                # However, `contract_mpo_mps` in MPO.jl typically returns an MPS.
-                
-                # Wait, we have `expect_mpo(O, mps)`.
-                # If we compute O = L_dag * L once?
-                # But L is specific to this process.
-                # Let's compute L_dag L on the fly or assume it's cheap enough.
-                # Usually L is simple MPO (bond dim 2 or 4).
-                # contract_mpo_mpo might be better.
-                
-                # Let's use `contract_mpo_mps` -> `norm`.
-                
-                # We need to make sure we don't modify `mps` here.
-                # `contract_mpo_mps` creates new MPS.
-                
-                # Optimization: We only need norm. We don't need full MPS?
-                # But let's stick to existing tools.
-                
-                # To avoid import cycle or overhead, we use MPOModule functions.
-                # We assume MPOModule is available.
+    
                 
                 temp_mps = MPOModule.contract_mpo_mps(L_mpo, mps)
                 val = real(MPSModule.scalar_product(temp_mps, temp_mps))
@@ -177,14 +142,6 @@ function solve_local_jumps!(mps::MPS{T}, noise_model::NoiseModel{T}, dt::Float64
                     # Apply MPO Jump
                     # op is the MPO
                     new_mps = MPOModule.contract_mpo_mps(op, mps)
-                    # Truncate to keep bond dimension reasonable
-                    # Jumps increase bond dimension.
-                    # We should truncate to max_bond_dim (from where? usually mps.max_bond_dim if stored, or sim_params)
-                    # But solve_local_jumps! signature doesn't have sim_params or max_bond_dim.
-                    # We'll rely on default truncation or just compression.
-                    # MPSModule.truncate!(new_mps)
-                    # Better: check if mps has bond dim info? No.
-                    # Just compress.
                     MPSModule.truncate!(new_mps; threshold=1e-10)
                     
                     # Update mps tensors in-place (replace arrays)

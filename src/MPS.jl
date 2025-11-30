@@ -346,20 +346,38 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         U, S, Vt = F.U, F.S, F.Vt
         
         # Truncate
-        norm_sq = dot(S, S)
-        keep_rank = length(S)
+        # Match Python YAQS exactly: absolute threshold, not relative
+        # Python logic (from two_site_svd):
+        # discard = 0.0
+        # keep = len(s_vec)
+        # min_keep = 2
+        # for idx, s in enumerate(reversed(s_vec)):
+        #     discard += s**2
+        #     if discard >= threshold:
+        #         keep = max(len(s_vec) - idx, min_keep)
+        #         break
+        #
+        # In Julia: k goes from length(S) (smallest) down to 1 (largest)
+        # Python idx=0 corresponds to Julia k=length(S)
+        # Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         
-        # 1. Threshold
-        current_sum = 0.0
+        discarded_sq = 0.0
+        keep_rank = length(S)
+        min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
+        
+        # Accumulate discarded weight from smallest singular values
+        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
+        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
+        # Mapping: Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         for k in length(S):-1:1
-            w = S[k]^2
-            current_sum += w
-            if current_sum > threshold * norm_sq
-                keep_rank = k
+            discarded_sq += S[k]^2
+            if discarded_sq >= threshold
+                # Python: keep = max(len(s_vec) - idx, min_keep)
+                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
+                keep_rank = max(k, min_keep)
                 break
-            end
-            if k == 1
-                keep_rank = 1 
             end
         end
         

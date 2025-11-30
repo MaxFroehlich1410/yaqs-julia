@@ -307,19 +307,40 @@ function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
         F = svd(Mat)
         
         # Truncation
-        truncated_weight = 0.0
+        # Match Python YAQS exactly: absolute threshold, not relative
+        # Python logic:
+        # discard = 0.0
+        # keep = len(s_vec)
+        # min_keep = 2
+        # for idx, s in enumerate(reversed(s_vec)):
+        #     discard += s**2
+        #     if discard >= threshold:
+        #         keep = max(len(s_vec) - idx, min_keep)
+        #         break
+        #
+        # In Julia: k goes from length(S) (smallest) down to 1 (largest)
+        # Python idx=0 corresponds to Julia k=length(S)
+        # Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
+        
+        discarded_sq = 0.0
         keep_rank = length(F.S)
         threshold = config.truncation_threshold
+        min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
         
-        # Calculate keep rank based on threshold
+        # Accumulate discarded weight from smallest singular values
+        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
+        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
+        # Mapping: Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         for k in length(F.S):-1:1
-            w = F.S[k]^2
-            if truncated_weight + w > threshold
-                keep_rank = k
+            discarded_sq += F.S[k]^2
+            if discarded_sq >= threshold
+                # Python: keep = max(len(s_vec) - idx, min_keep)
+                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
+                keep_rank = max(k, min_keep)
                 break
             end
-            truncated_weight += w
-            keep_rank = k - 1
         end
         
         max_D = config.max_bond_dim
@@ -376,18 +397,40 @@ function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
         F = svd(Mat)
         
         # Truncation
-        truncated_weight = 0.0
+        # Match Python YAQS exactly: absolute threshold, not relative
+        # Python logic:
+        # discard = 0.0
+        # keep = len(s_vec)
+        # min_keep = 2
+        # for idx, s in enumerate(reversed(s_vec)):
+        #     discard += s**2
+        #     if discard >= threshold:
+        #         keep = max(len(s_vec) - idx, min_keep)
+        #         break
+        #
+        # In Julia: k goes from length(S) (smallest) down to 1 (largest)
+        # Python idx=0 corresponds to Julia k=length(S)
+        # Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
+        
+        discarded_sq = 0.0
         keep_rank = length(F.S)
         threshold = config.truncation_threshold
+        min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
         
+        # Accumulate discarded weight from smallest singular values
+        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
+        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
+        # Mapping: Python idx corresponds to Julia k = length(S) - idx
+        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         for k in length(F.S):-1:1
-            w = F.S[k]^2
-            if truncated_weight + w > threshold
-                keep_rank = k
+            discarded_sq += F.S[k]^2
+            if discarded_sq >= threshold
+                # Python: keep = max(len(s_vec) - idx, min_keep)
+                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
+                keep_rank = max(k, min_keep)
                 break
             end
-            truncated_weight += w
-            keep_rank = k - 1
         end
         
         max_D = config.max_bond_dim

@@ -120,21 +120,23 @@ function two_site_svd(A::AbstractArray{T,3}, B::AbstractArray{T,3}, threshold::R
     
     discarded_sq = 0.0
     keep_dim = length(S)
-    min_keep = 1 # Julia usually ok with 1? Python used 2 to prevent pathological dim 1?
-                 # Let's stick to Python logic if desired, but 1 is valid for product states.
+    min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
     
     # Calculate truncation
     # Note: svd returns sorted singular values (descending)
+    # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
+    # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
+    # Mapping: Python idx corresponds to Julia k = length(S) - idx
+    # When Python sets keep = len(s_vec) - idx, Julia sets keep_dim = k
     
-    # Check from end
+    # Check from end (smallest to largest)
     for k in length(S):-1:1
         discarded_sq += S[k]^2
-        if discarded_sq > threshold
-            keep_dim = k + 1
+        if discarded_sq >= threshold
+            # Python: keep = max(len(s_vec) - idx, min_keep)
+            # Julia: keep_dim = max(k, min_keep) where k = len(S) - idx
+            keep_dim = max(k, min_keep)
             break
-        end
-        if k == 1
-            keep_dim = 1
         end
     end
     
