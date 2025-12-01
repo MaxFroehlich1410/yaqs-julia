@@ -14,7 +14,6 @@ using .Yaqs.MPOModule
 using .Yaqs.GateLibrary
 using .Yaqs.NoiseModule
 using .Yaqs.SimulationConfigs
-using .Yaqs.DigitalTJMV2
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate
 using .Yaqs.Simulator
 using .Yaqs.CircuitIngestion
@@ -24,14 +23,14 @@ using .Yaqs.CircuitLibrary
 # CONFIGURATION
 # ==============================================================================
 
-NUM_QUBITS = 12
+NUM_QUBITS = 6
 NUM_LAYERS = 30
 TAU = 0.1
-NOISE_STRENGTH = 1e-05
-NUM_TRAJECTORIES = 500
+NOISE_STRENGTH = 0.01
+NUM_TRAJECTORIES = 300
 
 # Circuit selection: "XY_longrange" or "longrange_test"
-CIRCUIT_TYPE = "XY_longrange" # Use "longrange_test" to test long-range noise isolation
+CIRCUIT_TYPE = "longrange_test" # Use "longrange_test" to test long-range noise isolation
 
 pauli_y_error = false
 pauli_x_error = true

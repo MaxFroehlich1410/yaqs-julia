@@ -31,7 +31,7 @@ using LinearAlgebra
         sim_params = TimeEvolutionConfig(dummy_obs, 0.2; dt=0.2)
         
         # Test initialization with nothing for stoch_proc
-        state_init = initialize(state, nothing, noise_model, sim_params)
+        state_init = initialize(state, noise_model, sim_params)
         
         # Explicitly normalize because initialize without solve_jumps! might leave it unnormalized
         MPSModule.normalize!(state_init)

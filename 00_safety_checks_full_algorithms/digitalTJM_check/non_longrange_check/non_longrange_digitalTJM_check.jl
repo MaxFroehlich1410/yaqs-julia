@@ -13,7 +13,6 @@ using .Yaqs.MPOModule
 using .Yaqs.GateLibrary
 using .Yaqs.NoiseModule
 using .Yaqs.SimulationConfigs
-using .Yaqs.DigitalTJMV2 
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate
 
 # ==============================================================================
@@ -61,6 +60,7 @@ end
 
 qiskit = pyimport("qiskit")
 aer_noise = pyimport("qiskit_aer.noise")
+oe = pyimport("opt_einsum")
 
 # Import MQT YAQS modules
 # Note: These paths depend on mqt-yaqs package structure
@@ -264,7 +264,12 @@ if ENABLE_Y_ERROR
 end
 
 # Pre-build Python Noise Model
-nm_py = mqt_noise_utils.build_noise_models(processes_py)
+nm_py_temp = mqt_noise_utils.build_noise_models(processes_py)
+if pyisinstance(nm_py_temp, pybuiltins.tuple) || pyisinstance(nm_py_temp, pybuiltins.list)
+    nm_py = nm_py_temp[0]
+else
+    nm_py = nm_py_temp
+end
 
 
 # 3. Exact Reference
@@ -305,7 +310,7 @@ function runner_julia_v2()
     psi = MPS(NUM_QUBITS; state="zeros")
     for i in 1:NUM_QUBITS
         if (i-1) % 4 == 3
-            DigitalTJMV2.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+            Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
         end
     end
     
@@ -354,14 +359,32 @@ function runner_py_yaqs()
     psi_py = mqt_networks.MPS(NUM_QUBITS, state="zeros", pad=2)
     for i in 0:(NUM_QUBITS-1)
         if i % 4 == 3
-            psi_py.apply_one_site_gate(mqt_gates.X(), i)
+            # Manual gate application since apply_one_site_gate is missing
+            # Access python list with 1-based index
+            tensor = psi_py.tensors[i+1]
+            op = mqt_gates.X().matrix
+            new_tensor = oe.contract("ab, bcd->acd", op, tensor)
+            psi_py.tensors[i+1] = new_tensor
         end
     end
             
     # Use pre-constructed full_yaqs_circ and nm_py
     
-    res_py = mqt_sim.run(psi_py, full_yaqs_circ, sp, nm_py, parallel=false)
-    res_mat = pyconvert(Matrix{Float64}, res_py)
+    mqt_sim.run(psi_py, full_yaqs_circ, sp, nm_py, parallel=false)
+    
+    # Extract results from observables (updated in place)
+    # obs_yaqs is a Julia Vector of Py objects
+    first_res_py = obs_yaqs[1].results
+    first_res = pyconvert(Vector{Float64}, first_res_py)
+    T_steps = length(first_res)
+    
+    res_mat = zeros(Float64, length(obs_yaqs), T_steps)
+    
+    for i in 1:length(obs_yaqs)
+        vals_py = obs_yaqs[i].results
+        res_mat[i, :] = pyconvert(Vector{Float64}, vals_py)
+    end
+    
     return res_mat, 0
 end
 
@@ -501,7 +524,7 @@ ax2.set_title("Single Site Evolution")
 ax2.legend()
 ax2.grid(true)
 
-results_dir = "results"
+results_dir = joinpath(@__DIR__, "results")
 if !isdir(results_dir)
     mkpath(results_dir)
 end

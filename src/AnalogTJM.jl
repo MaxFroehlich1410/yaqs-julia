@@ -13,31 +13,31 @@ using ..Decompositions
 export initialize, step_through, sample, analog_tjm_1, analog_tjm_2
 
 """
-    initialize(state, stoch_proc, noise_model, sim_params)
+    initialize(state, noise_model, sim_params)
 
 Prepare the initial sampling MPS Phi(0) by applying a half time step of dissipation
 followed by a stochastic process step.
 """
-function initialize(state::MPS{T}, stoch_proc::Union{StochasticProcess{T}, Nothing}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
+function initialize(state::MPS{T}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
     dt = sim_params.dt
     
     # Apply Dissipation (dt/2)
     apply_dissipation(state, noise_model, dt / 2, sim_params)
     
     # Stochastic Process (dt)
-    if !isnothing(stoch_proc)
-        solve_jumps!(state, stoch_proc, dt)
+    if !isnothing(noise_model)
+        stochastic_process!(state, noise_model, dt, sim_params)
     end
     
     return state
 end
 
 """
-    step_through(state, hamiltonian, stoch_proc, noise_model, sim_params)
+    step_through(state, hamiltonian, noise_model, sim_params)
 
 Perform a single time step evolution: TDVP -> Dissipation -> Stochastic Process.
 """
-function step_through(state::MPS{T}, hamiltonian::MPO{T}, stoch_proc::Union{StochasticProcess{T}, Nothing}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
+function step_through(state::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
     dt = sim_params.dt
     
     # 1. Coherent Evolution (TDVP)
@@ -47,19 +47,19 @@ function step_through(state::MPS{T}, hamiltonian::MPO{T}, stoch_proc::Union{Stoc
     apply_dissipation(state, noise_model, dt, sim_params)
     
     # 3. Stochastic Process
-    if !isnothing(stoch_proc)
-        solve_jumps!(state, stoch_proc, dt)
+    if !isnothing(noise_model)
+        stochastic_process!(state, noise_model, dt, sim_params)
     end
     
     return state
 end
 
 """
-    sample(phi, hamiltonian, stoch_proc, noise_model, sim_params, results, j)
+    sample(phi, hamiltonian, noise_model, sim_params, results, j)
 
 Evolve a copy of the sampling MPS, apply dissipation/noise, and measure.
 """
-function sample(phi::MPS{T}, hamiltonian::MPO{T}, stoch_proc::Union{StochasticProcess{T}, Nothing}, noise_model::Union{NoiseModel{T}, Nothing}, 
+function sample(phi::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{NoiseModel{T}, Nothing}, 
                 sim_params::TimeEvolutionConfig, results::Matrix{Float64}, j::Int) where T
     psi = deepcopy(phi)
     dt = sim_params.dt
@@ -68,8 +68,8 @@ function sample(phi::MPS{T}, hamiltonian::MPO{T}, stoch_proc::Union{StochasticPr
     two_site_tdvp!(psi, hamiltonian, sim_params)
     apply_dissipation(psi, noise_model, dt / 2, sim_params)
     
-    if !isnothing(stoch_proc)
-        solve_jumps!(psi, stoch_proc, dt)
+    if !isnothing(noise_model)
+        stochastic_process!(psi, noise_model, dt, sim_params)
     end
     
     # Measure
@@ -104,15 +104,8 @@ args: (traj_idx, initial_state, noise_model, sim_params, hamiltonian)
 function analog_tjm_2(args)
     (traj_idx, initial_state, noise_model, sim_params, hamiltonian) = args
     
-    # Pre-compute StochasticProcess (H_eff + Jump Ops) ONCE per trajectory
-    stoch_proc = nothing
-    if !isnothing(noise_model)
-        # Note: H_eff construction involves deepcopying H. 
-        # Ideally we compute this once globally, but here we are inside a thread.
-        # Construction cost is negligible compared to trajectory length.
-        # H is constant.
-        stoch_proc = StochasticProcess(hamiltonian, noise_model)
-    end
+    # Removed StochasticProcess pre-calculation. 
+    # Directly pass noise_model to functions.
 
     state = deepcopy(initial_state)
     num_obs = length(sim_params.observables)
@@ -126,17 +119,17 @@ function analog_tjm_2(args)
     end
     
     # Initialize Phi(0)
-    phi = initialize(state, stoch_proc, noise_model, sim_params)
+    phi = initialize(state, noise_model, sim_params)
     
     if sim_params.sample_timesteps && num_steps > 1
-        sample(phi, hamiltonian, stoch_proc, noise_model, sim_params, results, 2)
+        sample(phi, hamiltonian, noise_model, sim_params, results, 2)
     end
     
     for j in 3:num_steps
-        phi = step_through(phi, hamiltonian, stoch_proc, noise_model, sim_params)
+        phi = step_through(phi, hamiltonian, noise_model, sim_params)
         
         if sim_params.sample_timesteps || j == num_steps
-            sample(phi, hamiltonian, stoch_proc, noise_model, sim_params, results, j)
+            sample(phi, hamiltonian, noise_model, sim_params, results, j)
         end
     end
     
@@ -151,10 +144,7 @@ Run a single trajectory using 1st order TJM.
 function analog_tjm_1(args)
     (traj_idx, initial_state, noise_model, sim_params, hamiltonian) = args
     
-    stoch_proc = nothing
-    if !isnothing(noise_model)
-        stoch_proc = StochasticProcess(hamiltonian, noise_model)
-    end
+    # Removed StochasticProcess pre-calculation.
 
     state = deepcopy(initial_state)
     num_obs = length(sim_params.observables)
@@ -172,7 +162,7 @@ function analog_tjm_1(args)
         
         if !isnothing(noise_model)
             apply_dissipation(state, noise_model, sim_params.dt, sim_params)
-            solve_jumps!(state, stoch_proc, sim_params.dt)
+            stochastic_process!(state, noise_model, sim_params.dt, sim_params)
         end
         
         if sim_params.sample_timesteps

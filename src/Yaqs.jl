@@ -10,7 +10,6 @@ include("Noise.jl")
 include("StochasticProcess.jl")
 include("Dissipation.jl")
 include("AnalogTJM.jl")
-include("DigitalTJM_full_layer_MPO.jl")
 include("DigitalTJM.jl")
 include("Simulator.jl")
 include("CircuitIngestion.jl")
@@ -27,11 +26,10 @@ using .StochasticProcessModule
 using .DissipationModule
 using .AnalogTJM
 using .DigitalTJM
-using .DigitalTJMV2
 using .Simulator
 using .CircuitIngestion
 using .CircuitLibrary
 
-export GateLibrary, Decompositions, MPSModule, MPOModule, SimulationConfigs, Algorithms, NoiseModule, StochasticProcessModule, DissipationModule, AnalogTJM, Simulator, DigitalTJM, DigitalTJMV2, CircuitIngestion, CircuitLibrary
+export GateLibrary, Decompositions, MPSModule, MPOModule, SimulationConfigs, Algorithms, NoiseModule, StochasticProcessModule, DissipationModule, AnalogTJM, Simulator, DigitalTJM, CircuitIngestion, CircuitLibrary
 
 end

@@ -204,7 +204,7 @@ axes_py[length(SITES_TO_PLOT)-1].set_xlabel("Time")
 plt.tight_layout()
 
 # Save results
-results_dir = "results"
+results_dir = joinpath(@__DIR__, "results")
 if !isdir(results_dir)
     mkpath(results_dir)
 end

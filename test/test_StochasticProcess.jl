@@ -1,6 +1,7 @@
 using Test
 using LinearAlgebra
 using Statistics
+using StaticArrays
 using Yaqs
 using Yaqs.StochasticProcessModule
 using Yaqs.MPSModule
@@ -8,73 +9,108 @@ using Yaqs.MPOModule
 using Yaqs.NoiseModule
 using Yaqs.GateLibrary
 using Yaqs.SimulationConfigs
+using Yaqs.DissipationModule
 
-@testset "Stochastic Process" begin
+@testset "Stochastic Process Refactored" begin
 
-    @testset "Effective Hamiltonian Construction" begin
+    @testset "Stochastic Factor" begin
+        L = 2
+        psi = MPS(L; state="ones")
+        # Norm is 1.0. dp should be 0.
+        dp = calculate_stochastic_factor(psi)
+        @test isapprox(dp, 0.0; atol=1e-12)
+        
+        # Decay the state
+        psi.tensors[1] .*= 0.5
+        # Norm is 0.5. Squared norm is 0.25.
+        # dp = 1 - 0.25 = 0.75
+        dp = calculate_stochastic_factor(psi)
+        @test isapprox(dp, 0.75; atol=1e-12)
+    end
+    
+    @testset "Probability Distribution - 1-site Pauli" begin
         L = 2
         gamma = 0.5
-        proc_list = [Dict("name" => "lowering", "sites" => [1], "strength" => gamma)]
-        noise = NoiseModel(proc_list, L)
-        
-        H_sys = MPO(L) 
-        
-        psi = MPS(L; state="ones")
-        # Use standard constructor
-        sp = StochasticProcess(H_sys, noise)
-        
-        val = expect_mpo(sp.H_eff, psi)
-        target = -0.5im * gamma
-        
-        println("Debug H_eff test: val=$val, target=$target")
-        
-        # Relax tolerance slightly if needed, but it should be exact
-        @test isapprox(val, target; atol=1e-10)
-    end
-    
-    @testset "Trajectory Evolution - Relaxation" begin
-        L = 1
-        gamma = 1.0
-        proc_list = [Dict("name" => "lowering", "sites" => [1], "strength" => gamma)]
-        noise = NoiseModel(proc_list, L)
-        H_sys = MPO(L) 
-        
-        psi = MPS(L; state="ones")
-        sp = StochasticProcess(H_sys, noise)
-        
-        obs = Observable("Z", ZGate(), 1)
-        
-        t_final = 0.5
         dt = 0.1
+        # Process: gamma * Z on site 1
+        proc_list = [Dict("name" => "pauli_z", "sites" => [1], "strength" => gamma)]
+        noise = NoiseModel(proc_list, L)
         
-        res = trajectory_evolution(sp, psi, t_final, dt; observables=[obs])
+        psi = MPS(L; state="x+") 
         
-        @test haskey(res, "Z")
-        @test length(res["Z"]) == 5
-        @test haskey(res, "time")
-        @test length(res["time"]) == 5
-        @test res["Z"][1] isa ComplexF64
+        sim_params = TimeEvolutionConfig(Observable[], 1.0)
+        
+        probs, candidates = create_probability_distribution(psi, noise, dt, sim_params)
+        
+        @test length(probs) == 1
+        @test isapprox(probs[1], 1.0)
     end
     
-    @testset "Trajectory Evolution - MPO Noise (Long Range)" begin
+    @testset "Probability Distribution - 2-site Pauli" begin
+        L = 2
+        gamma = 0.2
+        dt = 0.1
+        # Process: gamma * Z1 Z2
+        ZZ = kron(matrix(ZGate()), matrix(ZGate()))
+        # Manually create process
+        proc = LocalNoiseProcess("custom_zz", [1, 2], gamma, SMatrix{4,4,ComplexF64}(ZZ))
+        # Explicit type for vector
+        procs = Vector{AbstractNoiseProcess{ComplexF64}}([proc])
+        noise = NoiseModel(procs)
+        
+        psi = MPS(L; state="ones")
+        sim_params = TimeEvolutionConfig(Observable[], 1.0)
+        
+        probs, candidates = create_probability_distribution(psi, noise, dt, sim_params)
+        
+        @test length(probs) == 1
+        @test isapprox(probs[1], 1.0)
+        
+        # Candidate checks
+        (p, op, type, sites) = candidates[1]
+        @test type == "local_2"
+    end
+    
+    @testset "Long Range Pauli (Factors)" begin
         L = 3
-        proc_list = [Dict("name" => "crosstalk_xy", "sites" => [1, 3], "strength" => 0.2, "unraveling" => "projector")]
-        noise = NoiseModel(proc_list, L)
-        H_sys = MPO(L)
+        gamma = 0.1
+        dt = 0.1
+        # Z1 Z3
+        # Must pass 'factors' for optimized path
+        sigma = Matrix(matrix(ZGate())) # Convert to Matrix
+        tau = Matrix(matrix(ZGate()))
+        factors = [sigma, tau]
         
-        psi = MPS(L; state="zeros")
-        sp = StochasticProcess(H_sys, noise)
+        mpo = MPO(L)
+        proc = MPONoiseProcess("crosstalk_zz", [1, 3], gamma, mpo, factors)
+        procs = Vector{AbstractNoiseProcess{ComplexF64}}([proc])
+        noise = NoiseModel(procs)
         
-        has_mpo_jump = false
-        for (proc, op, type) in sp.jump_ops
-            if type == "mpo"
-                has_mpo_jump = true
-            end
-        end
-        @test has_mpo_jump
+        psi = MPS(L; state="ones")
+        sim_params = TimeEvolutionConfig(Observable[], 1.0)
         
-        res = trajectory_evolution(sp, psi, 0.1, 0.05; observables=[Observable("Z1", ZGate(), 1)])
-        @test length(res["time"]) == 2
+        probs, candidates = create_probability_distribution(psi, noise, dt, sim_params)
+        
+        @test length(probs) == 1
+        (p, op, type, sites) = candidates[1]
+        @test type == "pauli_long_range"
+        @test length(op) == 2 # factors
+    end
+    
+    @testset "Stochastic Process Execution" begin
+        L = 2
+        psi = MPS(L; state="ones")
+        # Apply decay manually to trigger jump
+        psi.tensors[1] .*= 0.5 
+        
+        # Empty noise model -> Just normalize
+        procs = Vector{AbstractNoiseProcess{ComplexF64}}()
+        noise = NoiseModel(procs)
+        sim_params = TimeEvolutionConfig(Observable[], 1.0)
+        
+        psi_new = stochastic_process!(psi, noise, 0.1, sim_params)
+        @test isapprox(norm(psi_new), 1.0; atol=1e-12)
+        @test isapprox(real(scalar_product(psi_new, psi_new)), 1.0; atol=1e-12)
     end
 
 end
