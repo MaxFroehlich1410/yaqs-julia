@@ -195,10 +195,10 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
     win_phys = state.phys_dims[win_start:win_end]
     short_state = MPS(win_len, win_tensors, win_phys, 1)
     short_mpo = construct_window_mpo(gate, win_start, win_end)
-    gate_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, 
-                                      truncation_threshold=sim_params.truncation_threshold,
-                                      max_bond_dim=sim_params.max_bond_dim)
-    two_site_tdvp!(short_state, short_mpo, gate_config)
+    
+    # Pass sim_params directly to trigger correct dispatch (Circuit vs Hamiltonian)
+    two_site_tdvp!(short_state, short_mpo, sim_params)
+
     state.tensors[win_start:win_end] .= short_state.tensors
     state.orth_center = win_start
 end

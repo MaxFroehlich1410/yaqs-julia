@@ -16,11 +16,12 @@ using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "Ising" 
+CIRCUIT_NAME = "longrange_test" 
+periodic = false
 
 # System Parameters
-L = 6
-timesteps = 10
+L = 7
+timesteps = 150
 dt = 0.1
 num_traj = 1 # Deterministic
 
@@ -28,7 +29,7 @@ num_traj = 1 # Deterministic
 RUN_JULIA = true # New Default
 RUN_PYTHON_YAQS = true
 RUN_QISKIT_EXACT = true
-SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6]
+SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6, 7]
 
 MAX_BOND_DIM = 56
 
@@ -80,7 +81,7 @@ add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
 
 # Circuit Construction
 if CIRCUIT_NAME == "Ising"
-    circ_jl = ising_circuit(L, J, g, dt, timesteps)
+    circ_jl = ising_circuit(L, J, g, dt, timesteps, periodic=periodic)
     
 elseif CIRCUIT_NAME == "XY"
     for _ in 1:timesteps
@@ -90,7 +91,7 @@ elseif CIRCUIT_NAME == "XY"
     end
 
 elseif CIRCUIT_NAME == "Heisenberg"
-    circ_jl = heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, timesteps)
+    circ_jl = heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, timesteps, periodic=periodic)
 
 elseif CIRCUIT_NAME == "QAOA"
     for _ in 1:timesteps
@@ -210,11 +211,11 @@ if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
     # Construct Trotter Step
     trotter_step = nothing
     if CIRCUIT_NAME == "Ising"
-        trotter_step = mqt_circuit_lib.create_ising_circuit(L, J, g, dt, 1, periodic=true)
+        trotter_step = mqt_circuit_lib.create_ising_circuit(L, J, g, dt, 1, periodic=periodic)
     elseif CIRCUIT_NAME == "XY"
         trotter_step = mqt_circuit_lib.xy_trotter_layer(L, tau)
     elseif CIRCUIT_NAME == "Heisenberg"
-        trotter_step = mqt_circuit_lib.create_heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, 1, periodic=false)
+        trotter_step = mqt_circuit_lib.create_heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, 1, periodic=periodic)
     elseif CIRCUIT_NAME == "QAOA"
         trotter_step = mqt_circuit_lib.qaoa_ising_layer(L, beta=beta_qaoa, gamma=gamma_qaoa)
     elseif CIRCUIT_NAME == "HEA"
