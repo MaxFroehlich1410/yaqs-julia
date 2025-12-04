@@ -17,11 +17,14 @@ using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
 CIRCUIT_NAME = "longrange_test" 
-periodic = false
+periodic = true
+
+longrange_mode = "TDVP" # "TEBD" or "TDVP"
+local_mode = "TDVP" # "TEBD" or "TDVP"
 
 # System Parameters
-L = 7
-timesteps = 150
+L = 6
+timesteps = 80
 dt = 0.1
 num_traj = 1 # Deterministic
 
@@ -29,7 +32,7 @@ num_traj = 1 # Deterministic
 RUN_JULIA = true # New Default
 RUN_PYTHON_YAQS = true
 RUN_QISKIT_EXACT = true
-SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6, 7]
+SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6]
 
 MAX_BOND_DIM = 56
 
@@ -81,7 +84,7 @@ add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
 
 # Circuit Construction
 if CIRCUIT_NAME == "Ising"
-    circ_jl = ising_circuit(L, J, g, dt, timesteps, periodic=periodic)
+    circ_jl = create_ising_circuit(L, J, g, dt, timesteps, periodic=periodic)
     
 elseif CIRCUIT_NAME == "XY"
     for _ in 1:timesteps
@@ -91,7 +94,7 @@ elseif CIRCUIT_NAME == "XY"
     end
 
 elseif CIRCUIT_NAME == "Heisenberg"
-    circ_jl = heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, timesteps, periodic=periodic)
+    circ_jl = create_heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, timesteps, periodic=periodic)
 
 elseif CIRCUIT_NAME == "QAOA"
     for _ in 1:timesteps
@@ -118,7 +121,7 @@ elseif CIRCUIT_NAME == "longrange_test"
             add_gate!(circ_jl, HGate(), [q])
         end
         # Apply exactly ONE long-range two-qubit gate: RXX between qubits L and 1
-        add_gate!(circ_jl, RxxGate(longrange_theta), [L, 1])
+        add_gate!(circ_jl, RzzGate(longrange_theta), [L, 1])
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
 end
@@ -162,12 +165,17 @@ if RUN_JULIA
     println("Executing...")
     time_jl = @elapsed begin
         psi = MPS(L; state=INITIAL_STATE)
+        # Match Python's pad=2 behavior (pad to bond dim 2 with zeros, no noise)
+        pad_bond_dimension!(psi, 2; noise_scale=0.0)
         
         # Reset observables
         obs = deepcopy(obs_list)
         sim_params = TimeEvolutionConfig(obs, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
         
-        _, res_matrix = run_digital_tjm(psi, circ_jl, nothing, sim_params)
+
+        options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+        
+        _, res_matrix = run_digital_tjm(psi, circ_jl, nothing, sim_params; alg_options=options)
     end
     println("Julia Time: $(round(time_jl, digits=4)) s")
     
@@ -242,8 +250,26 @@ if RUN_QISKIT_EXACT
     target_sites_py = [s-1 for s in SITES_TO_SAMPLE] 
     results_py_exact = [reference[i+1, :] for i in target_sites_py]
 end
+
 # ==============================================================================
-# 6. PYTHON YAQS
+# 6. QISKIT MPS
+# ==============================================================================
+RUN_QISKIT_MPS = true # Flag for Qiskit MPS
+results_py_mps = nothing
+
+if RUN_QISKIT_MPS
+    println("\n--- Running Qiskit MPS ---")
+    reference_py_mps = mqt_simulators.run_qiskit_exact(
+        L, timesteps, init_circuit, trotter_step, nothing,
+        method="matrix_product_state", observable_basis="Z"
+    )
+    reference_mps = pyconvert(Array{Float64,2}, reference_py_mps)
+    
+    target_sites_py = [s-1 for s in SITES_TO_SAMPLE] 
+    results_py_mps = [reference_mps[i+1, :] for i in target_sites_py]
+end
+# ==============================================================================
+# 7. PYTHON YAQS
 # ==============================================================================
 if RUN_PYTHON_YAQS
     println("\n--- Running Python YAQS ---")
@@ -307,12 +333,14 @@ len_x = 0
 if RUN_JULIA; len_x = length(results_jl[1]); end
 if RUN_PYTHON_YAQS;       len_x = length(results_py_yaqs[1]); end
 if RUN_QISKIT_EXACT;      len_x = length(results_py_exact[1]); end
+if RUN_QISKIT_MPS;        len_x = length(results_py_mps[1]); end
 
 # Truncate all to minimum length
 min_len = len_x
 if RUN_JULIA; min_len = min(min_len, length(results_jl[1])); end
 if RUN_PYTHON_YAQS;       min_len = min(min_len, length(results_py_yaqs[1])); end
 if RUN_QISKIT_EXACT;      min_len = min(min_len, length(results_py_exact[1])); end
+if RUN_QISKIT_MPS;        min_len = min(min_len, length(results_py_mps[1])); end
 
 x = 1:min_len
 colors = ["r", "g", "b", "c", "m", "y", "k"]
@@ -331,6 +359,11 @@ for (i, s) in enumerate(SITES_TO_SAMPLE)
     if RUN_QISKIT_EXACT
         exact = results_py_exact[i][1:min_len]
         ax.plot(x, exact, label="Qiskit Exact", color="b", linestyle="--", linewidth=1, alpha=0.6)
+    end
+    
+    if RUN_QISKIT_MPS
+        mps = results_py_mps[i][1:min_len]
+        ax.plot(x, mps, label="Qiskit MPS", color="m", linestyle="-.", linewidth=1.5)
     end
     
     ax.set_title("Site $s Evolution")

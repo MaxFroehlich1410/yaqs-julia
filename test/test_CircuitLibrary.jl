@@ -11,7 +11,7 @@ using Yaqs.GateLibrary
         g = 0.5
         dt = 0.1
         timesteps = 2
-        circ = ising_circuit(L, J, g, dt, timesteps; periodic=false)
+        circ = create_ising_circuit(L, J, g, dt, timesteps; periodic=false)
         @test circ.num_qubits == L
         # Check 2-site gate. 
         # Gates: 1 Barrier, 4 Rx, then Rzz. So index 6.
@@ -21,7 +21,7 @@ using Yaqs.GateLibrary
     @testset "2D Ising Circuit" begin
         rows = 2
         cols = 2
-        circ = ising_2d_circuit(rows, cols, 1.0, 0.5, 0.1, 1)
+        circ = create_2d_ising_circuit(rows, cols, 1.0, 0.5, 0.1, 1)
         @test circ.num_qubits == 4
         # Should have RX on all 4
         # Then interactions
@@ -49,7 +49,7 @@ using Yaqs.GateLibrary
     
     @testset "Fermi Hubbard 1D" begin
         L = 2
-        circ = fermi_hubbard_1d_circuit(L, 1.0, 1.0, 0.0, 1, 0.1, 1)
+        circ = create_1d_fermi_hubbard_circuit(L, 1.0, 1.0, 0.0, 1, 0.1, 1)
         @test circ.num_qubits == 4
         # Interactions between Up and Down (on-site)
         # Up: 1,2. Down: 3,4.
@@ -78,7 +78,7 @@ using Yaqs.GateLibrary
     @testset "Fermi Hubbard 2D" begin
         Lx = 2
         Ly = 1 # Essentially 1D 2-site
-        circ = fermi_hubbard_2d_circuit(Lx, Ly, 1.0, 1.0, 0.0, 1, 0.1, 1)
+        circ = create_2d_fermi_hubbard_circuit(Lx, Ly, 1.0, 1.0, 0.0, 1, 0.1, 1)
         # 2 sites. 4 qubits.
         # Interleaved: Up1(1), Dn1(2), Up2(3), Dn2(4).
         # Onsite: (1,2), (3,4).
@@ -110,14 +110,14 @@ using Yaqs.GateLibrary
     end
     
     @testset "Brickwork" begin
-        circ = cz_brickwork_circuit(4, 1)
+        circ = create_cz_brickwork_circuit(4, 1)
         found_cz = 0
         for g in circ.gates; if g.op isa CZGate; found_cz += 1; end; end
         @test found_cz == 3 # (1,2), (3,4), (2,3)
     end
     
     @testset "Frames" begin
-        circ = sy_cz_parity_frame_circuit(2, 1)
+        circ = create_sy_cz_parity_frame(2, 1)
         # H, Sdg, CZ
         has_h = false
         has_sdg = false

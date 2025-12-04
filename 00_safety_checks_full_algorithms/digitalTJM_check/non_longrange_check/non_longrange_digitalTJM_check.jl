@@ -62,6 +62,7 @@ end
 
 qiskit = pyimport("qiskit")
 aer_noise = pyimport("qiskit_aer.noise")
+quantum_info = pyimport("qiskit.quantum_info")
 oe = pyimport("opt_einsum")
 
 # Import MQT YAQS modules
@@ -295,39 +296,51 @@ end
 
 noise_model_jl = NoiseModel(processes_jl_dicts, NUM_QUBITS)
 
+
 # Qiskit Noise
 qiskit_noise_model = aer_noise.NoiseModel()
-inst_2q = pybuiltins.list(["cx", "cy", "cz", "ch", "cp", "crx", "cry", "crz", "cu", "csx", "cs", "csdg", "swap", "iswap", "rxx", "ryy", "rzz", "rzx", "ecr", "dcx", "xx_minus_yy", "xx_plus_yy"])
+inst_2q = pybuiltins.list([
+    "cx", "cy", "cz", "ch", "cp", "crx", "cry", "crz", "cu",
+    "csx", "cs", "csdg", "swap", "iswap",
+    "rxx", "ryy", "rzz", "rzx", "ecr", "dcx",
+    "xx_minus_yy", "xx_plus_yy"
+])
 
-if ENABLE_X_ERROR
-    ops_2q = [("IX", NOISE_STRENGTH), ("XI", NOISE_STRENGTH), ("XX", NOISE_STRENGTH)]
-    error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
-
-    qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
+function pauli_lindblad_error_from_labels(labels::Vector{String}, rates::Vector{Float64})
+    # Build a Python PauliList from label strings
+    py_labels = pybuiltins.list(labels)
+    pl = quantum_info.PauliList(py_labels)
+    # Rates as Python list
+    py_rates = pybuiltins.list(rates)
+    return aer_noise.errors.PauliLindbladError(pl, py_rates)
 end
 
+if ENABLE_X_ERROR
+    # generators: IX, XI, XX
+    error_2q_X = pauli_lindblad_error_from_labels(["IX", "XI", "XX"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
+    for i in 1:(NUM_QUBITS-1)
+        qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [i-1, i])
+    end
+end
 
 if ENABLE_Y_ERROR
-    ops_2q = [("IY", NOISE_STRENGTH), ("YI", NOISE_STRENGTH), ("YY", NOISE_STRENGTH)]
-    error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
-    
-    qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
+    # generators: IY, YI, YY
+    error_2q_Y = pauli_lindblad_error_from_labels(["IY", "YI", "YY"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
+    for i in 1:(NUM_QUBITS-1)
+        qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [i-1, i])
+    end
 end
 
 if ENABLE_Z_ERROR
-    ops_2q = [("IZ", NOISE_STRENGTH), ("ZI", NOISE_STRENGTH), ("ZZ", NOISE_STRENGTH)]
-    error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
-
-    qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
+    # generators: IZ, ZI, ZZ
+    error_2q_Z = pauli_lindblad_error_from_labels(["IZ", "ZI", "ZZ"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
+    for i in 1:(NUM_QUBITS-1)
+        qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [i-1, i])
+    end
 end
 
-# Pre-build Python Noise Model
-nm_py_temp = mqt_noise_utils.build_noise_models(processes_py)
-if pyisinstance(nm_py_temp, pybuiltins.tuple) || pyisinstance(nm_py_temp, pybuiltins.list)
-    nm_py = nm_py_temp[0]
-else
-    nm_py = nm_py_temp
-end
+
+nm_py = mqt_noise_model.NoiseModel(processes_py, num_qubits=NUM_QUBITS)
 
 
 # 3. Exact Reference

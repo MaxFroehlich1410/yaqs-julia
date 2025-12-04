@@ -12,7 +12,7 @@ using ..SimulationConfigs
 using ..Algorithms
 using ..StochasticProcessModule
 
-export DigitalGate, DigitalCircuit, add_gate!, process_circuit, run_digital_tjm
+export DigitalGate, DigitalCircuit, add_gate!, process_circuit, run_digital_tjm, TJMOptions
 
 # --- Data Structures ---
 
@@ -35,6 +35,16 @@ end
 function add_gate!(circ::DigitalCircuit, op::AbstractOperator, sites::Vector{Int}; generator=nothing)
     push!(circ.gates, DigitalGate(op, sites, generator))
 end
+
+# --- Options ---
+
+struct TJMOptions
+    local_method::Symbol # :TEBD or :TDVP
+    long_range_method::Symbol # :TEBD or :TDVP
+end
+
+# Default constructor
+TJMOptions(;local_method=:TDVP, long_range_method=:TDVP) = TJMOptions(local_method, long_range_method)
 
 # --- Circuit Processing ---
 
@@ -184,30 +194,120 @@ function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     mps.tensors[site] = New_A
 end
 
-function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig)
-    s1, s2 = sort(gate.sites)
-    padding = 1
-    win_start = max(1, s1 - padding)
-    win_end = min(state.length, s2 + padding)
-    MPSModule.shift_orthogonality_center!(state, win_start)
-    win_len = win_end - win_start + 1
-    win_tensors = state.tensors[win_start:win_end]
-    win_phys = state.phys_dims[win_start:win_end]
-    short_state = MPS(win_len, win_tensors, win_phys, 1)
-    short_mpo = construct_window_mpo(gate, win_start, win_end)
+function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::Int, config::AbstractSimConfig)
+    # Standard TEBD update for nearest neighbor gate
+    # Moves orthogonality center to s1 (assumes mixed/right canonical to right of s1)
+    MPSModule.shift_orthogonality_center!(mps, s1)
     
-    # Pass sim_params directly to trigger correct dispatch (Circuit vs Hamiltonian)
-    two_site_tdvp!(short_state, short_mpo, sim_params)
+    A1 = mps.tensors[s1]
+    A2 = mps.tensors[s2]
+    
+    # Contract A1 * A2
+    # A1: (l1, p1, b)
+    # A2: (b, p2, r2)
+    @tensor Theta[l1, p1, p2, r2] := A1[l1, p1, k] * A2[k, p2, r2]
+    
+    # Contract with Gate
+    # op_mat: 4x4 (acting on p1, p2)
+    # Reshape op_mat to (p1_out, p2_out, p1_in, p2_in)
+    op_mat = matrix(op)
+    op_tensor = reshape(op_mat, 2, 2, 2, 2)
+    
+    @tensor Theta_prime[l1, p1_out, p2_out, r2] := op_tensor[p1_out, p2_out, p1_in, p2_in] * Theta[l1, p1_in, p2_in, r2]
+    
+    # SVD and Truncate
+    l1_dim, p1_dim, p2_dim, r2_dim = size(Theta_prime)
+    Theta_matrix = reshape(Theta_prime, l1_dim * p1_dim, p2_dim * r2_dim)
+    
+    F = svd(Theta_matrix)
+    
+    # Truncation Logic
+    threshold = config.truncation_threshold
+    max_bond = config.max_bond_dim
+    
+    # Truncate based on threshold
+    current_sum = 0.0
+    keep_count = length(F.S)
+    for k in length(F.S):-1:1
+        if current_sum + F.S[k]^2 > threshold
+            break
+        end
+        current_sum += F.S[k]^2
+        keep_count -= 1
+    end
+    keep = clamp(keep_count, 1, max_bond)
+    
+    U = F.U[:, 1:keep]
+    S = F.S[1:keep]
+    Vt = F.Vt[1:keep, :]
+    
+    # Update MPS
+    # A1 becomes U (Left Canonical)
+    mps.tensors[s1] = reshape(U, l1_dim, p1_dim, keep)
+    
+    # A2 becomes S * V (Right Canonical? No, Center)
+    mps.tensors[s2] = reshape(Diagonal(S) * Vt, keep, p2_dim, r2_dim)
+    mps.orth_center = s2
+end
 
-    state.tensors[win_start:win_end] .= short_state.tensors
-    state.orth_center = win_start
+function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig, alg_options::TJMOptions)
+    s1, s2 = sort(gate.sites)
+    is_long_range = (s2 > s1 + 1)
+    
+    method = is_long_range ? alg_options.long_range_method : alg_options.local_method
+    
+    if method == :TEBD
+        if is_long_range
+            # Swap Network + Local TEBD
+            
+            # Swap Path: (s2-1, s2), (s2-2, s2-1), ..., (s1+1, s1+2)
+            # s2 moves LEFT to s1+1
+            for k in (s2-1):-1:(s1+1)
+                apply_local_gate_exact!(state, SWAPGate(), k, k+1, sim_params)
+            end
+            
+            # Apply gate on (s1, s1+1)
+            apply_local_gate_exact!(state, gate.op, s1, s1+1, sim_params)
+            
+            # Unwind Swaps: (s1+1, s1+2), ..., (s2-1, s2)
+            # s2 moves RIGHT back to s2
+            for k in (s1+1):(s2-1)
+                apply_local_gate_exact!(state, SWAPGate(), k, k+1, sim_params)
+            end
+        else
+            # Nearest Neighbor: Direct
+            apply_local_gate_exact!(state, gate.op, s1, s2, sim_params)
+        end
+    else # :TDVP
+        padding = 0
+        win_start = max(1, s1 - padding)
+        win_end = min(state.length, s2 + padding)
+        MPSModule.shift_orthogonality_center!(state, win_start)
+        win_len = win_end - win_start + 1
+        win_tensors = state.tensors[win_start:win_end]
+        win_phys = state.phys_dims[win_start:win_end]
+        short_state = MPS(win_len, win_tensors, win_phys, 1)
+        short_mpo = construct_window_mpo(gate, win_start, win_end)
+        
+        # Use StrongMeasurementConfig to trigger the efficient Directed Circuit Sweep
+        # instead of the Symmetric Hamiltonian Sweep triggered by TimeEvolutionConfig.
+        gate_config = StrongMeasurementConfig(Observable[]; 
+                                            max_bond_dim=sim_params.max_bond_dim, 
+                                            truncation_threshold=sim_params.truncation_threshold)
+        
+        two_site_tdvp!(short_state, short_mpo, gate_config)
+    
+        state.tensors[win_start:win_end] .= short_state.tensors
+        state.orth_center = win_end
+    end
 end
 
 # --- Main Runner ---
 
 function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit, 
                             noise_model::Union{NoiseModel, Nothing}, 
-                            sim_params::AbstractSimConfig)
+                            sim_params::AbstractSimConfig;
+                            alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP))
     
     state = deepcopy(initial_state)
     layers, barrier_map = process_circuit(circuit)
@@ -261,7 +361,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         end
         for gate in layer
             if length(gate.sites) == 2
-                apply_window!(state, gate, sim_params)
+                apply_window!(state, gate, sim_params, alg_options)
                 if !isnothing(noise_model) && !isempty(noise_model.processes)
                     s1, s2 = sort(gate.sites)
                     local_noise = create_local_noise_model(noise_model, s1, s2)

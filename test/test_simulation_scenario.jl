@@ -19,7 +19,7 @@ using Yaqs.NoiseModule
     num_traj = 200
     
     # 2. Circuit
-    circ = ising_circuit(L, J, g, dt, timesteps; periodic=false)
+    circ = create_ising_circuit(L, J, g, dt, timesteps; periodic=false)
     
     # 3. Noise Model: Bitflip on every 2-qubit gate
     gamma = 0.01

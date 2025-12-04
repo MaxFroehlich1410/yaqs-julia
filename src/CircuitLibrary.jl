@@ -3,12 +3,12 @@ module CircuitLibrary
 using ..DigitalTJM
 using ..GateLibrary
 
-export ising_circuit, ising_2d_circuit, heisenberg_circuit, heisenberg_2d_circuit
-export fermi_hubbard_1d_circuit, fermi_hubbard_2d_circuit
+export create_ising_circuit, create_2d_ising_circuit, create_heisenberg_circuit, create_2d_heisenberg_circuit
+export create_1d_fermi_hubbard_circuit, create_2d_fermi_hubbard_circuit
 export nearest_neighbour_random_circuit, qaoa_ising_layer, hea_layer
 export xy_trotter_layer, xy_trotter_layer_longrange, longrange_test_circuit
-export clifford_cz_frame_circuit, echoed_xx_pi_over_2_circuit, sy_cz_parity_frame_circuit
-export cz_brickwork_circuit, rzz_pi_over_2_brickwork_circuit
+export create_clifford_cz_frame_circuit, create_echoed_xx_pi_over_2, create_sy_cz_parity_frame
+export create_cz_brickwork_circuit, create_rzz_pi_over_2_brickwork
 
 # --- Helper Functions ---
 
@@ -161,7 +161,7 @@ end
 
 # --- Existing Implementations ---
 
-function ising_circuit(L::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
+function create_ising_circuit(L::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     alpha = -2.0 * dt * g
     beta = -2.0 * dt * J
@@ -189,7 +189,7 @@ function ising_circuit(L::Int, J::Float64, g::Float64, dt::Float64, timesteps::I
     return circ
 end
 
-function heisenberg_circuit(L::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
+function create_heisenberg_circuit(L::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     txx = -2.0 * dt * Jx
     tyy = -2.0 * dt * Jy
@@ -243,9 +243,9 @@ end
 # --- New Implementations ---
 
 """
-    ising_2d_circuit(num_rows, num_cols, J, g, dt, timesteps)
+    create_2d_ising_circuit(num_rows, num_cols, J, g, dt, timesteps)
 """
-function ising_2d_circuit(num_rows::Int, num_cols::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int)
+function create_2d_ising_circuit(num_rows::Int, num_cols::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int)
     total_qubits = num_rows * num_cols
     circ = DigitalCircuit(total_qubits)
     
@@ -299,9 +299,9 @@ function ising_2d_circuit(num_rows::Int, num_cols::Int, J::Float64, g::Float64, 
 end
 
 """
-    heisenberg_2d_circuit(num_rows, num_cols, Jx, Jy, Jz, h, dt, timesteps)
+    create_2d_heisenberg_circuit(num_rows, num_cols, Jx, Jy, Jz, h, dt, timesteps)
 """
-function heisenberg_2d_circuit(num_rows::Int, num_cols::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int)
+function create_2d_heisenberg_circuit(num_rows::Int, num_cols::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int)
     total_qubits = num_rows * num_cols
     circ = DigitalCircuit(total_qubits)
     
@@ -358,13 +358,13 @@ function heisenberg_2d_circuit(num_rows::Int, num_cols::Int, Jx::Float64, Jy::Fl
 end
 
 """
-    fermi_hubbard_1d_circuit(L, u, t, mu, num_trotter_steps, dt, timesteps)
+    create_1d_fermi_hubbard_circuit(L, u, t, mu, num_trotter_steps, dt, timesteps)
 
 Replicates the 1D Fermi-Hubbard circuit.
 Note: Uses Qiskit-style register layout (sites 1..L Up, L+1..2L Down), 
 which is inefficient for MPS if not re-ordered, but matches Python library behavior.
 """
-function fermi_hubbard_1d_circuit(L::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
+function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
     # Up: 1:L, Down: L+1:2L
     total_qubits = 2 * L
     circ = DigitalCircuit(total_qubits)
@@ -422,11 +422,11 @@ function fermi_hubbard_1d_circuit(L::Int, u::Float64, t::Float64, mu::Float64, n
 end
 
 """
-    fermi_hubbard_2d_circuit(Lx, Ly, u, t, mu, num_trotter_steps, dt, timesteps)
+    create_2d_fermi_hubbard_circuit(Lx, Ly, u, t, mu, num_trotter_steps, dt, timesteps)
 
 Replicates 2D Fermi-Hubbard with interleaved ordering (2*p + spin).
 """
-function fermi_hubbard_2d_circuit(Lx::Int, Ly::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
+function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
     num_sites = Lx * Ly
     total_qubits = 2 * num_sites
     circ = DigitalCircuit(total_qubits)
@@ -763,15 +763,15 @@ function longrange_test_circuit(N::Int, theta::Float64)
     
     # 2. Apply exactly ONE long-range two-qubit gate: RXX between qubits N and 1
     # This is the periodic boundary (N-1, 0) in 0-based = (N, 1) in 1-based
-    add_gate!(circ, RxxGate(theta), [N, 1])
+    add_gate!(circ, RzzGate(theta), [N, 1])
     
     return circ
 end
 
 """
-    clifford_cz_frame_circuit(L, timesteps)
+    create_clifford_cz_frame_circuit(L, timesteps)
 """
-function clifford_cz_frame_circuit(L::Int, timesteps::Int)
+function create_clifford_cz_frame_circuit(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
     for _ in 1:timesteps
         for q in 1:L
@@ -790,9 +790,9 @@ function clifford_cz_frame_circuit(L::Int, timesteps::Int)
 end
 
 """
-    echoed_xx_pi_over_2_circuit(L, timesteps)
+    create_echoed_xx_pi_over_2(L, timesteps)
 """
-function echoed_xx_pi_over_2_circuit(L::Int, timesteps::Int)
+function create_echoed_xx_pi_over_2(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
     theta = π/2
     for _ in 1:timesteps
@@ -809,9 +809,9 @@ function echoed_xx_pi_over_2_circuit(L::Int, timesteps::Int)
 end
 
 """
-    sy_cz_parity_frame_circuit(L, timesteps)
+    create_sy_cz_parity_frame(L, timesteps)
 """
-function sy_cz_parity_frame_circuit(L::Int, timesteps::Int)
+function create_sy_cz_parity_frame(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
     for _ in 1:timesteps
         for q in 1:L
@@ -826,9 +826,9 @@ function sy_cz_parity_frame_circuit(L::Int, timesteps::Int)
 end
 
 """
-    cz_brickwork_circuit(L, timesteps; periodic=false)
+    create_cz_brickwork_circuit(L, timesteps; periodic=false)
 """
-function cz_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=false)
+function create_cz_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     for _ in 1:timesteps
         for i in 1:2:(L-1); add_gate!(circ, CZGate(), [i, i+1]); end
@@ -841,9 +841,9 @@ function cz_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=false)
 end
 
 """
-    rzz_pi_over_2_brickwork_circuit(L, timesteps; periodic=false)
+    create_rzz_pi_over_2_brickwork(L, timesteps; periodic=false)
 """
-function rzz_pi_over_2_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=false)
+function create_rzz_pi_over_2_brickwork(L::Int, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     theta = π/2
     for _ in 1:timesteps

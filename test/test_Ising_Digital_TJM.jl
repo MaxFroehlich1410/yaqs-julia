@@ -16,7 +16,7 @@ using Yaqs.NoiseModule
     timesteps = 10
     
     # 1. Create Circuit
-    circ = ising_circuit(L, J, g, dt_circuit, timesteps)
+    circ = create_ising_circuit(L, J, g, dt_circuit, timesteps)
     
     # 2. Define Noise Model
     gamma = 0.05

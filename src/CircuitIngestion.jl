@@ -220,6 +220,11 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
         return nothing
     end
     
+    # Safety check: if julia_op is still nothing, return nothing
+    if isnothing(julia_op)
+        return nothing
+    end
+    
     # Generator
     gen = nothing
     try
@@ -279,7 +284,8 @@ function map_qiskit_name(name::String, params::Vector{Float64})
     elseif name == "t"
         return TGate()
     elseif name == "sx"
-        return SXGate()
+        # SX = sqrt(X) = Rx(π/2)
+        return RxGate(π/2)
     elseif name == "rx"
         return RxGate(params[1])
     elseif name == "ry"
@@ -291,7 +297,7 @@ function map_qiskit_name(name::String, params::Vector{Float64})
     elseif name == "u" || name == "u3"
         return UGate(params[1], params[2], params[3])
     elseif name == "swap"
-        return SwapGate()
+        return SWAPGate()
     elseif name == "rxx"
         return RxxGate(params[1])
     elseif name == "ryy"

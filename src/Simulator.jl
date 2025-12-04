@@ -19,7 +19,7 @@ function available_cpus()
     end
 end
 
-function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true)
+function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
     # Backend selection
     backend = (sim_params.order == 1) ? analog_tjm_1 : analog_tjm_2
 
@@ -68,18 +68,12 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
     SimulationConfigs.aggregate_trajectories!(sim_params)
 end
 
-function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true)
+function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
     
     # Noise check
     if isnothing(noise_model) || all(p -> p.strength == 0, noise_model.processes)
         sim_params.num_traj = 1
     end
-
-    # Initialize observables
-    # For digital, "time steps" might be ambiguous if sampled dynamically.
-    # But TimeEvolutionConfig requires fixed time steps?
-    # We'll assume obs.trajectories is allocated. If results size mismatches, we might issue.
-    # But usually user sets steps.
     
     for obs in sim_params.observables
         SimulationConfigs.initialize!(obs, sim_params)
@@ -92,17 +86,11 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
         
         Threads.@threads         for i in 1:sim_params.num_traj
             # run_digital_tjm returns (state, results)
-            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params)
+            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             
-            # result is Matrix(num_obs, num_samples)
-            # We need to fit it into obs.trajectories[i, :]
-            # Check size
+
             if size(result, 2) != length(sim_params.times)
-                # Mismatch. 
-                # DigitalTJM sampling depends on barriers.
-                # Maybe we should trust result size?
-                # But trajectories is pre-allocated.
-                # For now, assume user configured correctly.
+
             end
             
             for (obs_idx, obs) in enumerate(sim_params.observables)
@@ -119,7 +107,7 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
         end
     else
         for i in 1:sim_params.num_traj
-            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params)
+            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             for (obs_idx, obs) in enumerate(sim_params.observables)
                 n_copy = min(size(result, 2), size(obs.trajectories, 2))
                 obs.trajectories[i, 1:n_copy] = result[obs_idx, 1:n_copy]
@@ -130,14 +118,14 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
     SimulationConfigs.aggregate_trajectories!(sim_params)
 end
 
-function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=nothing; parallel::Bool=true)
+function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=nothing; parallel::Bool=true, kwargs...)
     MPSModule.normalize!(initial_state; form="B") 
     
     if isa(sim_params, TimeEvolutionConfig)
         if isa(operator_or_circuit, MPO)
-            _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel)
+            _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         elseif isa(operator_or_circuit, DigitalCircuit)
-            _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel)
+            _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         else
              error("Simulation requires MPO (Analog) or DigitalCircuit (Digital).")
         end
