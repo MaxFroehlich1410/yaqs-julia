@@ -10,27 +10,27 @@ using .Yaqs.MPSModule
 using .Yaqs.SimulationConfigs
 using .Yaqs.Simulator
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
-using .Yaqs.DigitalTJMV2: run_digital_tjm_v2
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "longrange_test" 
+CIRCUIT_NAME = "Ising" 
 
 # System Parameters
-L = 90
+L = 6
 timesteps = 10
 dt = 0.1
 num_traj = 1 # Deterministic
 
 # Flags for Execution
-RUN_JULIA_V2_WINDOWED = true # New Default
+RUN_JULIA = true # New Default
 RUN_PYTHON_YAQS = true
-RUN_QISKIT_EXACT = false
+RUN_QISKIT_EXACT = true
+SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6]
 
-MAX_BOND_DIM = 128
+MAX_BOND_DIM = 56
 
 # Model Specific Params
 # Ising
@@ -68,7 +68,7 @@ end
 
 println("Comparing Simulation: $CIRCUIT_NAME")
 println("L=$L, dt=$dt, steps=$timesteps, Initial=$INITIAL_STATE")
-println("Run Config: V2_Windowed=$RUN_JULIA_V2_WINDOWED, Python_YAQS=$RUN_PYTHON_YAQS, Qiskit_Exact=$RUN_QISKIT_EXACT")
+println("Run Config: Julia=$RUN_JULIA, Python_YAQS=$RUN_PYTHON_YAQS, Qiskit_Exact=$RUN_QISKIT_EXACT")
 
 # ==============================================================================
 # 1. CIRCUIT SETUP
@@ -123,57 +123,55 @@ elseif CIRCUIT_NAME == "longrange_test"
 end
 
 # Observables (Sites 1, 3, 6)
-obs_list = [
-    Observable("Z_1", ZGate(), 1),
-    Observable("Z_3", ZGate(), 3),
-    Observable("Z_6", ZGate(), 6)
-]
+obs_list = [Observable("Z_$s", ZGate(), s) for s in SITES_TO_SAMPLE]
 
 # Results Containers
 results_jl_v1 = nothing
-results_jl_v2 = nothing
+results_jl = nothing
 results_py_yaqs = nothing
 results_py_exact = nothing
+results_py_noisefree = nothing
 
 time_jl_v1 = 0.0
-time_jl_v2 = 0.0
+time_jl = 0.0
 time_py_yaqs = 0.0
 
 # ==============================================================================
-# 2. JULIA V2 (WINDOWED - NEW DEFAULT)
+# 2. JULIA
 # ==============================================================================
-if RUN_JULIA_V2_WINDOWED
+if RUN_JULIA
     println("\n--- Running Julia (Windowed) ---")
     
     # Warmup
     println("Warming up...")
-    # Create a minimal warmup circuit to trigger compilation of the relevant methods
-    # without running the full heavy simulation.
+    # Create a minimal warmup run using the ACTUAL circuit and observables
+    # to trigger compilation of all relevant methods (gate application, measurement, etc.)
     warmup_L = L 
     warmup_psi = MPS(warmup_L; state="zeros") 
-    warmup_circ = DigitalCircuit(warmup_L)
-    # Add just one gate of each type if possible, or just a dummy gate
-    add_gate!(warmup_circ, XGate(), [1])
     
-    # Need config
-    warmup_config = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=4)
-    run_digital_tjm_v2(warmup_psi, warmup_circ, nothing, warmup_config)
+    # Use the actual circuit and observables for warmup
+    # We use a reduced config (e.g. max_bond_dim=2) to keep it slightly faster if possible,
+    # but using the real config is safer for compilation coverage.
+    warmup_config = TimeEvolutionConfig(obs_list, 100.0; dt=1.0, max_bond_dim=4)
+    
+    # Run!
+    run_digital_tjm(warmup_psi, circ_jl, nothing, warmup_config)
     println("Warmup complete.")
     
-    println("Executing V2...")
-    time_jl_v2 = @elapsed begin
-        psi_v2 = MPS(L; state=INITIAL_STATE)
+    println("Executing...")
+    time_jl = @elapsed begin
+        psi = MPS(L; state=INITIAL_STATE)
         
         # Reset observables
-        obs_v2 = deepcopy(obs_list)
-        sim_params_v2 = TimeEvolutionConfig(obs_v2, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
+        obs = deepcopy(obs_list)
+        sim_params = TimeEvolutionConfig(obs, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
         
-        _, res_matrix_v2 = run_digital_tjm_v2(psi_v2, circ_jl, nothing, sim_params_v2)
+        _, res_matrix = run_digital_tjm(psi, circ_jl, nothing, sim_params)
     end
-    println("V2 Time: $(round(time_jl_v2, digits=4)) s")
+    println("Julia Time: $(round(time_jl, digits=4)) s")
     
     # Slice [2:end]
-    results_jl_v2 = [res_matrix_v2[i, 2:end] for i in 1:length(obs_list)]
+    results_jl = [res_matrix[i, 2:end] for i in 1:length(obs_list)]
 end
 
 # ==============================================================================
@@ -212,7 +210,7 @@ if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
     # Construct Trotter Step
     trotter_step = nothing
     if CIRCUIT_NAME == "Ising"
-        trotter_step = mqt_circuit_lib.create_ising_circuit(L, J, g, dt, 1, periodic=false)
+        trotter_step = mqt_circuit_lib.create_ising_circuit(L, J, g, dt, 1, periodic=true)
     elseif CIRCUIT_NAME == "XY"
         trotter_step = mqt_circuit_lib.xy_trotter_layer(L, tau)
     elseif CIRCUIT_NAME == "Heisenberg"
@@ -233,17 +231,16 @@ end
 # 5. QISKIT EXACT
 # ==============================================================================
 if RUN_QISKIT_EXACT
-    println("\n--- Running Qiskit Exact ---")
+    println("\n--- Running Qiskit Exact Density Matrix ---")
     reference_py = mqt_simulators.run_qiskit_exact(
         L, timesteps, init_circuit, trotter_step, nothing,
         method="density_matrix", observable_basis="Z"
     )
     reference = pyconvert(Array{Float64,2}, reference_py)
     
-    target_sites_py = [0, 2, 5] 
+    target_sites_py = [s-1 for s in SITES_TO_SAMPLE] 
     results_py_exact = [reference[i+1, :] for i in target_sites_py]
 end
-
 # ==============================================================================
 # 6. PYTHON YAQS
 # ==============================================================================
@@ -257,11 +254,7 @@ if RUN_PYTHON_YAQS
         full_yaqs_circ.barrier(label="SAMPLE_OBSERVABLES")
     end
     
-    obs_yaqs = [
-        mqt_params.Observable(mqt_gates.Z(), 0),
-        mqt_params.Observable(mqt_gates.Z(), 2),
-        mqt_params.Observable(mqt_gates.Z(), 5)
-    ]
+    obs_yaqs = [mqt_params.Observable(mqt_gates.Z(), s-1) for s in SITES_TO_SAMPLE]
     
     sim_params_yaqs = mqt_params.StrongSimParams(
         observables=obs_yaqs, num_traj=1, max_bond_dim=MAX_BOND_DIM,
@@ -284,84 +277,72 @@ end
 # ==============================================================================
 
 println("\n--- Performance Summary ---")
-if RUN_JULIA_V2_WINDOWED; println("Julia V2 (Windowed): $(round(time_jl_v2, digits=4)) s"); end
+if RUN_JULIA; println("Julia: $(round(time_jl, digits=4)) s"); end
 if RUN_PYTHON_YAQS;       println("Python YAQS:       $(round(time_py_yaqs, digits=4)) s"); end
 
-if RUN_JULIA_V2_WINDOWED && RUN_PYTHON_YAQS
-    sp = time_py_yaqs / time_jl_v2
-    println("Speedup V2 vs YAQS: $(round(sp, digits=2))x")
+if RUN_JULIA && RUN_PYTHON_YAQS
+    sp = time_py_yaqs / time_jl
+    println("Speedup Julia vs YAQS: $(round(sp, digits=2))x")
 end
 
 # Plotting
 plt = pyimport("matplotlib.pyplot")
 
-if RUN_QISKIT_EXACT
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=true)
+num_plots = length(SITES_TO_SAMPLE)
+fig, axes = plt.subplots(num_plots, 1, figsize=(10, 3 * num_plots), sharex=true)
+
+# Handle single vs multiple axes
+axes_array = Vector{Any}(undef, num_plots)
+if num_plots == 1
+    axes_array[1] = axes
 else
-    fig, ax1 = plt.subplots(1, 1, figsize=(10, 6))
-    ax2 = nothing
+    for i in 1:num_plots
+        axes_array[i] = axes[i-1] # 0-based indexing
+    end
 end
 
 # Determine X axis length from available results
 len_x = 0
-if RUN_JULIA_V2_WINDOWED; len_x = length(results_jl_v2[1]); end
+if RUN_JULIA; len_x = length(results_jl[1]); end
 if RUN_PYTHON_YAQS;       len_x = length(results_py_yaqs[1]); end
 if RUN_QISKIT_EXACT;      len_x = length(results_py_exact[1]); end
 
 # Truncate all to minimum length
 min_len = len_x
-if RUN_JULIA_V2_WINDOWED; min_len = min(min_len, length(results_jl_v2[1])); end
+if RUN_JULIA; min_len = min(min_len, length(results_jl[1])); end
 if RUN_PYTHON_YAQS;       min_len = min(min_len, length(results_py_yaqs[1])); end
 if RUN_QISKIT_EXACT;      min_len = min(min_len, length(results_py_exact[1])); end
 
 x = 1:min_len
-colors = ["r", "g", "b"]
-sites = [1, 3, 6]
+colors = ["r", "g", "b", "c", "m", "y", "k"]
 
-for i in 1:3
-    c = colors[i]
-    s = sites[i]
+for (i, s) in enumerate(SITES_TO_SAMPLE)
+    ax = axes_array[i]
     
-    if RUN_JULIA_V2_WINDOWED
-        ax1.plot(x, results_jl_v2[i][1:min_len], label="JuliaV2 Z_$s", color=c, linestyle="-", linewidth=2)
+    if RUN_JULIA
+        ax.plot(x, results_jl[i][1:min_len], label="Julia", color="r", linestyle="-", linewidth=2)
     end
     
     if RUN_PYTHON_YAQS
-        ax1.plot(x, results_py_yaqs[i][1:min_len], label="YAQS Z_$s", color=c, linestyle=":", linewidth=3)
+        ax.plot(x, results_py_yaqs[i][1:min_len], label="YAQS", color="g", linestyle=":", linewidth=3)
     end
     
     if RUN_QISKIT_EXACT
         exact = results_py_exact[i][1:min_len]
-        ax1.plot(x, exact, label="Qiskit Z_$s", color=c, linestyle="--", linewidth=1, alpha=0.6)
-        
-        # Errors
-        if RUN_JULIA_V2_WINDOWED
-            err = abs.(results_jl_v2[i][1:min_len] - exact).^2
-            ax2.plot(x, err, label="|JlV2 - Qiskit|^2 Z_$s", color=c, linestyle="-")
-        end
-        if RUN_PYTHON_YAQS
-            err = abs.(results_py_yaqs[i][1:min_len] - exact).^2
-            ax2.plot(x, err, label="|YAQS - Qiskit|^2 Z_$s", color=c, linestyle=":")
-        end
+        ax.plot(x, exact, label="Qiskit Exact", color="b", linestyle="--", linewidth=1, alpha=0.6)
+    end
+    
+    ax.set_title("Site $s Evolution")
+    ax.set_ylabel("<Z>")
+    ax.legend(loc="upper right", fontsize="small")
+    ax.grid(true)
+    
+    if i == num_plots
+        ax.set_xlabel("Step")
     end
 end
 
-ax1.set_title("$CIRCUIT_NAME (L=$L, $timesteps steps)")
-ax1.set_ylabel("<Z>")
-ax1.legend(loc="upper right", fontsize="small")
-ax1.grid(true)
-
-if RUN_QISKIT_EXACT
-    ax2.set_title("Squared Error vs Exact")
-    ax2.set_xlabel("Step")
-    ax2.set_ylabel("Error")
-    ax2.legend(loc="upper right", fontsize="small")
-    ax2.grid(true)
-    ax2.set_yscale("log")
-else
-    ax1.set_xlabel("Step")
-end
-
+fig.suptitle("$CIRCUIT_NAME (L=$L, $timesteps steps)")
 plt.tight_layout()
 results_dir = joinpath(@__DIR__, "results")
 if !isdir(results_dir)

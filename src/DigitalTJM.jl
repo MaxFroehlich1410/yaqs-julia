@@ -136,18 +136,37 @@ function construct_window_mpo(gate::DigitalGate, window_start::Int, window_end::
     rel_s1 = s1 - window_start + 1
     rel_s2 = s2 - window_start + 1
     
+    # Get generator from gate, or from operator if not set
     gen = gate.generator
+    if isnothing(gen)
+        gen = GateLibrary.generator(gate.op)
+    end
     coeff = GateLibrary.hamiltonian_coeff(gate.op)
     
     @assert rel_s1 >= 1 && rel_s2 <= L_window "Gate sites outside window"
+
+    # Determine which generator element goes to which site
+    # gate.sites[1] corresponds to gen[1]
+    # gate.sites[2] corresponds to gen[2]
+    # s1 is min(sites), s2 is max(sites)
+    
+    g_s1 = gen[1]
+    g_s2 = gen[2]
+    
+    if gate.sites[1] != s1
+        # If sites were sorted/swapped (e.g. [2, 1] -> s1=1, s2=2), 
+        # then s1 corresponds to sites[2] -> gen[2]
+        g_s1 = gen[2]
+        g_s2 = gen[1]
+    end
     
     for i in 1:L_window
         T = zeros(ComplexF64, 1, 2, 2, 1)
         T[1, :, :, 1] = Matrix{ComplexF64}(I, 2, 2)
         if i == rel_s1
-            T[1, :, :, 1] = coeff * gen[1]
+            T[1, :, :, 1] = coeff * g_s1
         elseif i == rel_s2
-            T[1, :, :, 1] = gen[2]
+            T[1, :, :, 1] = g_s2
         end
         tensors[i] = T
     end

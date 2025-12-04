@@ -26,7 +26,9 @@ TAU = 0.1
 
 # Noise
 NOISE_STRENGTH = 0.01
+ENABLE_X_ERROR = true
 ENABLE_Y_ERROR = true
+ENABLE_Z_ERROR = true
 
 # Unraveling
 NUM_TRAJECTORIES = 100
@@ -217,6 +219,33 @@ end
 processes_jl_dicts = Vector{Dict{String, Any}}()
 processes_py = [] # For Python YAQS
 
+
+if ENABLE_X_ERROR
+    for i in 1:NUM_QUBITS
+        # Julia Dict
+        d = Dict{String, Any}()
+        d["name"] = "pauli_x"
+        d["sites"] = [i]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        
+        # Python Dict (0-based)
+        push!(processes_py, Dict("name"=>"pauli_x", "sites"=>[i-1], "strength"=>NOISE_STRENGTH))
+    end
+    
+    # Add Crosstalk XX on pairs
+    for i in 1:(NUM_QUBITS-1)
+        d = Dict{String, Any}()
+        d["name"] = "crosstalk_xx"
+        d["sites"] = [i, i+1]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        
+        push!(processes_py, Dict("name"=>"crosstalk_xx", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
+    end
+end
+
+
 if ENABLE_Y_ERROR
     for i in 1:NUM_QUBITS
         # Julia Dict
@@ -237,8 +266,30 @@ if ENABLE_Y_ERROR
         d["sites"] = [i, i+1]
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
-        
         push!(processes_py, Dict("name"=>"crosstalk_yy", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
+    end
+end
+
+
+if ENABLE_Z_ERROR
+    for i in 1:NUM_QUBITS
+        # Julia Dict
+        d = Dict{String, Any}()
+        d["name"] = "pauli_z"
+        d["sites"] = [i]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        push!(processes_py, Dict("name"=>"pauli_z", "sites"=>[i-1], "strength"=>NOISE_STRENGTH))
+    end
+    
+    # Add Crosstalk ZZ on pairs
+    for i in 1:(NUM_QUBITS-1)
+        d = Dict{String, Any}()
+        d["name"] = "crosstalk_zz"
+        d["sites"] = [i, i+1]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        push!(processes_py, Dict("name"=>"crosstalk_zz", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
     end
 end
 
@@ -246,21 +297,28 @@ noise_model_jl = NoiseModel(processes_jl_dicts, NUM_QUBITS)
 
 # Qiskit Noise
 qiskit_noise_model = aer_noise.NoiseModel()
+inst_2q = pybuiltins.list(["cx", "cy", "cz", "ch", "cp", "crx", "cry", "crz", "cu", "csx", "cs", "csdg", "swap", "iswap", "rxx", "ryy", "rzz", "rzx", "ecr", "dcx", "xx_minus_yy", "xx_plus_yy"])
+
+if ENABLE_X_ERROR
+    ops_2q = [("IX", NOISE_STRENGTH), ("XI", NOISE_STRENGTH), ("XX", NOISE_STRENGTH)]
+    error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
+
+    qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
+end
+
+
 if ENABLE_Y_ERROR
-    # Create Python list for pauli_error
-    ops = [("Y", NOISE_STRENGTH), ("I", 1.0 - NOISE_STRENGTH)]
-    # PythonCall should convert Vector of Tuples to list of tuples, but explicit list() is safer if strict check
-    py_ops = pybuiltins.list(ops)
-    error_1q = aer_noise.errors.pauli_error(py_ops)
-    ops_2q = [("II", 1.0 - 3*NOISE_STRENGTH), ("IY", NOISE_STRENGTH), ("YI", NOISE_STRENGTH), ("YY", NOISE_STRENGTH)]
+    ops_2q = [("IY", NOISE_STRENGTH), ("YI", NOISE_STRENGTH), ("YY", NOISE_STRENGTH)]
     error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
     
-    # Explicit python list for instructions
-    inst_2q = pybuiltins.list(["rzz", "rxx", "ryy"])
     qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
-    # Also 1q gates if any
-    inst_1q = pybuiltins.list(["x", "y", "z", "rx", "ry", "rz"])
-    qiskit_noise_model.add_all_qubit_quantum_error(error_1q, inst_1q)
+end
+
+if ENABLE_Z_ERROR
+    ops_2q = [("IZ", NOISE_STRENGTH), ("ZI", NOISE_STRENGTH), ("ZZ", NOISE_STRENGTH)]
+    error_2q = aer_noise.errors.pauli_error(pybuiltins.list(ops_2q))
+
+    qiskit_noise_model.add_all_qubit_quantum_error(error_2q, inst_2q)
 end
 
 # Pre-build Python Noise Model
