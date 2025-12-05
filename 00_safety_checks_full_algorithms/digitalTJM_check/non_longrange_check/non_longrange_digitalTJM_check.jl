@@ -32,17 +32,17 @@ TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Noise
-NOISE_STRENGTH = 0.1
+NOISE_STRENGTH = 0.001
 ENABLE_X_ERROR = true
 ENABLE_Y_ERROR = false
-ENABLE_Z_ERROR = true
+ENABLE_Z_ERROR = false
 
 # Unraveling
-NUM_TRAJECTORIES = 50
+NUM_TRAJECTORIES = 200
 MODE = "DM" # "DM" to verify against Density Matrix, "Large" for just performance
 
-longrange_mode = "TEBD" # "TEBD" or "TDVP"
-local_mode = "TEBD" # "TEBD" or "TDVP"
+longrange_mode = "TDVP" # "TEBD" or "TDVP"
+local_mode = "TDVP" # "TEBD" or "TDVP"
 
 # Model Specific Params
 # Ising
@@ -72,11 +72,11 @@ longrange_theta = π/4  # Rotation angle for the RXX gate
 # Observables
 OBSERVABLE_BASIS = "Z"
 THRESHOLD_MSE = 1e-3
-SITES_TO_PLOT = [1,2,3,4,5] # 1-based index, will be adjusted for Python/Plots
+SITES_TO_PLOT = [1,2,3,4,5,6] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
 RUN_QISKIT_MPS = true
-RUN_PYTHON_YAQS = false
+RUN_PYTHON_YAQS = true
 RUN_JULIA = true
 
 # ==============================================================================
@@ -306,7 +306,7 @@ end
 # 2. Noise Setup
 # --------------
 processes_jl_dicts = Vector{Dict{String, Any}}()
-processes_py = [] # For Python YAQS
+processes_py = pybuiltins.list() # For Python YAQS - use Python list
 
 
 if ENABLE_X_ERROR
@@ -318,8 +318,12 @@ if ENABLE_X_ERROR
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
         
-        # Python Dict (0-based)
-        push!(processes_py, Dict("name"=>"pauli_x", "sites"=>[i-1], "strength"=>NOISE_STRENGTH))
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "pauli_x"
+        d_py["sites"] = pybuiltins.list([i-1])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
     
     # Add Crosstalk XX on pairs
@@ -330,7 +334,12 @@ if ENABLE_X_ERROR
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
         
-        push!(processes_py, Dict("name"=>"crosstalk_xx", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_xx"
+        d_py["sites"] = pybuiltins.list([i-1, i])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
 end
 
@@ -344,8 +353,12 @@ if ENABLE_Y_ERROR
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
         
-        # Python Dict (0-based)
-        push!(processes_py, Dict("name"=>"pauli_y", "sites"=>[i-1], "strength"=>NOISE_STRENGTH))
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "pauli_y"
+        d_py["sites"] = pybuiltins.list([i-1])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
     
     # Add Crosstalk YY on pairs
@@ -355,7 +368,13 @@ if ENABLE_Y_ERROR
         d["sites"] = [i, i+1]
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
-        push!(processes_py, Dict("name"=>"crosstalk_yy", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
+        
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_yy"
+        d_py["sites"] = pybuiltins.list([i-1, i])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
 end
 
@@ -368,7 +387,13 @@ if ENABLE_Z_ERROR
         d["sites"] = [i]
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
-        push!(processes_py, Dict("name"=>"pauli_z", "sites"=>[i-1], "strength"=>NOISE_STRENGTH))
+        
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "pauli_z"
+        d_py["sites"] = pybuiltins.list([i-1])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
     
     # Add Crosstalk ZZ on pairs
@@ -378,11 +403,18 @@ if ENABLE_Z_ERROR
         d["sites"] = [i, i+1]
         d["strength"] = NOISE_STRENGTH
         push!(processes_jl_dicts, d)
-        push!(processes_py, Dict("name"=>"crosstalk_zz", "sites"=>[i-1, i], "strength"=>NOISE_STRENGTH))
+        
+        # Python Dict (0-based) - use pure Python types
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_zz"
+        d_py["sites"] = pybuiltins.list([i-1, i])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
     end
 end
 
 noise_model_jl = NoiseModel(processes_jl_dicts, NUM_QUBITS)
+nm_py = mqt_noise_model.NoiseModel(processes_py, num_qubits=NUM_QUBITS)
 
 
 # Qiskit Noise
@@ -428,7 +460,7 @@ if ENABLE_Z_ERROR
 end
 
 
-nm_py = mqt_noise_model.NoiseModel(processes_py, num_qubits=NUM_QUBITS)
+
 
 
 # 3. Exact Reference
@@ -512,50 +544,55 @@ end
 function runner_py_yaqs()
     obs_yaqs = [mqt_params.Observable(mqt_gates.Z(), i) for i in 0:(NUM_QUBITS-1)]
     # StrongSimParams
+    # Set num_mid_measurements = NUM_LAYERS + 1 to include t=0 measurement
     sp = mqt_params.StrongSimParams(
         observables=obs_yaqs, num_traj=1, max_bond_dim=64,
-        sample_layers=true, num_mid_measurements=NUM_LAYERS
+        sample_layers=true, num_mid_measurements=NUM_LAYERS + 1
     )
     sp.dt = 1.0 # Force dt
     
-    # Start from |0...0⟩ - init_circuit will prepare the state
-    psi_py = mqt_networks.MPS(NUM_QUBITS, state="zeros", pad=2)
+    # Initialize MPS with basis string where qubits at positions i % 4 == 3 are in |1⟩ state
+    # This matches Julia initialization where X gates are applied to those qubits
+    basis_string = ""
+    for i in 0:(NUM_QUBITS-1)
+        if i % 4 == 3
+            basis_string *= "1"
+        else
+            basis_string *= "0"
+        end
+    end
+    # Create MPS initialized from basis string with padding
+    psi_py = mqt_networks.MPS(NUM_QUBITS, state="basis", basis_string=basis_string, pad=2)
     
-    # Build circuit with init_circuit included (like run_yaqs does)
-    # This ensures initial state preparation is part of the circuit
-    circ_py = init_circuit.copy()
+    # Build circuit starting from empty (no init_circuit)
+    # The sample_layers=true parameter will automatically measure the correctly-initialized psi_py at t=0
+    circ_py = qiskit.QuantumCircuit(NUM_QUBITS)
     # Use Python's range: range(num_qubits) creates range(0, num_qubits)
     # Convert Julia range to Python list for Qiskit compatibility
     qubit_list = pybuiltins.list(collect(0:(NUM_QUBITS-1)))
-    circ_py.compose(trotter_step, qubits=qubit_list, inplace=true)
-    circ_py.barrier(label="SAMPLE_OBSERVABLES")
-    for _ in 1:(NUM_LAYERS-1)
+    for _ in 1:NUM_LAYERS
         circ_py.compose(trotter_step, qubits=qubit_list, inplace=true)
         circ_py.barrier(label="SAMPLE_OBSERVABLES")
     end
+
     
     mqt_sim.run(psi_py, circ_py, sp, nm_py, parallel=false)
     
     # Extract results from observables (updated in place)
-    # obs_yaqs is a Julia Vector of Py objects
-    first_res_py = obs_yaqs[1].results
-    first_res = pyconvert(Vector{Float64}, first_res_py)
-    T_steps = length(first_res)
-    
-    res_mat = zeros(Float64, length(obs_yaqs), T_steps)
+    # The simulator automatically measures the initial state, so we expect NUM_LAYERS+1 points
+    expected_steps = NUM_LAYERS + 1
+    res_mat = zeros(Float64, length(obs_yaqs), expected_steps)
     
     for i in 1:length(obs_yaqs)
         vals_py = obs_yaqs[i].results
-        res_mat[i, :] = pyconvert(Vector{Float64}, vals_py)
+        vals = pyconvert(Vector{Float64}, vals_py)
+        # Truncate to exactly NUM_LAYERS+1 points to match expected length
+        res_mat[i, :] = vals[1:expected_steps]
     end
     
-    # Reverse rows to match Julia's 1-based indexing
-    # Python: obs_yaqs[1] = site 0, obs_yaqs[2] = site 1, ...
-    # Julia: obs[1] = site 1, obs[2] = site 2, ...
-    # After reversal: res_mat[1, :] = Python site (NUM_QUBITS-1), res_mat[2, :] = Python site (NUM_QUBITS-2), ...
-    # But we want: res_mat[1, :] = first qubit, res_mat[2, :] = second qubit
-    # Actually, Python YAQS might return in reverse order, so we reverse to match
-    res_mat = res_mat[end:-1:1, :]
+    # Python observables are created in index order 0..N-1, so res_mat[i, :] corresponds to qubit i-1 (0-based)
+    # In Julia 1-based indexing, res_mat[1, :] = qubit 0 (first qubit), res_mat[2, :] = qubit 1 (second qubit), etc.
+    # This matches Julia's indexing where obs[1] = site 1 (first qubit), so no reversal needed
     
     return res_mat, 0
 end
