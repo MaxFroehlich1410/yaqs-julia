@@ -148,6 +148,15 @@ matrix(::CXGate) = SMatrix{4,4,ComplexF64}(
     0,0,0,1,
     0,0,1,0
 )
+# Generator: π/4 * (I-Z) ⊗ (I-X)
+# gen[1] = (I - Z) = [[0, 0], [0, 2]] in column-major
+# gen[2] = (I - X) = [[1, -1], [-1, 1]] in column-major
+function generator(::CXGate)
+    I_minus_Z = SMatrix{2,2,ComplexF64}(0, 0, 0, 2)  # (I - Z)
+    I_minus_X = SMatrix{2,2,ComplexF64}(1, -1, -1, 1)  # (I - X)
+    return [I_minus_Z, I_minus_X]
+end
+hamiltonian_coeff(::CXGate) = π / 4.0
 
 struct CYGate <: AbstractGate end
 matrix(::CYGate) = SMatrix{4,4,ComplexF64}(

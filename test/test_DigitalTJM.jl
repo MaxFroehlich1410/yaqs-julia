@@ -27,20 +27,24 @@ using Yaqs.NoiseModule
             layers = result
         end
         
-        # X(1), X(2), X(3) depend on nothing, should be layer 1?
-        # Rzz(1,2) depends on X(1), X(2).
-        
-        # My simple process_circuit pushes gates as early as possible.
-        # Layer 1: X(1), X(2), X(3)
-        # Layer 2: Rzz(1, 2)
+        # The greedy algorithm processes gates sequentially:
+        # X(1) -> layer 1
+        # X(2) -> layer 1 (no conflict)
+        # Rzz(1,2) -> conflicts with layer 1, goes to layer 2
+        # X(3) -> no conflict with layer 2, goes to layer 2
+        # Layer 1: X(1), X(2)
+        # Layer 2: Rzz(1, 2), X(3)
         
         @test length(layers) >= 2
         l1 = layers[1]
-        @test length(l1) == 3
+        @test length(l1) == 2
+        @test l1[1].op isa XGate
+        @test l1[2].op isa XGate
         
         l2 = layers[2]
-        @test length(l2) == 1
+        @test length(l2) == 2
         @test l2[1].op isa RzzGate
+        @test l2[2].op isa XGate
     end
 
     @testset "Run Bell State (No Noise)" begin

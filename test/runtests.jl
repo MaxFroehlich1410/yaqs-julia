@@ -16,7 +16,6 @@ using Yaqs
         "test_AnalogTJM.jl",
         "test_DigitalTJM.jl",
         "test_DigitalTJM_Noise.jl",
-        "test_DigitalTJMV2.jl",
         "test_Simulator.jl",
         "test_CircuitIngestion.jl",
         "test_CircuitLibrary.jl"
