@@ -13,36 +13,71 @@ using .Yaqs.MPOModule
 using .Yaqs.GateLibrary
 using .Yaqs.NoiseModule
 using .Yaqs.SimulationConfigs
+using .Yaqs.CircuitLibrary
 using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate
+using .Yaqs.CircuitIngestion
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 
+# Select Circuit: "Ising", "Heisenberg", "XY", "QAOA", "HEA", "longrange_test"
+CIRCUIT_NAME = "XY"
+periodic = false
+
 # Simulation Size
 NUM_QUBITS = 6
 NUM_LAYERS = 20
 TAU = 0.1
+dt = TAU  # Alias for consistency with circuit construction
 
 # Noise
-NOISE_STRENGTH = 0.01
+NOISE_STRENGTH = 0.1
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = true
+ENABLE_Y_ERROR = false
 ENABLE_Z_ERROR = true
 
 # Unraveling
-NUM_TRAJECTORIES = 100
+NUM_TRAJECTORIES = 50
 MODE = "DM" # "DM" to verify against Density Matrix, "Large" for just performance
+
+longrange_mode = "TEBD" # "TEBD" or "TDVP"
+local_mode = "TEBD" # "TEBD" or "TDVP"
+
+# Model Specific Params
+# Ising
+J = 1.0
+g = 1.0
+
+# Heisenberg
+Jx, Jy, Jz = 1.0, 1.0, 1.0
+h_field = 0.0
+
+# XY
+tau = TAU  # "dt" for XY often called tau
+
+# QAOA
+beta_qaoa = 0.3
+gamma_qaoa = 0.5
+
+# HEA
+phi_hea = 0.2
+theta_hea = 0.4
+lam_hea = 0.6
+start_parity_hea = 0
+
+# Longrange Test
+longrange_theta = π/4  # Rotation angle for the RXX gate
 
 # Observables
 OBSERVABLE_BASIS = "Z"
 THRESHOLD_MSE = 1e-3
-SITES_TO_PLOT = [1, 3] # 1-based index, will be adjusted for Python/Plots
+SITES_TO_PLOT = [1,2,3,4,5] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
 RUN_QISKIT_MPS = true
-RUN_PYTHON_YAQS = true
-RUN_JULIA_V2 = true
+RUN_PYTHON_YAQS = false
+RUN_JULIA = true
 
 # ==============================================================================
 # PYTHON SETUP
@@ -75,6 +110,7 @@ try
     global mqt_params = pyimport("mqt.yaqs.core.data_structures.simulation_parameters")
     global mqt_gates = pyimport("mqt.yaqs.core.libraries.gate_library")
     global mqt_noise_utils = pyimport("mqt.yaqs.codex_experiments.worker_functions.yaqs_simulator")
+    global mqt_noise_model = pyimport("mqt.yaqs.core.data_structures.noise_model")
 catch e
     println("Error importing Python modules: ", e)
     println("Sys path: ", sys.path)
@@ -112,13 +148,19 @@ function run_trajectories(runner_single_shot::Function,
     
     println("\n--- Running $label ---")
     
+    # Warmup run for Julia to trigger JIT compilation (excluded from timing)
+    if label == "Julia"
+        println("  Warming up (JIT compilation)...")
+        runner_single_shot()  # Discard result
+    end
+    
     cumulative_results = nothing
     bond_dims = Int[]
     
     final_stag = Float64[]
     final_mse = 0.0
     
-    # Measure pure simulation loop time
+    # Measure pure simulation loop time (after warmup)
     t_start = time()
     
     for n in 1:NUM_TRAJECTORIES
@@ -162,13 +204,64 @@ end
 # MAIN EXECUTION
 # ==============================================================================
 
-println("Configuration: N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH")
+println("Configuration: Circuit=$CIRCUIT_NAME, N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH")
 
 # 1. Prepare Circuits
 # -------------------
-println("Building Circuits...")
-trotter_step = mqt_circuit_lib.create_heisenberg_circuit(NUM_QUBITS, 1.0, 1.0, 1.0, 0.0, TAU, 1, periodic=false)
+println("Building Circuits ($CIRCUIT_NAME)...")
 
+# Julia Circuit Construction
+circ_jl = DigitalCircuit(NUM_QUBITS)
+# Initial Barrier
+add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+
+# Circuit Construction
+if CIRCUIT_NAME == "Ising"
+    circ_jl = create_ising_circuit(NUM_QUBITS, J, g, dt, NUM_LAYERS, periodic=periodic)
+    
+elseif CIRCUIT_NAME == "XY"
+    for _ in 1:NUM_LAYERS
+        layer = xy_trotter_layer(NUM_QUBITS, tau) 
+        for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
+
+elseif CIRCUIT_NAME == "Heisenberg"
+    circ_jl = create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, NUM_LAYERS, periodic=periodic)
+
+elseif CIRCUIT_NAME == "QAOA"
+    for _ in 1:NUM_LAYERS
+        layer = qaoa_ising_layer(NUM_QUBITS; beta=beta_qaoa, gamma=gamma_qaoa)
+        for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
+
+elseif CIRCUIT_NAME == "HEA"
+    phis = fill(phi_hea, NUM_QUBITS)
+    thetas = fill(theta_hea, NUM_QUBITS)
+    lams = fill(lam_hea, NUM_QUBITS)
+    for _ in 1:NUM_LAYERS
+        layer = hea_layer(NUM_QUBITS; phis=phis, thetas=thetas, lams=lams, start_parity=start_parity_hea)
+        for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
+
+elseif CIRCUIT_NAME == "longrange_test"
+    # Longrange test circuit: H gates on all qubits, then one RXX gate between qubits L and 1
+    for _ in 1:NUM_LAYERS
+        # Apply H gates to all qubits
+        for q in 1:NUM_QUBITS
+            add_gate!(circ_jl, HGate(), [q])
+        end
+        # Apply exactly ONE long-range two-qubit gate: RXX between qubits L and 1
+        add_gate!(circ_jl, RzzGate(longrange_theta), [NUM_QUBITS, 1])
+        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+    end
+else
+    error("Unknown CIRCUIT_NAME: $CIRCUIT_NAME. Supported: Ising, XY, Heisenberg, QAOA, HEA, longrange_test")
+end
+
+# Python Circuit Construction
 init_circuit = qiskit.QuantumCircuit(NUM_QUBITS)
 for i in 0:(NUM_QUBITS-1)
     if i % 4 == 3
@@ -176,34 +269,29 @@ for i in 0:(NUM_QUBITS-1)
     end
 end
 
-# Julia Circuit Construction
-circ_jl = DigitalCircuit(NUM_QUBITS)
-# Initial State X gates are handled in state preparation, not circuit? 
-# Actually runner_julia_v2 applies them.
-# So we just need the evolution layers.
-
-# Add initial barrier to capture t=0
-add_gate!(circ_jl, GateLibrary.Barrier("SAMPLE_OBSERVABLES"), Int[])
-
-# Extract gates from Trotter Step once
-py_instructions = trotter_step.data
-jl_gates_step = []
-for instr in py_instructions
-    g = CircuitIngestion.convert_instruction_to_gate(instr, trotter_step)
-    if !isnothing(g)
-        # Skip Rz for completeness/consistency with previous logic
-        if g.op isa GateLibrary.RzGate
-            continue
-        end
-        push!(jl_gates_step, g)
+# Construct Trotter Step for Python
+trotter_step = nothing
+if CIRCUIT_NAME == "Ising"
+    trotter_step = mqt_circuit_lib.create_ising_circuit(NUM_QUBITS, J, g, dt, 1, periodic=periodic)
+elseif CIRCUIT_NAME == "XY"
+    trotter_step = mqt_circuit_lib.xy_trotter_layer(NUM_QUBITS, tau)
+elseif CIRCUIT_NAME == "Heisenberg"
+    trotter_step = mqt_circuit_lib.create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, 1, periodic=periodic)
+elseif CIRCUIT_NAME == "QAOA"
+    trotter_step = mqt_circuit_lib.qaoa_ising_layer(NUM_QUBITS, beta=beta_qaoa, gamma=gamma_qaoa)
+elseif CIRCUIT_NAME == "HEA"
+    phis_list = [phi_hea for _ in 1:NUM_QUBITS]
+    thetas_list = [theta_hea for _ in 1:NUM_QUBITS]
+    lams_list = [lam_hea for _ in 1:NUM_QUBITS]
+    trotter_step = mqt_circuit_lib.hea_layer(NUM_QUBITS, phis=phis_list, thetas=thetas_list, lams=lams_list, start_parity=start_parity_hea)
+elseif CIRCUIT_NAME == "longrange_test"
+    # Import local circuit library for longrange_test
+    local_src_path = normpath(joinpath(@__DIR__, "../../../src"))
+    if !(local_src_path in sys.path)
+        sys.path.insert(0, local_src_path)
     end
-end
-
-for _ in 1:NUM_LAYERS
-    for g in jl_gates_step
-        add_gate!(circ_jl, g.op, g.sites; generator=g.generator)
-    end
-    add_gate!(circ_jl, GateLibrary.Barrier("SAMPLE_OBSERVABLES"), Int[])
+    local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
+    trotter_step = local_circuit_lib.longrange_test_circuit(NUM_QUBITS, longrange_theta)
 end
 
 # Pre-construct Python YAQS Circuit to match Julia's one-time construction
@@ -376,7 +464,7 @@ end
 # 4. Runners
 # ----------
 
-function runner_julia_v2()
+function runner_julia()
     # Init State
     psi = MPS(NUM_QUBITS; state="zeros")
     for i in 1:NUM_QUBITS
@@ -390,11 +478,15 @@ function runner_julia_v2()
     
     # Sim Config
     # Match time steps to layers for Simulator.jl pre-allocation
+
+
+    evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+    
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
     
     # Run using Simulator interface
     # This will populate obs[i].trajectories
-    Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false)
+    Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
     
     # Extract results from trajectories
     # We ran num_traj=1, so we take the first row of trajectories
@@ -426,22 +518,23 @@ function runner_py_yaqs()
     )
     sp.dt = 1.0 # Force dt
     
-    # Init state
+    # Start from |0...0⟩ - init_circuit will prepare the state
     psi_py = mqt_networks.MPS(NUM_QUBITS, state="zeros", pad=2)
-    for i in 0:(NUM_QUBITS-1)
-        if i % 4 == 3
-            # Manual gate application since apply_one_site_gate is missing
-            # Access python list with 1-based index
-            tensor = psi_py.tensors[i+1]
-            op = mqt_gates.X().matrix
-            new_tensor = oe.contract("ab, bcd->acd", op, tensor)
-            psi_py.tensors[i+1] = new_tensor
-        end
-    end
-            
-    # Use pre-constructed full_yaqs_circ and nm_py
     
-    mqt_sim.run(psi_py, full_yaqs_circ, sp, nm_py, parallel=false)
+    # Build circuit with init_circuit included (like run_yaqs does)
+    # This ensures initial state preparation is part of the circuit
+    circ_py = init_circuit.copy()
+    # Use Python's range: range(num_qubits) creates range(0, num_qubits)
+    # Convert Julia range to Python list for Qiskit compatibility
+    qubit_list = pybuiltins.list(collect(0:(NUM_QUBITS-1)))
+    circ_py.compose(trotter_step, qubits=qubit_list, inplace=true)
+    circ_py.barrier(label="SAMPLE_OBSERVABLES")
+    for _ in 1:(NUM_LAYERS-1)
+        circ_py.compose(trotter_step, qubits=qubit_list, inplace=true)
+        circ_py.barrier(label="SAMPLE_OBSERVABLES")
+    end
+    
+    mqt_sim.run(psi_py, circ_py, sp, nm_py, parallel=false)
     
     # Extract results from observables (updated in place)
     # obs_yaqs is a Julia Vector of Py objects
@@ -455,6 +548,14 @@ function runner_py_yaqs()
         vals_py = obs_yaqs[i].results
         res_mat[i, :] = pyconvert(Vector{Float64}, vals_py)
     end
+    
+    # Reverse rows to match Julia's 1-based indexing
+    # Python: obs_yaqs[1] = site 0, obs_yaqs[2] = site 1, ...
+    # Julia: obs[1] = site 1, obs[2] = site 2, ...
+    # After reversal: res_mat[1, :] = Python site (NUM_QUBITS-1), res_mat[2, :] = Python site (NUM_QUBITS-2), ...
+    # But we want: res_mat[1, :] = first qubit, res_mat[2, :] = second qubit
+    # Actually, Python YAQS might return in reverse order, so we reverse to match
+    res_mat = res_mat[end:-1:1, :]
     
     return res_mat, 0
 end
@@ -507,12 +608,12 @@ if RUN_PYTHON_YAQS
     end
 end
 
-if RUN_JULIA_V2
+if RUN_JULIA
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_v2, exact_stag_ref, "Julia V2")
-        results_data["Julia V2"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia")
+        results_data["Julia"] = (n, mse, stag, res_mat, t_total)
     catch e
-        println("Julia V2 Failed: $e")
+        println("Julia Failed: $e")
         rethrow(e)
     end
 end
@@ -522,84 +623,73 @@ end
 # -----------
 println("\nGenerating Plot...")
 plt = pyimport("matplotlib.pyplot")
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 12), sharex=true)
 
-x_axis = 0:NUM_LAYERS
+num_plots = length(SITES_TO_PLOT)
+fig, axes = plt.subplots(num_plots, 1, figsize=(10, 3 * num_plots), sharex=true)
 
-# Subplot 1: Staggered Magnetization
-if !isnothing(exact_stag_ref)
-    len = length(exact_stag_ref)
-    # exact_stag_ref now includes t=0, so index 0..len-1
-    ax1.plot(0:(len-1), exact_stag_ref, "k-", linewidth=2, label="Exact (DM)")
-    
-    # Also plot exact site expectation values in Subplot 2
-    styles = ["--", ":", "-."]
-    for (idx, site) in enumerate(SITES_TO_PLOT)
-        if !isnothing(ref_expvals) && site <= size(ref_expvals, 1)
-            site_data = ref_expvals[site, :]
-            t_indices_site = 0:(length(site_data)-1)
-            style = get(styles, idx, "-")
-            ax2.plot(t_indices_site, site_data, style, color="k", label="Exact Site $site")
-        end
+# Handle single vs multiple axes
+axes_array = Vector{Any}(undef, num_plots)
+if num_plots == 1
+    axes_array[1] = axes
+else
+    for i in 1:num_plots
+        axes_array[i] = axes[i-1] # 0-based indexing
     end
 end
 
-colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia V2"=>"r")
-
-for (name, (n, mse, stag, res_mat, t_total)) in results_data
-    c = get(colors, name, "k")
-    # Check length matches
-    if length(stag) != length(x_axis)
-        println("Warning: $name length $(length(stag)) mismatch expected $(length(x_axis))")
-        # truncate or pad?
-    end
-    
-    # Plot Staggered Magnetization
-    # Use 1:length(stag) to handle mismatches gracefully
-    # Assuming stag starts at t=0 if prepended correctly
-    
-    # Qiskit now has t=0. Julia V2 has t=0. 
-    # Plot against 0:len-1
-    t_len = length(stag)
-    t_indices = 0:(t_len-1)
-    
-    label_str = "$name (MSE=$(@sprintf("%.1e", mse)), Time=$(@sprintf("%.2f", t_total))s)"
-    ax1.plot(t_indices, stag, "--o", color=c, label=label_str)
-    
-    # Subplot 2: Chosen Sites
-    # Plot each site with different marker/style but same color family?
-    # Or separate legend?
-    # Let's use dashed/dotted for different sites.
-    # Re-define styles to silence warning if loop scope is an issue, or just reuse
-    styles_site = ["--", ":", "-."]
-    
-    for (idx, site) in enumerate(SITES_TO_PLOT)
-        # res_mat is (N_qubits, T_steps)
-        if site <= size(res_mat, 1)
-            site_data = res_mat[site, :]
-            t_indices_site = 0:(length(site_data)-1)
-            style = get(styles_site, idx, "-")
-            ax2.plot(t_indices_site, site_data, style, color=c, marker="x", markersize=4, label="$name Site $site")
+# Determine minimum length across all results
+all_lengths = Int[]
+if !isempty(results_data)
+    for (name, (n, mse, stag, res_mat, t_total)) in results_data
+        if size(res_mat, 2) > 0
+            push!(all_lengths, size(res_mat, 2))
         end
     end
 end
+if !isnothing(ref_expvals) && size(ref_expvals, 2) > 0
+    push!(all_lengths, size(ref_expvals, 2))
+end
 
-ax1.set_ylabel("Staggered Magnetization")
-ax1.set_title("Unraveling Benchmark (N=$NUM_QUBITS, Noise=$NOISE_STRENGTH)")
-ax1.legend()
-ax1.grid(true)
+min_len = isempty(all_lengths) ? 1 : minimum(all_lengths)
+x = 0:(min_len-1)  # Start from 0 for layer indexing
+colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r")
 
-ax2.set_xlabel("Layer")
-ax2.set_ylabel("Expectation Value <Z>")
-ax2.set_title("Single Site Evolution")
-ax2.legend()
-ax2.grid(true)
+for (i, site) in enumerate(SITES_TO_PLOT)
+    ax = axes_array[i]
+    
+    # Plot exact reference if available
+    if !isnothing(ref_expvals) && site <= size(ref_expvals, 1)
+        exact = ref_expvals[site, 1:min_len]
+        ax.plot(x, exact, label="Exact (DM)", color="k", linestyle="--", linewidth=1, alpha=0.6)
+    end
+    
+    # Plot each method's results
+    for (name, (n, mse, stag, res_mat, t_total)) in results_data
+        c = get(colors, name, "k")
+        if site <= size(res_mat, 1) && size(res_mat, 2) >= min_len
+            site_data = res_mat[site, 1:min_len]
+            ax.plot(x, site_data, label=name, color=c, linestyle="-", linewidth=2)
+        end
+    end
+    
+    ax.set_title("Site $site Evolution")
+    ax.set_ylabel("<Z>")
+    ax.legend(loc="upper right", fontsize="small")
+    ax.grid(true)
+    
+    if i == num_plots
+        ax.set_xlabel("Layer")
+    end
+end
+
+fig.suptitle("$CIRCUIT_NAME (N=$NUM_QUBITS, Noise=$NOISE_STRENGTH, $NUM_LAYERS layers)")
+plt.tight_layout()
 
 results_dir = joinpath(@__DIR__, "results")
 if !isdir(results_dir)
     mkpath(results_dir)
 end
-fname = joinpath(results_dir, "benchmark_unraveling_jl.png")
+fname = joinpath(results_dir, "benchmark_unraveling_$(lowercase(CIRCUIT_NAME)).png")
 plt.savefig(fname)
-println("Saved plot to $fname")
+println("Plot saved to $fname")
 
