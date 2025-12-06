@@ -80,6 +80,7 @@ RUN_PYTHON_YAQS = false
 RUN_JULIA = true
 RUN_JULIA_ANALOG_2PT = true
 RUN_JULIA_ANALOG_GAUSS = true
+RUN_JULIA_PROJECTOR = true
 
 # ==============================================================================
 # PYTHON SETUP
@@ -434,6 +435,13 @@ for d in processes_gauss_dicts
 end
 noise_model_gauss = NoiseModel(processes_gauss_dicts, NUM_QUBITS; sigma=1.0)
 
+# Projector Noise Model
+processes_proj_dicts = [copy(d) for d in processes_jl_dicts]
+for d in processes_proj_dicts
+    d["unraveling"] = "projector"
+end
+noise_model_proj = NoiseModel(processes_proj_dicts, NUM_QUBITS)
+
 
 # Qiskit Noise
 qiskit_noise_model = aer_noise.NoiseModel()
@@ -604,6 +612,36 @@ function runner_julia_analog_gauss()
     return real.(results), bond_dim
 end
 
+function runner_julia_projector()
+    # Init State
+    psi = MPS(NUM_QUBITS; state="zeros")
+    for i in 1:NUM_QUBITS
+        if (i-1) % 4 == 3
+            Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+        end
+    end
+    
+    # Observables
+    obs = [Observable("Z_$i", ZGate(), i) for i in 1:NUM_QUBITS]
+    
+    # Sim Config
+    evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+    
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    
+    # Run using Simulator interface with Projector Noise Model
+    Simulator.run(psi, circ_jl, sim_params, noise_model_proj; parallel=false, alg_options=evolution_options)
+    
+    # Extract results
+    results = zeros(ComplexF64, length(obs), length(sim_params.times))
+    for (i, o) in enumerate(obs)
+        results[i, :] = o.trajectories[1, :]
+    end
+    
+    bond_dim = MPSModule.write_max_bond_dim(psi)
+    return real.(results), bond_dim
+end
+
 function runner_py_yaqs()
     obs_yaqs = [mqt_params.Observable(mqt_gates.Z(), i) for i in 0:(NUM_QUBITS-1)]
     # StrongSimParams
@@ -738,6 +776,16 @@ if RUN_JULIA_ANALOG_GAUSS
     end
 end
 
+if RUN_JULIA_PROJECTOR
+    try
+        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector")
+        results_data["Julia Projector"] = (n, mse, stag, res_mat, t_total)
+    catch e
+        println("Julia Projector Failed: $e")
+        rethrow(e)
+    end
+end
+
 
 # 6. Plotting
 # -----------
@@ -772,7 +820,7 @@ end
 
 min_len = isempty(all_lengths) ? 1 : minimum(all_lengths)
 x = 0:(min_len-1)  # Start from 0 for layer indexing
-colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange", "Julia Analog Gauss"=>"purple")
+colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange", "Julia Analog Gauss"=>"purple", "Julia Projector"=>"cyan")
 
 for (i, site) in enumerate(SITES_TO_PLOT)
     ax = axes_array[i]
