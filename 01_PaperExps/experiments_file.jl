@@ -6,7 +6,7 @@ using Statistics
 using Dates
 
 # Include Yaqs source
-include("../../../src/Yaqs.jl")
+include("../src/Yaqs.jl")
 using .Yaqs
 using .Yaqs.MPSModule
 using .Yaqs.MPOModule
@@ -21,28 +21,64 @@ using .Yaqs.CircuitIngestion
 # CONFIGURATION
 # ==============================================================================
 
-# Select Circuit: "Ising", "Heisenberg", "XY", "QAOA", "HEA", "longrange_test"
+# Select Circuit: 
+# Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", 
+#          "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
 CIRCUIT_NAME = "Ising"
+
+# Determine Base Model and Flags
 periodic = false
+long_range_gates = false
+BASE_MODEL = ""
+
+if startswith(CIRCUIT_NAME, "Ising")
+    BASE_MODEL = "Ising"
+    if occursin("periodic", CIRCUIT_NAME)
+        periodic = true
+        long_range_gates = true
+    end
+elseif startswith(CIRCUIT_NAME, "Heisenberg")
+    BASE_MODEL = "Heisenberg"
+    if occursin("periodic", CIRCUIT_NAME)
+        periodic = true
+        long_range_gates = true
+    end
+elseif startswith(CIRCUIT_NAME, "XY")
+    BASE_MODEL = "XY"
+    if occursin("longrange", CIRCUIT_NAME) || occursin("periodic", CIRCUIT_NAME)
+        long_range_gates = true
+        # In XY model, longrange implies periodic boundary link
+    end
+elseif startswith(CIRCUIT_NAME, "QAOA")
+    BASE_MODEL = "QAOA"
+elseif startswith(CIRCUIT_NAME, "HEA")
+    BASE_MODEL = "HEA"
+elseif CIRCUIT_NAME == "longrange_test"
+    BASE_MODEL = "longrange_test"
+    long_range_gates = true
+else
+    error("Unknown CIRCUIT_NAME: $CIRCUIT_NAME")
+end
 
 # Simulation Size
-NUM_QUBITS = 12
-NUM_LAYERS = 20
+NUM_QUBITS = 49
+NUM_LAYERS = 15
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Noise
-NOISE_STRENGTH = 0.001
+NOISE_STRENGTH = 0.01
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = false
+ENABLE_Y_ERROR = true
 ENABLE_Z_ERROR = false
 
 # Unraveling
-NUM_TRAJECTORIES = 200
+NUM_TRAJECTORIES = 100
 MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just performance
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
-local_mode = "TDVP" # "TEBD" or "TDVP"
+local_mode = "TEBD" # "TEBD" or "TDVP"
+MAX_BOND_DIM = 64
 
 # Model Specific Params
 # Ising
@@ -87,9 +123,9 @@ RUN_JULIA_PROJECTOR = true
 # ==============================================================================
 
 sys = pyimport("sys")
-# Add mqt-yaqs paths
-mqt_yaqs_src = abspath(joinpath(@__DIR__, "../../../../mqt-yaqs/src"))
-mqt_yaqs_inner = abspath(joinpath(@__DIR__, "../../../../mqt-yaqs/src/mqt/yaqs"))
+# Add mqt-yaqs paths (Adjusted for 01_PaperExps location)
+mqt_yaqs_src = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src"))
+mqt_yaqs_inner = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src/mqt/yaqs"))
 
 if !(mqt_yaqs_src in sys.path)
     sys.path.insert(0, mqt_yaqs_src)
@@ -219,27 +255,31 @@ circ_jl = DigitalCircuit(NUM_QUBITS)
 add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
 
 # Circuit Construction
-if CIRCUIT_NAME == "Ising"
+if BASE_MODEL == "Ising"
     circ_jl = create_ising_circuit(NUM_QUBITS, J, g, dt, NUM_LAYERS, periodic=periodic)
     
-elseif CIRCUIT_NAME == "XY"
+elseif BASE_MODEL == "XY"
     for _ in 1:NUM_LAYERS
-        layer = xy_trotter_layer(NUM_QUBITS, tau) 
+        if long_range_gates
+            layer = xy_trotter_layer_longrange(NUM_QUBITS, tau)
+        else
+            layer = xy_trotter_layer(NUM_QUBITS, tau)
+        end
         for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
 
-elseif CIRCUIT_NAME == "Heisenberg"
+elseif BASE_MODEL == "Heisenberg"
     circ_jl = create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, NUM_LAYERS, periodic=periodic)
 
-elseif CIRCUIT_NAME == "QAOA"
+elseif BASE_MODEL == "QAOA"
     for _ in 1:NUM_LAYERS
         layer = qaoa_ising_layer(NUM_QUBITS; beta=beta_qaoa, gamma=gamma_qaoa)
         for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
 
-elseif CIRCUIT_NAME == "HEA"
+elseif BASE_MODEL == "HEA"
     phis = fill(phi_hea, NUM_QUBITS)
     thetas = fill(theta_hea, NUM_QUBITS)
     lams = fill(lam_hea, NUM_QUBITS)
@@ -249,7 +289,7 @@ elseif CIRCUIT_NAME == "HEA"
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
 
-elseif CIRCUIT_NAME == "longrange_test"
+elseif BASE_MODEL == "longrange_test"
     # Longrange test circuit: H gates on all qubits, then one RXX gate between qubits L and 1
     for _ in 1:NUM_LAYERS
         # Apply H gates to all qubits
@@ -261,7 +301,7 @@ elseif CIRCUIT_NAME == "longrange_test"
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
     end
 else
-    error("Unknown CIRCUIT_NAME: $CIRCUIT_NAME. Supported: Ising, XY, Heisenberg, QAOA, HEA, longrange_test")
+    error("Unknown BASE_MODEL: $BASE_MODEL")
 end
 
 # Python Circuit Construction
@@ -274,22 +314,26 @@ end
 
 # Construct Trotter Step for Python
 trotter_step = nothing
-if CIRCUIT_NAME == "Ising"
+if BASE_MODEL == "Ising"
     trotter_step = mqt_circuit_lib.create_ising_circuit(NUM_QUBITS, J, g, dt, 1, periodic=periodic)
-elseif CIRCUIT_NAME == "XY"
-    trotter_step = mqt_circuit_lib.xy_trotter_layer(NUM_QUBITS, tau)
-elseif CIRCUIT_NAME == "Heisenberg"
+elseif BASE_MODEL == "XY"
+    if long_range_gates
+        trotter_step = mqt_circuit_lib.xy_trotter_layer_longrange(NUM_QUBITS, tau)
+    else
+        trotter_step = mqt_circuit_lib.xy_trotter_layer(NUM_QUBITS, tau)
+    end
+elseif BASE_MODEL == "Heisenberg"
     trotter_step = mqt_circuit_lib.create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, 1, periodic=periodic)
-elseif CIRCUIT_NAME == "QAOA"
+elseif BASE_MODEL == "QAOA"
     trotter_step = mqt_circuit_lib.qaoa_ising_layer(NUM_QUBITS, beta=beta_qaoa, gamma=gamma_qaoa)
-elseif CIRCUIT_NAME == "HEA"
+elseif BASE_MODEL == "HEA"
     phis_list = [phi_hea for _ in 1:NUM_QUBITS]
     thetas_list = [theta_hea for _ in 1:NUM_QUBITS]
     lams_list = [lam_hea for _ in 1:NUM_QUBITS]
     trotter_step = mqt_circuit_lib.hea_layer(NUM_QUBITS, phis=phis_list, thetas=thetas_list, lams=lams_list, start_parity=start_parity_hea)
-elseif CIRCUIT_NAME == "longrange_test"
+elseif BASE_MODEL == "longrange_test"
     # Import local circuit library for longrange_test
-    local_src_path = normpath(joinpath(@__DIR__, "../../../src"))
+    local_src_path = normpath(joinpath(@__DIR__, "../src"))
     if !(local_src_path in sys.path)
         sys.path.insert(0, local_src_path)
     end
@@ -344,6 +388,21 @@ if ENABLE_X_ERROR
         d_py["strength"] = NOISE_STRENGTH
         processes_py.append(d_py)
     end
+
+    # Add Crosstalk XX on long-range gate
+    if long_range_gates
+        d = Dict{String, Any}()
+        d["name"] = "crosstalk_xx"
+        d["sites"] = [NUM_QUBITS, 1]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_xx"
+        d_py["sites"] = pybuiltins.list([NUM_QUBITS-1, 0])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
+    end
 end
 
 
@@ -379,6 +438,21 @@ if ENABLE_Y_ERROR
         d_py["strength"] = NOISE_STRENGTH
         processes_py.append(d_py)
     end
+
+    # Add Crosstalk YY on long-range gate
+    if long_range_gates
+        d = Dict{String, Any}()
+        d["name"] = "crosstalk_yy"
+        d["sites"] = [NUM_QUBITS, 1]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_yy"
+        d_py["sites"] = pybuiltins.list([NUM_QUBITS-1, 0])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
+    end
 end
 
 
@@ -411,6 +485,21 @@ if ENABLE_Z_ERROR
         d_py = pybuiltins.dict()
         d_py["name"] = "crosstalk_zz"
         d_py["sites"] = pybuiltins.list([i-1, i])  # Convert Julia Vector to Python List
+        d_py["strength"] = NOISE_STRENGTH
+        processes_py.append(d_py)
+    end
+
+    # Add Crosstalk ZZ on long-range gate
+    if long_range_gates
+        d = Dict{String, Any}()
+        d["name"] = "crosstalk_zz"
+        d["sites"] = [NUM_QUBITS, 1]
+        d["strength"] = NOISE_STRENGTH
+        push!(processes_jl_dicts, d)
+        
+        d_py = pybuiltins.dict()
+        d_py["name"] = "crosstalk_zz"
+        d_py["sites"] = pybuiltins.list([NUM_QUBITS-1, 0])  # Convert Julia Vector to Python List
         d_py["strength"] = NOISE_STRENGTH
         processes_py.append(d_py)
     end
@@ -467,6 +556,10 @@ if ENABLE_X_ERROR
     for i in 1:(NUM_QUBITS-1)
         qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [i-1, i])
     end
+    if long_range_gates
+        qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [NUM_QUBITS-1, 0])
+        qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [0, NUM_QUBITS-1])
+    end
 end
 
 if ENABLE_Y_ERROR
@@ -475,6 +568,10 @@ if ENABLE_Y_ERROR
     for i in 1:(NUM_QUBITS-1)
         qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [i-1, i])
     end
+    if long_range_gates
+        qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [NUM_QUBITS-1, 0])
+        qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [0, NUM_QUBITS-1])
+    end
 end
 
 if ENABLE_Z_ERROR
@@ -482,6 +579,10 @@ if ENABLE_Z_ERROR
     error_2q_Z = pauli_lindblad_error_from_labels(["IZ", "ZI", "ZZ"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
     for i in 1:(NUM_QUBITS-1)
         qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [i-1, i])
+    end
+    if long_range_gates
+        qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [NUM_QUBITS-1, 0])
+        qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [0, NUM_QUBITS-1])
     end
 end
 
@@ -537,8 +638,8 @@ function runner_julia()
     # Sim Config
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
-    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
-    
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     # Run using Simulator interface
     Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
     
@@ -567,7 +668,7 @@ function runner_julia_analog_2pt()
     # Sim Config
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
-    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Analog Noise Model
     Simulator.run(psi, circ_jl, sim_params, noise_model_analog; parallel=false, alg_options=evolution_options)
@@ -597,7 +698,7 @@ function runner_julia_analog_gauss()
     # Sim Config
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
-    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Gauss Noise Model
     Simulator.run(psi, circ_jl, sim_params, noise_model_gauss; parallel=false, alg_options=evolution_options)
@@ -627,7 +728,7 @@ function runner_julia_projector()
     # Sim Config
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
-    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Projector Noise Model
     Simulator.run(psi, circ_jl, sim_params, noise_model_proj; parallel=false, alg_options=evolution_options)
@@ -647,7 +748,7 @@ function runner_py_yaqs()
     # StrongSimParams
     # Set num_mid_measurements = NUM_LAYERS + 1 to include t=0 measurement
     sp = mqt_params.StrongSimParams(
-        observables=obs_yaqs, num_traj=1, max_bond_dim=64,
+        observables=obs_yaqs, num_traj=1, max_bond_dim=MAX_BOND_DIM,
         sample_layers=true, num_mid_measurements=NUM_LAYERS + 1
     )
     sp.dt = 1.0 # Force dt
@@ -700,9 +801,15 @@ end
 
 function runner_qiskit_mps()
     # Note: run_qiskit_mps builds the full circuit including init_circuit
+    
+    # Define MPS options
+    mps_opts = pybuiltins.dict()
+    mps_opts["matrix_product_state_max_bond_dimension"] = MAX_BOND_DIM
+    
     res_tuple = mqt_simulators.run_qiskit_mps(
         NUM_QUBITS, NUM_LAYERS, init_circuit, trotter_step, qiskit_noise_model,
-        num_traj=1, observable_basis=OBSERVABLE_BASIS
+        num_traj=1, observable_basis=OBSERVABLE_BASIS,
+        mps_options=mps_opts
     )
     expvals = pyconvert(Matrix{Float64}, res_tuple[0])
     
@@ -860,4 +967,3 @@ end
 fname = joinpath(results_dir, "benchmark_unraveling_$(lowercase(CIRCUIT_NAME)).png")
 plt.savefig(fname)
 println("Plot saved to $fname")
-

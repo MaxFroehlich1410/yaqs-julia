@@ -48,7 +48,7 @@ NUM_TRAJECTORIES = 200
 MODE = "DM" # "DM" to verify against Density Matrix, "Large" for just performance
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
-local_mode = "TDVP" # "TEBD" or "TDVP"
+local_mode = "TEBD" # "TEBD" or "TDVP"
 
 # Model Specific Params
 # Ising
