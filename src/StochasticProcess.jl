@@ -32,11 +32,52 @@ Calculate the stochastic factor dp = 1 - <psi|psi>.
 This assumes the state norm has decayed due to dissipation.
 """
 function calculate_stochastic_factor(state::MPS)
-    # Python: return 1 - state.norm(0)
-    # Here state.norm() usually returns L2 norm.
-    # We use 1 - <psi|psi> (squared norm) which corresponds to probability loss.
     norm_sq = real(MPSModule.scalar_product(state, state))
     return 1.0 - norm_sq
+end
+
+"""
+    apply_mpo_jump!(state::MPS, mpo::MPO, sim_params)
+
+Apply an MPO jump operator to the MPS in-place.
+Contracts site-by-site (growing bond dimensions) and then truncates.
+"""
+function apply_mpo_jump!(state::MPS, mpo::MPO{T}, sim_params) where T
+    @assert state.length == mpo.length
+    
+    # Contract site-by-site
+    for i in 1:state.length
+        A = state.tensors[i] # (La, Pi, Ra)
+        W = mpo.tensors[i]   # (Lw, Po, Pi, Rw)
+        
+        # Contract over physical index Pi
+        # A: [la, pi, ra]
+        # W: [lw, po, pi, rw]
+        # Result C: [la, lw, po, ra, rw]
+        @tensor C[la, lw, po, ra, rw] := A[la, pi, ra] * W[lw, po, pi, rw]
+        
+        # Reshape to merge virtual bonds: (La*Lw, Po, Ra*Rw)
+        la, lw, po, ra, rw = size(C)
+        state.tensors[i] = reshape(C, la * lw, po, ra * rw)
+    end
+    
+    # Truncate to control bond dimension growth
+    # Use threshold from sim_params if available
+    threshold = 1e-12
+    max_bond = nothing
+    if hasproperty(sim_params, :truncation_threshold)
+        threshold = sim_params.truncation_threshold
+    elseif hasproperty(sim_params, :threshold)
+        threshold = sim_params.threshold
+    end
+    
+    if hasproperty(sim_params, :bond_dim)
+        max_bond = sim_params.bond_dim
+    elseif hasproperty(sim_params, :max_bond_dim)
+        max_bond = sim_params.max_bond_dim
+    end
+    
+    MPSModule.truncate!(state; threshold=threshold, max_bond_dim=max_bond)
 end
 
 """
@@ -54,16 +95,9 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
 
     L = state.length
 
-    # Iterate over sites to minimize orthogonality center shifts (matching Python logic)
+    # Iterate over sites to minimize orthogonality center shifts
     for site in 1:L
-        # Shift OC to site (if not 1 or L, shift to site-1? Python shifts to site-1)
-        # Python: if site not in {0, L}: state.shift_orthogonality_center_right(site - 1)
-        # In Julia (1-based), if site > 1.
-        # We ensure OC is close to site. 
-        # Actually, for 1-site ops at `site`, we want OC at `site`.
-        # For 2-site ops at `site, site+1`, we want OC at `site`.
-        
-        # Helper to shift efficiently
+        # Shift OC to site (efficient access for local norms)
         if site > 1
              MPSModule.shift_orthogonality_center!(state, site)
         else
@@ -72,23 +106,19 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
 
         # --- 1-site jumps at this site ---
         for proc in noise_model.processes
-            if length(proc.sites) == 1 && proc.sites[1] == site
+            if isa(proc, LocalNoiseProcess) && length(proc.sites) == 1 && proc.sites[1] == site
                 gamma = proc.strength
                 op = proc.matrix
                 
                 # Check if Pauli (efficient norm)
                 if is_pauli(op)
                     # For Pauli L = sqrt(gamma)*P, L^dag L = gamma I.
-                    # <psi|L^dag L|psi> = gamma <psi|psi> = gamma * norm_sq_local
-                    # Since we shifted OC to site, norm(tensor[site])^2 is global norm squared.
-                    # Note: state might be unnormalized.
                     nrm = norm(state.tensors[site])^2
                     dp_m = dt * gamma * nrm
                     push!(dp_m_list, dp_m)
                     push!(jump_candidates, (proc, op, "local_1", [site]))
                 else
                     # Non-Pauli: apply and measure
-                    # Copy tensor to avoid modifying state
                     T_orig = state.tensors[site]
                     @tensor T_new[l, p, r] := op[p, k] * T_orig[l, k, r]
                     nrm = norm(T_new)^2
@@ -102,68 +132,69 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
         # --- 2-site jumps starting at [site, site+1] ---
         if site < L
             for proc in noise_model.processes
-                if length(proc.sites) == 2 && proc.sites[1] == site && proc.sites[2] == site + 1
-                    gamma = proc.strength
-                    
-                    if is_pauli_proc(proc)
-                        # Pauli 2-site: L^dag L = gamma I
-                        nrm = norm(state.tensors[site])^2 # OC is at site
-                        dp_m = dt * gamma * nrm
-                        push!(dp_m_list, dp_m)
-                        push!(jump_candidates, (proc, proc.matrix, "local_2", [site, site+1]))
-                    else
-                         # Non-Pauli: merge and apply
-                         A1 = state.tensors[site]
-                         A2 = state.tensors[site+1]
-                         @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
-                         
-                         op = proc.matrix
-                         op_ten = reshape(op, 2, 2, 2, 2)
-                         @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
-                         
-                         nrm = norm(Theta_new)^2
-                         dp_m = dt * gamma * nrm
-                         push!(dp_m_list, dp_m)
-                         push!(jump_candidates, (proc, op, "local_2", [site, site+1]))
+                if isa(proc, LocalNoiseProcess) && length(proc.sites) == 2 && sort(proc.sites) == [site, site+1]
+                    # Ensure we process this pair only once (when site == first site)
+                     if proc.sites[1] == site
+                        gamma = proc.strength
+                        
+                        if is_pauli_proc(proc)
+                            nrm = norm(state.tensors[site])^2 # OC is at site
+                            dp_m = dt * gamma * nrm
+                            push!(dp_m_list, dp_m)
+                            push!(jump_candidates, (proc, proc.matrix, "local_2", [site, site+1]))
+                        else
+                             # Non-Pauli: merge and apply
+                             A1 = state.tensors[site]
+                             A2 = state.tensors[site+1]
+                             @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+                             
+                             op = proc.matrix
+                             op_ten = reshape(op, 2, 2, 2, 2)
+                             @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+                             
+                             nrm = norm(Theta_new)^2
+                             dp_m = dt * gamma * nrm
+                             push!(dp_m_list, dp_m)
+                             push!(jump_candidates, (proc, op, "local_2", [site, site+1]))
+                        end
                     end
-                    
-                elseif length(proc.sites) == 2 && sort(proc.sites) == [site, site+1] && proc.sites[1] != site
-                    # Handle case where sites are defined as [site+1, site] but we are at site.
-                    # Usually sites are sorted in NoiseModel.
                 end
             end
         end
     end
     
-    # --- Long Range Jumps ---
-    # Python iterates noise_model again or handles them specially? 
-    # Python code: if "mpo" in process... inside the loop?
-    # Python loop iterates sites. Inside check processes.
-    # If process is long-range, Python code checks `if len(process["sites"]) == 2 and process["sites"][0] == site`.
-    # So we should handle long-range here too if they start at `site`.
-    
-    for site in 1:L
-         for proc in noise_model.processes
-             # Long range: sites=[i, j] with |i-j|>1
-             if length(proc.sites) == 2 && abs(proc.sites[2] - proc.sites[1]) > 1 && proc.sites[1] == site
-                 # Long Range Pauli via factors
-                 if is_pauli_proc(proc) && hasproperty(proc, :factors) && !isempty(proc.factors)
-                     gamma = proc.strength
-                     # Pauli: L^dag L = gamma I
-                     # Need global norm.
-                     # We can just use norm at current OC (which might not be site, but we can shift or just use what we have)
-                     # In loop above, we shifted.
-                     MPSModule.shift_orthogonality_center!(state, site)
-                     nrm = norm(state.tensors[site])^2
-                     dp_m = dt * gamma * nrm
-                     push!(dp_m_list, dp_m)
-                     push!(jump_candidates, (proc, proc.factors, "pauli_long_range", proc.sites))
-                 else
-                     # MPO based (ignored as per requirements "only support... via local factors")
-                     # But Python code supports it. 
-                     # User said: "only supports: ... long-range Pauli noise (implemented via local factors, not MPOs)"
-                 end
+    # --- Long Range Jumps (Iterate processes directly) ---
+    for proc in noise_model.processes
+         if isa(proc, MPONoiseProcess)
+             # MPO based Jump
+             gamma = proc.strength
+             
+             # Check if it's a Pauli process with factors (Optimization)
+             if is_pauli_proc(proc) && hasproperty(proc, :factors) && !isempty(proc.factors)
+                 # Use global norm approx (assuming normalized state usually) or compute
+                 # Ideally we should shift OC to sites and measure, but for global norm
+                 # we can just use current norm if we assume state is unnormalized only due to dissipation
+                 # But we might need to be careful.
+                 # Let's use the same logic as before: current norm squared.
+                 nrm = norm(state.tensors[state.orth_center])^2
+                 dp_m = dt * gamma * nrm
+                 push!(dp_m_list, dp_m)
+                 push!(jump_candidates, (proc, proc.factors, "pauli_long_range", proc.sites))
+             else
+                 # General MPO Jump (e.g. Projector or Unitary-2pt components, or Pauli w/o factors)
+                 # Need to apply MPO to get norm
+                 temp_state = deepcopy(state)
+                 apply_mpo_jump!(temp_state, proc.mpo, sim_params)
+                 nrm = MPSModule.norm(temp_state)^2
+                 dp_m = dt * gamma * nrm
+                 push!(dp_m_list, dp_m)
+                 push!(jump_candidates, (proc, proc.mpo, "mpo_general", proc.sites))
              end
+             
+         elseif isa(proc, LocalNoiseProcess) && length(proc.sites) == 2 && abs(proc.sites[2]-proc.sites[1]) > 1
+             # Long range local process? Should be wrapped in MPO if it's not simple Pauli factors.
+             # If it has factors, we can handle it.
+             # Legacy support if needed, but MPONoiseProcess is preferred for long range.
          end
     end
 
@@ -234,47 +265,39 @@ function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, s
         op_ten = reshape(op, 2, 2, 2, 2)
         @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
         
-        # Split back (Full Rank / No Truncation for jump)
-        # Use existing split helper from algorithms but force high rank?
-        # Python: "no truncation or full rank"
-        # We can just use split_mps_tensor_svd with very loose config or manually svd
-        
+        # Split back
         l_dim, _, _, r_dim = size(Theta_new)
         Mat = reshape(Theta_new, l_dim*2, 2*r_dim)
         F = svd(Mat)
         
-        # Keep all singular values
+        # Keep all singular values (no truncation for jump application)
         U, S, Vt = F.U, F.S, F.Vt
         rank = length(S)
         
         state.tensors[s1] = reshape(U, l_dim, 2, rank)
         state.tensors[s2] = reshape(Diagonal(S)*Vt, rank, 2, r_dim)
         
-    elseif type == "pauli_long_range"
-        # Apply factors
-        factors = op
-        s1, s2 = sites # unsorted usually? NoiseModel should sort. 
-        # Assume sorted or factors correspond to sites order.
-        # factors is vector [op1, op2]
+    elseif type == "mpo_pauli"
+        # Apply factors if available
+        if hasproperty(proc, :factors) && !isempty(proc.factors)
+            MPSModule.shift_orthogonality_center!(state, proc.sites[1])
+            state.tensors[proc.sites[1]] = permutedims(proc.factors[1] * permutedims(state.tensors[proc.sites[1]], (2,1,3)), (2,1,3))
+            
+            MPSModule.shift_orthogonality_center!(state, proc.sites[2])
+            state.tensors[proc.sites[2]] = permutedims(proc.factors[2] * permutedims(state.tensors[proc.sites[2]], (2,1,3)), (2,1,3))
+        else
+            # Apply MPO
+            apply_mpo_jump!(state, proc.mpo, sim_params)
+        end
         
-        # Apply s1
-        MPSModule.shift_orthogonality_center!(state, s1)
-        T1 = state.tensors[s1]
-        op1 = factors[1]
-        @tensor T1_new[l, p, r] := op1[p, k] * T1[l, k, r]
-        state.tensors[s1] = T1_new
-        
-        # Apply s2
-        MPSModule.shift_orthogonality_center!(state, s2)
-        T2 = state.tensors[s2]
-        op2 = factors[2]
-        @tensor T2_new[l, p, r] := op2[p, k] * T2[l, k, r]
-        state.tensors[s2] = T2_new
+    elseif type == "mpo_general"
+        apply_mpo_jump!(state, op, sim_params) # op is the mpo here
     end
     
     MPSModule.normalize!(state)
     return state
 end
+
 
 
 # --- Helpers ---

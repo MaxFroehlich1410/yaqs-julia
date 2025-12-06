@@ -22,7 +22,7 @@ using .Yaqs.CircuitIngestion
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "XY"
+CIRCUIT_NAME = "Ising"
 periodic = false
 
 # Simulation Size
@@ -76,8 +76,9 @@ SITES_TO_PLOT = [1,2,3,4,5,6] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
 RUN_QISKIT_MPS = true
-RUN_PYTHON_YAQS = true
+RUN_PYTHON_YAQS = false
 RUN_JULIA = true
+RUN_JULIA_ANALOG_2PT = true
 
 # ==============================================================================
 # PYTHON SETUP
@@ -416,6 +417,14 @@ end
 noise_model_jl = NoiseModel(processes_jl_dicts, NUM_QUBITS)
 nm_py = mqt_noise_model.NoiseModel(processes_py, num_qubits=NUM_QUBITS)
 
+# Analog 2pt Noise Model
+processes_analog_dicts = [copy(d) for d in processes_jl_dicts]
+for d in processes_analog_dicts
+    d["unraveling"] = "unitary_2pt"
+    d["theta0"] = π/3 # Larger rotation to avoid saturation at dt=1.0
+end
+noise_model_analog = NoiseModel(processes_analog_dicts, NUM_QUBITS)
+
 
 # Qiskit Noise
 qiskit_noise_model = aer_noise.NoiseModel()
@@ -509,34 +518,49 @@ function runner_julia()
     obs = [Observable("Z_$i", ZGate(), i) for i in 1:NUM_QUBITS]
     
     # Sim Config
-    # Match time steps to layers for Simulator.jl pre-allocation
-
-
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
     
     # Run using Simulator interface
-    # This will populate obs[i].trajectories
     Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
     
-    # Extract results from trajectories
-    # We ran num_traj=1, so we take the first row of trajectories
+    # Extract results
     results = zeros(ComplexF64, length(obs), length(sim_params.times))
-    # Note: sim_params.times length might mismatch actual digital steps if not aligned
-    # But Simulator copies min length.
-    
-    # We can infer actual result length from the first observable
-    actual_len = 0
-    # Find max non-zero index? No, DigitalTJM fills it.
-    # Actually TimeEvolutionConfig creates `times` array.
-    # We should trust what's in trajectories.
-    
     for (i, o) in enumerate(obs)
         results[i, :] = o.trajectories[1, :]
     end
     
-    # results is ComplexF64 (N_obs x N_steps)
+    bond_dim = MPSModule.write_max_bond_dim(psi)
+    return real.(results), bond_dim
+end
+
+function runner_julia_analog_2pt()
+    # Init State
+    psi = MPS(NUM_QUBITS; state="zeros")
+    for i in 1:NUM_QUBITS
+        if (i-1) % 4 == 3
+            Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+        end
+    end
+    
+    # Observables
+    obs = [Observable("Z_$i", ZGate(), i) for i in 1:NUM_QUBITS]
+    
+    # Sim Config
+    evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+    
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    
+    # Run using Simulator interface with Analog Noise Model
+    Simulator.run(psi, circ_jl, sim_params, noise_model_analog; parallel=false, alg_options=evolution_options)
+    
+    # Extract results
+    results = zeros(ComplexF64, length(obs), length(sim_params.times))
+    for (i, o) in enumerate(obs)
+        results[i, :] = o.trajectories[1, :]
+    end
+    
     bond_dim = MPSModule.write_max_bond_dim(psi)
     return real.(results), bond_dim
 end
@@ -655,6 +679,16 @@ if RUN_JULIA
     end
 end
 
+if RUN_JULIA_ANALOG_2PT
+    try
+        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt")
+        results_data["Julia Analog 2pt"] = (n, mse, stag, res_mat, t_total)
+    catch e
+        println("Julia Analog 2pt Failed: $e")
+        rethrow(e)
+    end
+end
+
 
 # 6. Plotting
 # -----------
@@ -689,7 +723,7 @@ end
 
 min_len = isempty(all_lengths) ? 1 : minimum(all_lengths)
 x = 0:(min_len-1)  # Start from 0 for layer indexing
-colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r")
+colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange")
 
 for (i, site) in enumerate(SITES_TO_PLOT)
     ax = axes_array[i]
