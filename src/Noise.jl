@@ -297,20 +297,11 @@ end
 # --- Main Constructor ---
 
 function NoiseModel(processes_info::Vector{Dict{String, Any}}, num_qubits::Int; 
-                   hazard_gain::Float64=1.0, hazard_cap::Float64=0.0,
-                   gauss_M::Int=11, gauss_k::Float64=4.0)
+                   theta0::Float64=pi/2, dt::Union{Float64, Nothing}=nothing,
+                   sigma::Float64=1.0, gauss_M::Int=11, gauss_k::Float64=4.0)
     
     final_processes = Vector{AbstractNoiseProcess{C128}}()
     
-    # Grouping logic for defaults (simplified from Python)
-    # We'll just implement the per-process logic for now.
-    # Implementing full group defaults in Julia is tedious without DataFrame-like structures,
-    # but let's try to support basic "analog_auto".
-    
-    # ... (Skipping complex group default calculation for brevity unless essential. 
-    # The user provided Python code has it. I should probably try to match it if possible.)
-    
-    # Let's implement the loop.
     
     for proc in processes_info
         name = proc["name"]
@@ -324,50 +315,55 @@ function NoiseModel(processes_info::Vector{Dict{String, Any}}, num_qubits::Int;
         end
         
         # --- Unraveling ---
-        if unravel in ["projector", "unitary_2pt", "unitary_gauss", "analog_auto"]
-            
+        if unravel == "projector"
             # Local or Long Range?
             is_long_range = (length(sites) == 2 && abs(sites[2] - sites[1]) > 1)
             
-            # ... (Logic for selecting sigma/theta0 would go here) ...
-            # For now, let's assume params are provided or defaults are simple.
-            
-            if unravel == "projector"
-                if is_long_range
-                    add_projector_expansion_longrange!(final_processes, proc, num_qubits, strength)
-                else
-                    P = get_operator_from_proc(proc)
-                    add_projector_expansion!(final_processes, proc, P, strength)
-                end
-                continue
+            if is_long_range
+                add_projector_expansion_longrange!(final_processes, proc, num_qubits, strength)
+            else
+                P = get_operator_from_proc(proc)
+                add_projector_expansion!(final_processes, proc, P, strength)
             end
-            
-            # For unitary_2pt and unitary_gauss, we need params.
-            # Simplified: require them in proc for now.
-            # If implementation needs full parity, I'll add the defaults logic.
-            
-            if unravel == "unitary_2pt"
-                 theta0 = get(proc, "theta0", 0.1) # Default fallback
-                 if is_long_range
-                     add_unitary_2pt_expansion_longrange!(final_processes, proc, num_qubits, strength, theta0)
-                 else
-                     P = get_operator_from_proc(proc)
-                     add_unitary_2pt_expansion!(final_processes, proc, P, strength, theta0)
+            continue
+        elseif unravel == "unitary_2pt"
+             # Get theta0 from proc or default
+             th = get(proc, "theta0", theta0)
+             
+             # Stability Check
+             # lambda = gamma / sin(theta0)^2
+             s_val = sin(th)^2
+             if s_val > 1e-12
+                 lam = strength / s_val
+                 if !isnothing(dt) && (lam * dt > 0.1)
+                     @warn "Stability Warning: theta0=$th is too small for dt=$dt (lambda*dt = $(lam*dt) > 0.1). Consider increasing theta0 or decreasing dt."
                  end
-                 continue
-            end
+             end
+
+             is_long_range = (length(sites) == 2 && abs(sites[2] - sites[1]) > 1)
+             if is_long_range
+                 add_unitary_2pt_expansion_longrange!(final_processes, proc, num_qubits, strength, th)
+             else
+                 P = get_operator_from_proc(proc)
+                 add_unitary_2pt_expansion!(final_processes, proc, P, strength, th)
+             end
+             continue
+        elseif unravel == "unitary_gauss"
+            # Get params from proc or default
+            sig = get(proc, "sigma", sigma)
+            M = get(proc, "M", gauss_M)
+            k_val = get(proc, "gauss_k", gauss_k)
             
-            if unravel == "unitary_gauss"
-                sigma = get(proc, "sigma", 1.0) # Default
-                if is_long_range
-                    add_unitary_gauss_expansion_longrange!(final_processes, proc, num_qubits, strength, sigma, gauss_M, gauss_k)
-                else
-                    P = get_operator_from_proc(proc)
-                    add_unitary_gauss_expansion!(final_processes, proc, P, strength, sigma, gauss_M, gauss_k)
-                end
-                continue
+            is_long_range = (length(sites) == 2 && abs(sites[2] - sites[1]) > 1)
+            if is_long_range
+                add_unitary_gauss_expansion_longrange!(final_processes, proc, num_qubits, strength, sig, M, k_val)
+            else
+                P = get_operator_from_proc(proc)
+                add_unitary_gauss_expansion!(final_processes, proc, P, strength, sig, M, k_val)
             end
-            
+            continue
+        elseif unravel == "analog_auto"
+             @warn "Unraveling mode 'analog_auto' is deprecated. Please choose 'unitary_2pt' or 'unitary_gauss' manually."
         end
         
         # --- Standard (Pass-through) ---

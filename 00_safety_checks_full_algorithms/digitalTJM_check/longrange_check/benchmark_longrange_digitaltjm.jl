@@ -38,7 +38,7 @@ TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Noise
-NOISE_STRENGTH = 0.01
+NOISE_STRENGTH = 0.001
 ENABLE_X_ERROR = true
 ENABLE_Y_ERROR = false
 ENABLE_Z_ERROR = false
@@ -85,6 +85,7 @@ RUN_QISKIT_MPS = true
 RUN_PYTHON_YAQS = false
 RUN_JULIA = true
 RUN_JULIA_ANALOG_2PT = true
+RUN_JULIA_ANALOG_GAUSS = true
 
 # ==============================================================================
 # PYTHON SETUP
@@ -476,6 +477,14 @@ for d in processes_analog_dicts
 end
 noise_model_analog = NoiseModel(processes_analog_dicts, NUM_QUBITS)
 
+# Analog Gauss Noise Model
+processes_gauss_dicts = [copy(d) for d in processes_jl_dicts]
+for d in processes_gauss_dicts
+    d["unraveling"] = "unitary_gauss"
+    # defaults: sigma=1.0, M=11, k=4
+end
+noise_model_gauss = NoiseModel(processes_gauss_dicts, NUM_QUBITS; sigma=1.0)
+
 
 # Qiskit Noise
 qiskit_noise_model = aer_noise.NoiseModel()
@@ -628,6 +637,36 @@ function runner_julia_analog_2pt()
     return real.(results), bond_dim
 end
 
+function runner_julia_analog_gauss()
+    # Init State
+    psi = MPS(NUM_QUBITS; state="zeros")
+    for i in 1:NUM_QUBITS
+        if (i-1) % 4 == 3
+            Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+        end
+    end
+    
+    # Observables
+    obs = [Observable("Z_$i", ZGate(), i) for i in 1:NUM_QUBITS]
+    
+    # Sim Config
+    evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+    
+    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=64, truncation_threshold=1e-6)
+    
+    # Run using Simulator interface with Gauss Noise Model
+    Simulator.run(psi, circ_jl, sim_params, noise_model_gauss; parallel=false, alg_options=evolution_options)
+    
+    # Extract results
+    results = zeros(ComplexF64, length(obs), length(sim_params.times))
+    for (i, o) in enumerate(obs)
+        results[i, :] = o.trajectories[1, :]
+    end
+    
+    bond_dim = MPSModule.write_max_bond_dim(psi)
+    return real.(results), bond_dim
+end
+
 function runner_py_yaqs()
     obs_yaqs = [mqt_params.Observable(mqt_gates.Z(), i) for i in 0:(NUM_QUBITS-1)]
     # StrongSimParams
@@ -752,6 +791,16 @@ if RUN_JULIA_ANALOG_2PT
     end
 end
 
+if RUN_JULIA_ANALOG_GAUSS
+    try
+        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss")
+        results_data["Julia Analog Gauss"] = (n, mse, stag, res_mat, t_total)
+    catch e
+        println("Julia Analog Gauss Failed: $e")
+        rethrow(e)
+    end
+end
+
 
 # 6. Plotting
 # -----------
@@ -786,7 +835,7 @@ end
 
 min_len = isempty(all_lengths) ? 1 : minimum(all_lengths)
 x = 0:(min_len-1)  # Start from 0 for layer indexing
-colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange")
+colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange", "Julia Analog Gauss"=>"purple")
 
 for (i, site) in enumerate(SITES_TO_PLOT)
     ax = axes_array[i]
