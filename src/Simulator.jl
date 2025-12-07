@@ -79,14 +79,18 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
         SimulationConfigs.initialize!(obs, sim_params)
     end
 
+    all_bond_dims = Vector{Vector{Int}}(undef, sim_params.num_traj)
+
     # Parallel Loop
     if parallel && sim_params.num_traj > 1
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
         
         Threads.@threads         for i in 1:sim_params.num_traj
-            # run_digital_tjm returns (state, results)
-            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            # run_digital_tjm returns (state, results, bond_dims)
+            _, result, bond_dims = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            
+            all_bond_dims[i] = bond_dims
             
 
             if size(result, 2) != length(sim_params.times)
@@ -107,7 +111,8 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
         end
     else
         for i in 1:sim_params.num_traj
-            _, result = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            _, result, bond_dims = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            all_bond_dims[i] = bond_dims
             for (obs_idx, obs) in enumerate(sim_params.observables)
                 n_copy = min(size(result, 2), size(obs.trajectories, 2))
                 obs.trajectories[i, 1:n_copy] = result[obs_idx, 1:n_copy]
@@ -116,6 +121,7 @@ function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::T
     end
     
     SimulationConfigs.aggregate_trajectories!(sim_params)
+    return all_bond_dims
 end
 
 function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=nothing; parallel::Bool=true, kwargs...)
@@ -123,9 +129,9 @@ function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=no
     
     if isa(sim_params, TimeEvolutionConfig)
         if isa(operator_or_circuit, MPO)
-            _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
+            return _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         elseif isa(operator_or_circuit, DigitalCircuit)
-            _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
+            return _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         else
              error("Simulation requires MPO (Analog) or DigitalCircuit (Digital).")
         end

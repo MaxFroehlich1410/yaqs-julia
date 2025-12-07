@@ -340,12 +340,14 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     end
     
     results = zeros(ComplexF64, num_obs, num_steps)
+    bond_dims = zeros(Int, num_steps)
     current_meas_idx = 1
     
     function measure!(idx)
         for (i, obs) in enumerate(sim_params.observables)
             results[i, idx] = SimulationConfigs.expect(state, obs)
         end
+        bond_dims[idx] = MPSModule.write_max_bond_dim(state)
     end
     
     if 0 in sample_indices
@@ -386,7 +388,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         measure!(1)
     end
     
-    return state, results
+    return state, results, bond_dims
 end
 
 end # module

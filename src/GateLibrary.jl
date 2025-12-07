@@ -173,6 +173,19 @@ matrix(::CZGate) = SMatrix{4,4,ComplexF64}(
     0,0,1,0,
     0,0,0,-1
 )
+# Generator: π/4 * (I-Z) ⊗ (I-Z)
+# CZ = exp(-i π/4 (I-Z)⊗(I-Z))
+# The term (I-Z)⊗(I-Z) acts as:
+# |00>: (1-1)(1-1) = 0
+# |01>: (1-1)(1-(-1)) = 0
+# |10>: (1-(-1))(1-1) = 0
+# |11>: (1-(-1))(1-(-1)) = 4
+# So exp(-i π/4 * 4) = exp(-i π) = -1 on |11>, 1 elsewhere. Matches CZ.
+function generator(::CZGate)
+    I_minus_Z = SMatrix{2,2,ComplexF64}(0, 0, 0, 2)  # (I - Z) = [0 0; 0 2]
+    return [I_minus_Z, I_minus_Z]
+end
+hamiltonian_coeff(::CZGate) = π / 4.0
 
 struct CHGate <: AbstractGate end
 matrix(::CHGate) = SMatrix{4,4,ComplexF64}(
@@ -191,6 +204,33 @@ matrix(g::CPhaseGate) = SMatrix{4,4,ComplexF64}(
     0,0,1,0,
     0,0,0,exp(im*g.theta)
 )
+# CPhase(theta) = diag(1, 1, 1, exp(i theta))
+#               = exp(i theta/4) * exp(-i theta/4 (I-Z)⊗(I-Z))
+# The trace of the generator must be traceless for SU(4), but here we match the phase.
+# Wait, let's use the same logic as CZ.
+# CZ = diag(1,1,1,-1) = exp(-i pi/4 (I-Z)(I-Z)) (up to global phase?)
+# Let's check phase for CZ:
+# exp(-i pi/4 * 0) = 1
+# exp(-i pi/4 * 4) = -1. Correct.
+#
+# For CPhase(theta):
+# We want diag(1,1,1, exp(i theta)).
+# Using generator G = (I-Z)⊗(I-Z). Eigenvalues: 0, 0, 0, 4.
+# exp(-i alpha * G) -> 1, 1, 1, exp(-4i alpha).
+# Set -4 alpha = theta => alpha = -theta/4.
+# So coeff = -theta/4.
+# Wait, standard convention here is exp(-i * coeff * G).
+# So coeff should be theta/4 and we need a sign change in G or coeff?
+# If we use G=(I-Z)(I-Z), eigenvalues are {0,0,0,4}.
+# exp(-i c * 4) = exp(i theta) => -4c = theta => c = -theta/4.
+#
+# But usually we define positive coeff. Let's use G = -(I-Z)(I-Z)?
+# No, let's just return negative coeff.
+function generator(::CPhaseGate)
+    I_minus_Z = SMatrix{2,2,ComplexF64}(0, 0, 0, 2)
+    return [I_minus_Z, I_minus_Z]
+end
+hamiltonian_coeff(g::CPhaseGate) = -g.theta / 4.0
 
 struct SWAPGate <: AbstractGate end
 matrix(::SWAPGate) = SMatrix{4,4,ComplexF64}(

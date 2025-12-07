@@ -24,7 +24,7 @@ using .Yaqs.CircuitIngestion
 # Select Circuit: 
 # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", 
 #          "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "Ising"
+CIRCUIT_NAME = "XY"
 
 # Determine Base Model and Flags
 periodic = false
@@ -61,24 +61,24 @@ else
 end
 
 # Simulation Size
-NUM_QUBITS = 49
-NUM_LAYERS = 15
+NUM_QUBITS = 81
+NUM_LAYERS = 20
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Noise
 NOISE_STRENGTH = 0.01
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = true
+ENABLE_Y_ERROR = false
 ENABLE_Z_ERROR = false
 
 # Unraveling
-NUM_TRAJECTORIES = 100
+NUM_TRAJECTORIES = 200
 MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just performance
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
-local_mode = "TEBD" # "TEBD" or "TDVP"
-MAX_BOND_DIM = 64
+local_mode = "TDVP" # "TEBD" or "TDVP"
+MAX_BOND_DIM = 32
 
 # Model Specific Params
 # Ising
@@ -108,7 +108,7 @@ longrange_theta = π/4  # Rotation angle for the RXX gate
 # Observables
 OBSERVABLE_BASIS = "Z"
 THRESHOLD_MSE = 1e-3
-SITES_TO_PLOT = [1,2,3,4,5,6] # 1-based index, will be adjusted for Python/Plots
+SITES_TO_PLOT = [1,2,3,4,5,6,7,8,9,10,11,12] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
 RUN_QISKIT_MPS = true
@@ -123,6 +123,7 @@ RUN_JULIA_PROJECTOR = true
 # ==============================================================================
 
 sys = pyimport("sys")
+pickle = pyimport("pickle")
 # Add mqt-yaqs paths (Adjusted for 01_PaperExps location)
 mqt_yaqs_src = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src"))
 mqt_yaqs_inner = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src/mqt/yaqs"))
@@ -177,6 +178,31 @@ function compute_mse(pred_series::Vector{Float64}, exact_series::Vector{Float64}
     return mean((pred_series .- exact_series).^2)
 end
 
+function _format_float_short(value::Float64)
+    return replace(string(round(value, digits=4)), "." => "p")
+end
+
+function _build_experiment_name(num_qubits, num_layers, tau, noise_strength, mode, threshold_mse, trajectories, circuit_name, observable_basis, local_mode, longrange_mode)
+    tokens = [
+        "unraveling_eff",
+        "N$num_qubits",
+        "L$num_layers",
+        "tau$(_format_float_short(tau))",
+        "noise$(_format_float_short(noise_strength))",
+        "basis$circuit_name",
+        "obs$observable_basis",
+        "loc$(local_mode)",
+        "lr$(longrange_mode)"
+    ]
+    if mode == "DM"
+        push!(tokens, "modeDM")
+        push!(tokens, "mse$(_format_float_short(threshold_mse))")
+    else
+        push!(tokens, "traj$trajectories")
+    end
+    return join(tokens, "_")
+end
+
 # ==============================================================================
 # TRAJECTORY FINDER
 # ==============================================================================
@@ -194,7 +220,8 @@ function run_trajectories(runner_single_shot::Function,
     end
     
     cumulative_results = nothing
-    bond_dims = Int[]
+    cumulative_sq_results = nothing
+    cumulative_bond_dims = nothing
     
     final_stag = Float64[]
     final_mse = 0.0
@@ -203,14 +230,22 @@ function run_trajectories(runner_single_shot::Function,
     t_start = time()
     
     for n in 1:NUM_TRAJECTORIES
-        res_mat, bond = runner_single_shot()
+        res_mat, bond_dims = runner_single_shot()
         
+        # Initialize accumulators on first run
         if isnothing(cumulative_results)
             cumulative_results = copy(res_mat)
+            cumulative_sq_results = res_mat .^ 2
+            if !isnothing(bond_dims)
+                cumulative_bond_dims = Float64.(bond_dims)
+            end
         else
             cumulative_results .+= res_mat
+            cumulative_sq_results .+= (res_mat .^ 2)
+            if !isnothing(bond_dims) && !isnothing(cumulative_bond_dims)
+                cumulative_bond_dims .+= Float64.(bond_dims)
+            end
         end
-        push!(bond_dims, bond)
         
         # Periodic check
         if n % 10 == 0 || n == NUM_TRAJECTORIES
@@ -232,11 +267,22 @@ function run_trajectories(runner_single_shot::Function,
     t_elapsed = time() - t_start
     @printf "  Time: %.4f s (%.4f s/traj)\n" t_elapsed (t_elapsed / NUM_TRAJECTORIES)
     
+    # Averages
     avg_res = cumulative_results ./ NUM_TRAJECTORIES
+    # Variance = E[X^2] - (E[X])^2
+    avg_sq_res = cumulative_sq_results ./ NUM_TRAJECTORIES
+    var_res = avg_sq_res .- (avg_res .^ 2)
+    
+    # Bond dims average
+    avg_bond_dims = nothing
+    if !isnothing(cumulative_bond_dims)
+        avg_bond_dims = cumulative_bond_dims ./ NUM_TRAJECTORIES
+    end
+    
     T_steps = size(avg_res, 2)
     final_stag = [staggered_magnetization(avg_res[:, t], NUM_QUBITS) for t in 1:T_steps]
     
-    return NUM_TRAJECTORIES, final_mse, final_stag, avg_res, t_elapsed
+    return NUM_TRAJECTORIES, final_mse, final_stag, avg_res, var_res, avg_bond_dims, t_elapsed
 end
 
 # ==============================================================================
@@ -587,9 +633,6 @@ if ENABLE_Z_ERROR
 end
 
 
-
-
-
 # 3. Exact Reference
 # ------------------
 exact_stag_ref = nothing
@@ -639,9 +682,9 @@ function runner_julia()
     evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
     
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
-    sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
-    # Run using Simulator interface
-    Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
+    
+    # Run using Simulator interface. Returns vector of vectors of bond dims (one per traj)
+    bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
     
     # Extract results
     results = zeros(ComplexF64, length(obs), length(sim_params.times))
@@ -649,8 +692,10 @@ function runner_julia()
         results[i, :] = o.trajectories[1, :]
     end
     
-    bond_dim = MPSModule.write_max_bond_dim(psi)
-    return real.(results), bond_dim
+    # Take bond dims from first trajectory (since we run 1)
+    bond_dims = isnothing(bond_dims_traj) ? nothing : bond_dims_traj[1]
+    
+    return real.(results), bond_dims
 end
 
 function runner_julia_analog_2pt()
@@ -671,7 +716,7 @@ function runner_julia_analog_2pt()
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Analog Noise Model
-    Simulator.run(psi, circ_jl, sim_params, noise_model_analog; parallel=false, alg_options=evolution_options)
+    bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_analog; parallel=false, alg_options=evolution_options)
     
     # Extract results
     results = zeros(ComplexF64, length(obs), length(sim_params.times))
@@ -679,8 +724,9 @@ function runner_julia_analog_2pt()
         results[i, :] = o.trajectories[1, :]
     end
     
-    bond_dim = MPSModule.write_max_bond_dim(psi)
-    return real.(results), bond_dim
+    bond_dims = isnothing(bond_dims_traj) ? nothing : bond_dims_traj[1]
+    
+    return real.(results), bond_dims
 end
 
 function runner_julia_analog_gauss()
@@ -701,7 +747,7 @@ function runner_julia_analog_gauss()
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Gauss Noise Model
-    Simulator.run(psi, circ_jl, sim_params, noise_model_gauss; parallel=false, alg_options=evolution_options)
+    bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_gauss; parallel=false, alg_options=evolution_options)
     
     # Extract results
     results = zeros(ComplexF64, length(obs), length(sim_params.times))
@@ -709,8 +755,9 @@ function runner_julia_analog_gauss()
         results[i, :] = o.trajectories[1, :]
     end
     
-    bond_dim = MPSModule.write_max_bond_dim(psi)
-    return real.(results), bond_dim
+    bond_dims = isnothing(bond_dims_traj) ? nothing : bond_dims_traj[1]
+    
+    return real.(results), bond_dims
 end
 
 function runner_julia_projector()
@@ -731,7 +778,7 @@ function runner_julia_projector()
     sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
     
     # Run using Simulator interface with Projector Noise Model
-    Simulator.run(psi, circ_jl, sim_params, noise_model_proj; parallel=false, alg_options=evolution_options)
+    bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_proj; parallel=false, alg_options=evolution_options)
     
     # Extract results
     results = zeros(ComplexF64, length(obs), length(sim_params.times))
@@ -739,8 +786,9 @@ function runner_julia_projector()
         results[i, :] = o.trajectories[1, :]
     end
     
-    bond_dim = MPSModule.write_max_bond_dim(psi)
-    return real.(results), bond_dim
+    bond_dims = isnothing(bond_dims_traj) ? nothing : bond_dims_traj[1]
+    
+    return real.(results), bond_dims
 end
 
 function runner_py_yaqs()
@@ -792,11 +840,8 @@ function runner_py_yaqs()
         res_mat[i, :] = vals[1:expected_steps]
     end
     
-    # Python observables are created in index order 0..N-1, so res_mat[i, :] corresponds to qubit i-1 (0-based)
-    # In Julia 1-based indexing, res_mat[1, :] = qubit 0 (first qubit), res_mat[2, :] = qubit 1 (second qubit), etc.
-    # This matches Julia's indexing where obs[1] = site 1 (first qubit), so no reversal needed
-    
-    return res_mat, 0
+    # Bond dims not easily available from this interface
+    return res_mat, nothing
 end
 
 function runner_qiskit_mps()
@@ -811,23 +856,33 @@ function runner_qiskit_mps()
         num_traj=1, observable_basis=OBSERVABLE_BASIS,
         mps_options=mps_opts
     )
+    # res_tuple is (expvals, bonds, var)
     expvals = pyconvert(Matrix{Float64}, res_tuple[0])
     
-    # Prepend t=0 state
-    # Init state: |00...0> with X on i where i%4==3
-    # Z-basis expectation: |0> -> +1, |1> -> -1
+    # Parse bonds
+    bonds_dict = res_tuple[1]
+    # bonds["per_shot_per_layer_max_bond_dim"] is (shots, layers)
+    # shots=1
+    bonds_arr = pyconvert(Matrix{Int}, bonds_dict["per_shot_per_layer_max_bond_dim"])
+    # Take first shot (row 0), all layers
+    # But wait, expvals has NUM_LAYERS columns (or NUM_LAYERS+1?). run_qiskit_mps returns expvals starting from t=1.
+    # But we want to prepend t=0.
+    
+    # Prepend t=0 state to expvals
     init_vals = ones(Float64, NUM_QUBITS)
     for i in 1:NUM_QUBITS
-        # Python index i-1
         if (i-1) % 4 == 3
             init_vals[i] = -1.0 # X gate applied -> |1> -> -1
         end
     end
-    
-    # Concatenate init_vals column to expvals
     full_expvals = hcat(init_vals, expvals)
     
-    return full_expvals, 0
+    # For bonds, we have dims for layers 1..L. We should prepend t=0 dim (1).
+    bond_dims = vec(bonds_arr[1, :])
+    # Prepend 1 for t=0
+    full_bond_dims = vcat([1], bond_dims)
+    
+    return full_expvals, full_bond_dims
 end
 
 
@@ -835,19 +890,53 @@ end
 # ------------
 results_data = Dict()
 
+# Dictionaries to store detailed data for saving
+results_detailed = Dict()
+staggered_series_by_method = Dict()
+local_expvals_by_method = Dict()
+bond_data_for_plot = Dict()
+variance_data_for_plot = Dict()
+
+function process_results(name, n, mse, stag, avg_res, var_res, avg_bonds, t_total)
+    results_detailed[name] = Dict(
+        "trajectories" => n,
+        "mse" => mse,
+        "staggered_magnetization" => stag,
+        "local_expvals" => avg_res, # stores matrix (qubits x time)
+        "variance" => var_res,
+        "bonds" => avg_bonds,
+        "time" => t_total
+    )
+    staggered_series_by_method[name] = stag
+    local_expvals_by_method[name] = avg_res # Just store the whole matrix
+    
+    if !isnothing(avg_bonds)
+        bond_data_for_plot[name] = avg_bonds
+    end
+    
+    if !isnothing(var_res)
+        # Store full variance matrix (qubits x time)
+        variance_data_for_plot[name] = var_res
+    end
+    
+    # For plotting script compatibility (it expects result_data to have tuple)
+    results_data[name] = (n, mse, stag, avg_res, t_total)
+end
+
 if RUN_QISKIT_MPS
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_qiskit_mps, exact_stag_ref, "Qiskit MPS")
-        results_data["Qiskit MPS"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_qiskit_mps, exact_stag_ref, "Qiskit MPS")
+        process_results("Qiskit MPS", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Qiskit MPS Failed: $e")
+        # Base.showerror(stdout, e, catch_backtrace())
     end
 end
 
 if RUN_PYTHON_YAQS
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_py_yaqs, exact_stag_ref, "Python YAQS")
-        results_data["Python YAQS"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_py_yaqs, exact_stag_ref, "Python YAQS")
+        process_results("Python YAQS", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Python YAQS Failed: $e")
     end
@@ -855,59 +944,123 @@ end
 
 if RUN_JULIA
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia")
-        results_data["Julia"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia")
+        process_results("Julia", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Julia Failed: $e")
-        rethrow(e)
+        Base.showerror(stdout, e, catch_backtrace())
     end
 end
 
 if RUN_JULIA_ANALOG_2PT
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt")
-        results_data["Julia Analog 2pt"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt")
+        process_results("Julia Analog 2pt", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Julia Analog 2pt Failed: $e")
-        rethrow(e)
+        Base.showerror(stdout, e, catch_backtrace())
     end
 end
 
 if RUN_JULIA_ANALOG_GAUSS
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss")
-        results_data["Julia Analog Gauss"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss")
+        process_results("Julia Analog Gauss", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Julia Analog Gauss Failed: $e")
-        rethrow(e)
+        Base.showerror(stdout, e, catch_backtrace())
     end
 end
 
 if RUN_JULIA_PROJECTOR
     try
-        n, mse, stag, res_mat, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector")
-        results_data["Julia Projector"] = (n, mse, stag, res_mat, t_total)
+        n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector")
+        process_results("Julia Projector", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
     catch e
         println("Julia Projector Failed: $e")
-        rethrow(e)
+        Base.showerror(stdout, e, catch_backtrace())
     end
 end
 
 
-# 6. Plotting
-# -----------
-println("\nGenerating Plot...")
+# 6. Saving & Plotting
+# --------------------
+println("\nGenerating Output...")
+
+# Construct Experiment Name and Paths
+experiment_name = _build_experiment_name(
+    NUM_QUBITS, NUM_LAYERS, TAU, NOISE_STRENGTH, MODE, THRESHOLD_MSE, NUM_TRAJECTORIES, CIRCUIT_NAME, OBSERVABLE_BASIS, local_mode, longrange_mode
+)
+# Prefix filenames with "LargeSystem_" while keeping the directory name unchanged
+file_experiment_name = "LargeSystem_$(experiment_name)"
+
+parent_dir = joinpath(@__DIR__, "CTJM_interesting")
+if !isdir(parent_dir)
+    mkpath(parent_dir)
+end
+
+output_dir = joinpath(parent_dir, experiment_name)
+if !isdir(output_dir)
+    mkpath(output_dir)
+end
+
+png_path = joinpath(output_dir, "$(file_experiment_name).png")
+pkl_path = joinpath(output_dir, "$(file_experiment_name).pkl")
+
+# Data preparation for Pickle
+# We convert Julia types to Python types where necessary, but PythonCall usually handles basic types.
+# Matrices might need to be converted to numpy arrays if the Python reading script expects them.
+# The user's python script uses `pickle.load` and expects dicts/lists/numpy arrays.
+# PythonCall converts Vector to List and Matrix to numpy array automatically in many cases,
+# or we can be explicit.
+
+data_to_save = Dict{String, Any}(
+    "num_qubits" => NUM_QUBITS,
+    "num_layers" => NUM_LAYERS,
+    "tau" => TAU,
+    "noise_strength" => NOISE_STRENGTH,
+    "run_density_matrix" => (MODE == "DM"),
+    "threshold_mse" => THRESHOLD_MSE,
+    "fixed_trajectories" => NUM_TRAJECTORIES,
+    "method_names" => collect(keys(results_detailed)),
+    "results" => results_detailed,
+    "exact_stag" => exact_stag_ref,
+    "exact_local_expvals" => ref_expvals, # Matrix (qubits x time)
+    "layers" => collect(1:NUM_LAYERS),
+    "times" => collect(0:NUM_LAYERS) .* TAU,
+    "bond_data_for_plot" => bond_data_for_plot,
+    "variance_data_for_plot" => variance_data_for_plot,
+    "basis_label" => CIRCUIT_NAME,
+    "observable_basis" => OBSERVABLE_BASIS,
+    "staggered_series_by_method" => staggered_series_by_method,
+    "local_expvals_by_method" => local_expvals_by_method,
+    "local_mode" => local_mode,
+    "longrange_mode" => longrange_mode,
+    "MAX_BOND_DIM" => MAX_BOND_DIM
+)
+
+# Pickle Save
+py_data = pybuiltins.dict(data_to_save)
+py_file = pybuiltins.open(pkl_path, "wb")
+pickle.dump(py_data, py_file)
+py_file.close()
+println("Saved data to $pkl_path")
+
+
+# Plotting
 plt = pyimport("matplotlib.pyplot")
 
-num_plots = length(SITES_TO_PLOT)
-fig, axes = plt.subplots(num_plots, 1, figsize=(10, 3 * num_plots), sharex=true)
+num_site_plots = length(SITES_TO_PLOT)
+total_plots = num_site_plots + 2
+
+fig, axes = plt.subplots(total_plots, 1, figsize=(10, 3 * total_plots), sharex=true)
 
 # Handle single vs multiple axes
-axes_array = Vector{Any}(undef, num_plots)
-if num_plots == 1
+axes_array = Vector{Any}(undef, total_plots)
+if total_plots == 1
     axes_array[1] = axes
 else
-    for i in 1:num_plots
+    for i in 1:total_plots
         axes_array[i] = axes[i-1] # 0-based indexing
     end
 end
@@ -929,6 +1082,7 @@ min_len = isempty(all_lengths) ? 1 : minimum(all_lengths)
 x = 0:(min_len-1)  # Start from 0 for layer indexing
 colors = Dict("Qiskit MPS"=>"b", "Python YAQS"=>"g", "Julia"=>"r", "Julia Analog 2pt"=>"orange", "Julia Analog Gauss"=>"purple", "Julia Projector"=>"cyan")
 
+# 1. Plot Sites
 for (i, site) in enumerate(SITES_TO_PLOT)
     ax = axes_array[i]
     
@@ -951,19 +1105,48 @@ for (i, site) in enumerate(SITES_TO_PLOT)
     ax.set_ylabel("<Z>")
     ax.legend(loc="upper right", fontsize="small")
     ax.grid(true)
-    
-    if i == num_plots
-        ax.set_xlabel("Layer")
+end
+
+# 2. Plot Variance (Average across sites)
+ax_var = axes_array[num_site_plots + 1]
+for (name, data) in results_detailed
+    # data["variance"] is (num_obs x time)
+    var_res = data["variance"]
+    if !isnothing(var_res)
+        # Average over sites (dim 1)
+        # Julia array -> mean(var_res, dims=1) returns 1xTime matrix
+        # Flatten to vector
+        avg_var = vec(mean(var_res, dims=1))
+        c = get(colors, name, "k")
+        if length(avg_var) >= min_len
+            ax_var.plot(x, avg_var[1:min_len], label=name, color=c, linestyle="-", linewidth=2)
+        end
     end
 end
+ax_var.set_title("Average Local Variance")
+ax_var.set_ylabel("Var(<Z>)")
+ax_var.legend(loc="upper right", fontsize="small")
+ax_var.grid(true)
+
+# 3. Plot Bond Dimensions
+ax_bond = axes_array[num_site_plots + 2]
+for (name, data) in results_detailed
+    bonds = data["bonds"]
+    if !isnothing(bonds)
+        c = get(colors, name, "k")
+        if length(bonds) >= min_len
+            ax_bond.plot(x, bonds[1:min_len], label=name, color=c, linestyle="-", linewidth=2)
+        end
+    end
+end
+ax_bond.set_title("Average Max Bond Dimension")
+ax_bond.set_ylabel("χ")
+ax_bond.legend(loc="upper right", fontsize="small")
+ax_bond.grid(true)
+ax_bond.set_xlabel("Layer")
 
 fig.suptitle("$CIRCUIT_NAME (N=$NUM_QUBITS, Noise=$NOISE_STRENGTH, $NUM_LAYERS layers)")
 plt.tight_layout()
 
-results_dir = joinpath(@__DIR__, "results")
-if !isdir(results_dir)
-    mkpath(results_dir)
-end
-fname = joinpath(results_dir, "benchmark_unraveling_$(lowercase(CIRCUIT_NAME)).png")
-plt.savefig(fname)
-println("Plot saved to $fname")
+plt.savefig(png_path)
+println("Plot saved to $png_path")
