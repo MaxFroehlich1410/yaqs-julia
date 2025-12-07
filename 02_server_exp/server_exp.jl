@@ -34,6 +34,7 @@ MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just perform
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
 MAX_BOND_DIM = 128
+SVD_TRUNCATION_THRESHOLD = 1e-16
 
 # Model Specific Params
 # Ising
@@ -63,7 +64,7 @@ longrange_theta = π/4  # Rotation angle for the RXX gate
 # Observables
 OBSERVABLE_BASIS = "Z"
 THRESHOLD_MSE = 1e-3
-SITES_TO_PLOT = [1,2,3,4,5,6,7,8,9,10,11,12] # 1-based index, will be adjusted for Python/Plots
+SITES_TO_PLOT = [1, 16, 32, 48, 64] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
 RUN_QISKIT_MPS = true
@@ -79,7 +80,7 @@ ENABLE_Z_ERROR = false
 
 # Lists for Loop
 CIRCUIT_LIST = ["XY"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
-NOISE_STRENGTH_LIST = [0.1, 0.01, 0.001]
+NOISE_STRENGTH_LIST = [0.01]
 
 # ==============================================================================
 # PYTHON SETUP
@@ -688,7 +689,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             # Sim Config
             evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
             
-            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
+            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=SVD_TRUNCATION_THRESHOLD)
             
             # Run using Simulator interface. Returns vector of vectors of bond dims (one per traj)
             bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_jl; parallel=false, alg_options=evolution_options)
@@ -720,7 +721,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             # Sim Config
             evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
             
-            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
+            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=SVD_TRUNCATION_THRESHOLD)
             
             # Run using Simulator interface with Analog Noise Model
             bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_analog; parallel=false, alg_options=evolution_options)
@@ -751,7 +752,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             # Sim Config
             evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
             
-            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
+            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=SVD_TRUNCATION_THRESHOLD)
             
             # Run using Simulator interface with Gauss Noise Model
             bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_gauss; parallel=false, alg_options=evolution_options)
@@ -782,7 +783,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             # Sim Config
             evolution_options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
             
-            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=1e-6)
+            sim_params = TimeEvolutionConfig(obs, Float64(NUM_LAYERS); dt=1.0, num_traj=1, max_bond_dim=MAX_BOND_DIM, truncation_threshold=SVD_TRUNCATION_THRESHOLD)
             
             # Run using Simulator interface with Projector Noise Model
             bond_dims_traj = Simulator.run(psi, circ_jl, sim_params, noise_model_proj; parallel=false, alg_options=evolution_options)
@@ -804,6 +805,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             # Define MPS options
             mps_opts = pybuiltins.dict()
             mps_opts["matrix_product_state_max_bond_dimension"] = MAX_BOND_DIM
+            mps_opts["matrix_product_state_truncation_threshold"] = SVD_TRUNCATION_THRESHOLD
             
             res_tuple = mqt_simulators.run_qiskit_mps(
                 NUM_QUBITS, NUM_LAYERS, init_circuit, trotter_step, qiskit_noise_model,
@@ -937,6 +939,9 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             NUM_QUBITS, NUM_LAYERS, TAU, NOISE_STRENGTH, MODE, THRESHOLD_MSE, NUM_TRAJECTORIES, CIRCUIT_NAME, OBSERVABLE_BASIS, local_mode, longrange_mode,
             ENABLE_X_ERROR, ENABLE_Y_ERROR, ENABLE_Z_ERROR
         )
+        # Add SVD threshold to filename for clarity? Or just keep it in metadata.
+        # Let's keep filename shorter but save in metadata.
+        
         # Prefix filenames with "LargeSystem_" while keeping the directory name unchanged
         file_experiment_name = "LargeSystem_$(experiment_name)"
 
@@ -976,7 +981,8 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             "local_expvals_by_method" => local_expvals_by_method,
             "local_mode" => local_mode,
             "longrange_mode" => longrange_mode,
-            "MAX_BOND_DIM" => MAX_BOND_DIM
+            "MAX_BOND_DIM" => MAX_BOND_DIM,
+            "SVD_TRUNCATION_THRESHOLD" => SVD_TRUNCATION_THRESHOLD
         )
 
         # Pickle Save

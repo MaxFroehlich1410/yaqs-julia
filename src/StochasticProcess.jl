@@ -270,9 +270,27 @@ function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, s
         Mat = reshape(Theta_new, l_dim*2, 2*r_dim)
         F = svd(Mat)
         
-        # Keep all singular values (no truncation for jump application)
+        # Truncation logic
+        threshold = hasproperty(sim_params, :truncation_threshold) ? sim_params.truncation_threshold : 1e-12
+        max_bond = hasproperty(sim_params, :max_bond_dim) ? sim_params.max_bond_dim : typemax(Int)
+        
         U, S, Vt = F.U, F.S, F.Vt
+        
+        norm_sq = sum(abs2, S)
+        current_sum = 0.0
         rank = length(S)
+        for k in length(S):-1:1
+            current_sum += abs2(S[k])
+            if current_sum > threshold * norm_sq
+                rank = k
+                break
+            end
+        end
+        rank = clamp(rank, 1, max_bond)
+
+        U = U[:, 1:rank]
+        S = S[1:rank]
+        Vt = Vt[1:rank, :]
         
         state.tensors[s1] = reshape(U, l_dim, 2, rank)
         state.tensors[s2] = reshape(Diagonal(S)*Vt, rank, 2, r_dim)

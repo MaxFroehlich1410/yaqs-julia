@@ -115,6 +115,7 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
                         # Truncation
                         # Using params.threshold if available, else 1e-12
                         threshold = hasproperty(sim_params, :truncation_threshold) ? sim_params.truncation_threshold : (hasproperty(sim_params, :threshold) ? sim_params.threshold : 1e-12)
+                        max_bond = hasproperty(sim_params, :max_bond_dim) ? sim_params.max_bond_dim : typemax(Int)
                         
                         # Calculate kept rank
                         norm_sq = sum(abs2, S)
@@ -127,8 +128,8 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
                                 break
                             end
                         end
-                        # Ensure at least 1
-                        rank = max(1, rank)
+                        # Ensure at least 1 and at most max_bond
+                        rank = clamp(rank, 1, max_bond)
                         
                         U = U[:, 1:rank]
                         S = S[1:rank]

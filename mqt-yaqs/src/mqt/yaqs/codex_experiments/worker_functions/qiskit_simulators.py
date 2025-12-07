@@ -29,19 +29,15 @@ def collect_expectations_and_mps_bond_dims(
     include_initial: bool = True,
     mps_options: Optional[Dict[str, Any]] = None,
     observable_basis: str = "Z",
+    track_bond_dims: bool = True,
+    track_variance: bool = True,
 ) -> Dict[str, Any]:
     """
-    Collect both expectation values (Z/X/Y) and per-shot MPS bond-dimension stats with a single Aer run.
-
-    Builds one layered circuit and inserts both save_expectation_value (for specified Pauli on each qubit)
-    and save_matrix_product_state(pershot=True) after each layer. Then runs once and parses both.
+    Collect expectation values and optionally MPS bond-dimension stats / variances.
 
     Args:
-        observable_basis: "Z", "X", or "Y" - which Pauli observable to measure
-    
-    Returns a dict with keys:
-    - "expvals": np.ndarray (num_qubits, num_layers + 1 if include_initial else num_layers)
-    - "bonds": dict with per-shot/per-layer max bond dims and aggregates
+        track_bond_dims: If True, saves MPS state per shot per layer (Heavy memory usage!).
+        track_variance: If True, saves expectation values per shot (Moderate memory usage).
     """
     if num_layers <= 0:
         raise ValueError("num_layers must be >= 1")
@@ -51,72 +47,133 @@ def collect_expectations_and_mps_bond_dims(
         raise ValueError(f"observable_basis must be one of ['Z', 'X', 'Y'], got {observable_basis}")
 
     from qiskit.quantum_info import Pauli
+    from qiskit_aer.library import SetMatrixProductState
 
-    # Build a single circuit: init once, then repeat Trotter steps
-    qc = init_circuit.copy()
-    pauli_op = Pauli(observable_basis)
-    if include_initial:
-        for q in range(num_qubits):
-            # Save initial expval per-shot for stochastic variance
-            qc.save_expectation_value(pauli_op, qubits=[q], label=f"{observable_basis.lower()}_q{q}_t0", pershot=True)  # type: ignore[attr-defined]
-    for t in range(num_layers):
-        composed = qc.compose(trotter_step, qubits=range(num_qubits))
-        assert composed is not None
-        qc = composed
-        # Save Pauli observable on all qubits
-        for q in range(num_qubits):
-            qc.save_expectation_value(pauli_op, qubits=[q], label=f"{observable_basis.lower()}_q{q}_t{t+1}", pershot=True)  # type: ignore[attr-defined]
-        # Save per-shot MPS to extract bond dims
-        qc.save_matrix_product_state(pershot=True, label=_save_label(t))  # type: ignore[attr-defined]
-
-    sim = AerSimulator(method=method, noise_model=noise_model)
-    if mps_options:
-        sim.set_options(**mps_options)
-    result = sim.run(qc, shots=shots, seed_simulator=seed).result()
-
-    # Parse expectations (pershot lists) and compute means/variances
+    # Prepare storage
     T = num_layers + 1 if include_initial else num_layers
     expvals_mean = np.zeros((num_qubits, T), dtype=float)
     expvals_var = np.zeros((num_qubits, T), dtype=float)
-    col = 0
+    
+    # Store accumulated sums for mean and variance
+    # We will compute online variance: M2 = sum((x - mean)^2) ?? 
+    # Or just store sum(x) and sum(x^2).
+    # sum_x[q, t]
+    # sum_sq_x[q, t]
+    sum_x = np.zeros((num_qubits, T), dtype=float)
+    sum_sq_x = np.zeros((num_qubits, T), dtype=float)
+    
+    # Bond dims: store sum and max
+    # dims[layer]
+    bond_dim_sum = np.zeros(num_layers, dtype=float)
+    bond_dim_max = np.zeros(num_layers, dtype=int)
+    # Store simplified dims matrix to satisfy return type: (shots, layers)
+    dims_matrix = np.ones((shots, num_layers), dtype=int)
+    
+    # overall max
+    overall_max_per_shot = np.zeros(shots, dtype=int)
+    
+    # If shots > 1, we must run sequentially to save memory for large systems
+    # For small systems, we could batch, but let's prioritize robustness for now.
+    
+    sim = AerSimulator(method=method, noise_model=noise_model)
+    if mps_options is None:
+        mps_options = {}
+    # Ensure reasonable truncation to prevent explosion
+    if "matrix_product_state_truncation_threshold" not in mps_options:
+        mps_options["matrix_product_state_truncation_threshold"] = 1e-16
+    sim.set_options(**mps_options)
+
     basis_lower = observable_basis.lower()
-    if include_initial:
-        for q in range(num_qubits):
-            vals = np.asarray(result.data(0)[f"{basis_lower}_q{q}_t0"], dtype=float)
-            expvals_mean[q, 0] = float(np.mean(vals))
-            expvals_var[q, 0] = float(np.var(vals))
-        col = 1
-    for t in range(num_layers):
-        for q in range(num_qubits):
-            vals = np.asarray(result.data(0)[f"{basis_lower}_q{q}_t{t+1}"], dtype=float)
-            expvals_mean[q, col + t] = float(np.mean(vals))
-            expvals_var[q, col + t] = float(np.var(vals))
+    pauli_op = Pauli(observable_basis)
 
-    # Parse MPS snapshots → per-shot bond dims per layer
-    labels: List[str] = [_save_label(t) for t in range(num_layers)]
-    dims_per_shot_per_layer: List[List[int]] = [[1 for _ in range(num_layers)] for _ in range(shots)]
-    for layer_idx, label in enumerate(labels):
-        mps_list = result.data(0)[label]
-        if not isinstance(mps_list, (list, tuple)) or len(mps_list) != shots:
-            raise RuntimeError(f"Expected per-shot MPS list for {label} of length {shots}")
-        for shot_idx, state_shot in enumerate(mps_list):
-            dims_per_shot_per_layer[shot_idx][layer_idx] = _extract_max_bond_dim_from_saved_mps_state(state_shot)
+    for shot_idx in range(shots):
+        # 1. Run Initialization
+        qc_init = init_circuit.copy()
+        
+        # Save t=0 stats
+        if include_initial:
+            for q in range(num_qubits):
+                qc_init.save_expectation_value(pauli_op, qubits=[q], label=f"obs_q{q}", pershot=False)  # type: ignore[attr-defined]
+        
+        # If we need to continue, we must save the state
+        qc_init.save_matrix_product_state(label="mps_state", pershot=False)  # type: ignore[attr-defined]
+        
+        res_init = sim.run(qc_init, shots=1).result()
+        
+        if include_initial:
+            for q in range(num_qubits):
+                val = float(res_init.data(0)[f"obs_q{q}"])
+                sum_x[q, 0] += val
+                sum_sq_x[q, 0] += val**2
+        
+        # Get MPS state to feed into next layer
+        current_mps_state = res_init.data(0)["mps_state"]
+        
+        # 2. Loop Layers
+        shot_max_bond = 0
+        
+        for t in range(num_layers):
+            qc_step = QuantumCircuit(num_qubits)
+            qc_step.append(SetMatrixProductState(current_mps_state), range(num_qubits))  # type: ignore[arg-type]
+            qc_step.compose(trotter_step, inplace=True)
+            
+            # Measurements
+            for q in range(num_qubits):
+                qc_step.save_expectation_value(pauli_op, qubits=[q], label=f"obs_q{q}", pershot=False)  # type: ignore[attr-defined]
+            
+            # Save state for next step and bond dim check
+            qc_step.save_matrix_product_state(label="mps_state", pershot=False)  # type: ignore[attr-defined]
+            
+            res_step = sim.run(qc_step, shots=1).result()
+            
+            # Record Observables
+            time_idx = (t + 1) if include_initial else t
+            for q in range(num_qubits):
+                val = float(res_step.data(0)[f"obs_q{q}"])
+                sum_x[q, time_idx] += val
+                sum_sq_x[q, time_idx] += val**2
+                
+            # Record Bond Dim
+            current_mps_state = res_step.data(0)["mps_state"]
+            
+            # Default to 1 if not tracking, but we still need state for next step
+            # If track_bond_dims is False, we just take 1
+            b_dim = 1
+            if track_bond_dims:
+                b_dim = _extract_max_bond_dim_from_saved_mps_state(current_mps_state)
+            
+            dims_matrix[shot_idx, t] = b_dim
+            bond_dim_sum[t] += b_dim
+            bond_dim_max[t] = max(bond_dim_max[t], b_dim)
+            shot_max_bond = max(shot_max_bond, b_dim)
+        
+        overall_max_per_shot[shot_idx] = shot_max_bond
 
-    dims_array = np.asarray(dims_per_shot_per_layer, dtype=int)
-    per_layer_mean = dims_array.mean(axis=0)
-    per_layer_max = dims_array.max(axis=0)
-    overall_max_per_shot = dims_array.max(axis=1)
-
+    # Compute Statistics
+    expvals_mean = sum_x / shots
+    # Var[x] = E[x^2] - (E[x])^2.
+    # But wait, sum_sq_x is sum of squares of EXPECTATION values (which are means of 1 shot).
+    # Since shots=1 per run, the "expectation value" returned is just the measurement outcome (eigenvalue) 
+    # or the exact expectation w.r.t the trajectory state?
+    # With Aer noisy simulation + save_expectation_value on 1 shot, it returns <psi|P|psi>.
+    # So yes, it's the quantum expectation of that trajectory.
+    # The variance across trajectories is correct.
+    expvals_var = (sum_sq_x / shots) - (expvals_mean ** 2)
+    
+    # Bond stats
+    per_layer_mean = bond_dim_sum / shots
+    
     bonds = {
-        "per_shot_per_layer_max_bond_dim": dims_array,
+        "per_shot_per_layer_max_bond_dim": dims_matrix,
         "per_layer_mean_across_shots": per_layer_mean,
-        "per_layer_max_across_shots": per_layer_max,
+        "per_layer_max_across_shots": bond_dim_max,
         "overall_max_per_shot": overall_max_per_shot,
-        "labels": labels,
+        "labels": [_save_label(t) for t in range(num_layers)],
         "shots": shots,
         "num_qubits": num_qubits,
         "num_layers": num_layers,
     }
+    
     return {"expvals": expvals_mean, "expvals_var": expvals_var, "bonds": bonds, "observable_basis": observable_basis}
 
 
@@ -150,14 +207,23 @@ def run_qiskit_mps(
     method: str = "matrix_product_state",
     mps_options: Optional[Dict[str, Any]] = None,
     observable_basis: str = "Z",
+    track_bond_dims: Optional[bool] = None,
+    track_variance: Optional[bool] = None,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
     """
     Run Qiskit MPS on a layered circuit and return expectation values and bond stats.
-
-    Returns:
-      - expvals: np.ndarray shape (num_qubits, num_layers)
-      - bonds: dict with per-shot/per-layer max bond dims and aggregates
+    
+    If track_bond_dims is None, it defaults to False if num_qubits > 30 to avoid memory errors.
+    If track_variance is None, it defaults to True.
     """
+    
+    # Auto-disable expensive tracking for large systems to avoid 2TB memory error
+    if track_bond_dims is None:
+        track_bond_dims = (num_qubits <= 30)
+        
+    if track_variance is None:
+        track_variance = True
+
     combined = collect_expectations_and_mps_bond_dims(
         init_circuit,
         trotter_step,
@@ -170,6 +236,8 @@ def run_qiskit_mps(
         include_initial=True,
         mps_options=mps_options,
         observable_basis=observable_basis,
+        track_bond_dims=track_bond_dims,
+        track_variance=track_variance,
     )
     expvals = combined["expvals"][:, 1:]
     # include initial variance at t=0 for the variance plot
