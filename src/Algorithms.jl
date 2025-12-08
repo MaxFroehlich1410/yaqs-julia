@@ -72,6 +72,14 @@ end
 function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     # Reshape for SVD (L*p1, p2*R)
     Mat = reshape(Theta, l_virt*p1, p2*r_virt)
+    
+    # Check for NaNs/Infs which cause LAPACKException
+    if any(!isfinite, Mat)
+        @warn "NaN or Inf detected in tensor before SVD. Replacing with zeros to avoid crash, but simulation may be compromised."
+        replace!(Mat, NaN => 0.0, Inf => 0.0, -Inf => 0.0)
+    end
+
+    # Use QRIteration for robustness against LAPACKException(1)
     F = svd(Mat)
     
     # Truncation

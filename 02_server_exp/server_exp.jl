@@ -22,8 +22,8 @@ using .Yaqs.CircuitIngestion
 # ==============================================================================
 
 # Simulation Size
-NUM_QUBITS = 64
-NUM_LAYERS = 30
+NUM_QUBITS = 4
+NUM_LAYERS = 20
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
@@ -64,10 +64,10 @@ longrange_theta = π/4  # Rotation angle for the RXX gate
 # Observables
 OBSERVABLE_BASIS = "Z"
 THRESHOLD_MSE = 1e-3
-SITES_TO_PLOT = [1, 16, 32, 48, 64] # 1-based index, will be adjusted for Python/Plots
+SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(Int, 3*NUM_QUBITS/4), NUM_QUBITS] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
-RUN_QISKIT_MPS = true
+RUN_QISKIT_MPS = false
 RUN_JULIA = true
 RUN_JULIA_ANALOG_2PT = true
 RUN_JULIA_ANALOG_GAUSS = true
@@ -80,7 +80,7 @@ ENABLE_Z_ERROR = false
 
 # Lists for Loop
 CIRCUIT_LIST = ["XY"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
-NOISE_STRENGTH_LIST = [0.01]
+NOISE_STRENGTH_LIST = [0.1, 0.01, 0.01]
 
 # ==============================================================================
 # PYTHON SETUP
@@ -248,13 +248,21 @@ end
 
 function run_trajectories(runner_single_shot::Function, 
                           exact_stag::Union{Vector{Float64}, Nothing}, 
-                          label::String)
+                          label::String,
+                          output_dir::String,
+                          file_prefix::String;
+                          batch_size::Int=10)
     
     println("\n--- Running $label ---")
     
     cumulative_results = nothing
     cumulative_sq_results = nothing
     cumulative_bond_dims = nothing
+    
+    # Batch storage
+    batch_results = []
+    batch_bonds = []
+    batch_count = 0
     
     final_stag = Float64[]
     final_mse = 0.0
@@ -264,6 +272,12 @@ function run_trajectories(runner_single_shot::Function,
     
     for n in 1:NUM_TRAJECTORIES
         res_mat, bond_dims = runner_single_shot()
+
+        # Add to batch
+        push!(batch_results, res_mat)
+        if !isnothing(bond_dims)
+            push!(batch_bonds, bond_dims)
+        end
         
         # Initialize accumulators on first run
         if isnothing(cumulative_results)
@@ -278,6 +292,38 @@ function run_trajectories(runner_single_shot::Function,
             if !isnothing(bond_dims) && !isnothing(cumulative_bond_dims)
                 cumulative_bond_dims .+= Float64.(bond_dims)
             end
+        end
+
+        # Check for batch save
+        if length(batch_results) >= batch_size || n == NUM_TRAJECTORIES
+             batch_count += 1
+             # Save batch
+             safe_label = replace(label, " " => "_")
+             fname = "$(file_prefix)_$(safe_label)_batch$(batch_count).pkl"
+             fpath = joinpath(output_dir, fname)
+             
+             data_to_save = Dict{String, Any}(
+                "results" => batch_results,
+                "bonds" => batch_bonds,
+                "batch_index" => batch_count,
+                "trajectories_in_batch" => length(batch_results),
+                "method" => label
+             )
+             
+             # Save using Python pickle
+             try
+                 py_data = pybuiltins.dict(data_to_save)
+                 py_file = pybuiltins.open(fpath, "wb")
+                 pickle.dump(py_data, py_file)
+                 py_file.close()
+                 # println("    Saved batch $batch_count to $fname")
+             catch e
+                 println("    Error saving batch $batch_count: $e")
+             end
+             
+             # Clear batch
+             empty!(batch_results)
+             empty!(batch_bonds)
         end
         
         # Periodic check
@@ -322,10 +368,7 @@ end
 # MAIN EXECUTION LOOP
 # ==============================================================================
 
-# Perform Warmup Once
-if RUN_JULIA || RUN_JULIA_ANALOG_2PT || RUN_JULIA_ANALOG_GAUSS || RUN_JULIA_PROJECTOR
-    perform_warmup(local_mode, longrange_mode)
-end
+# Warmup moved inside loop before Julia execution to handle long Qiskit delays
 
 for CIRCUIT_NAME in CIRCUIT_LIST
     for NOISE_STRENGTH in NOISE_STRENGTH_LIST
@@ -368,6 +411,25 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         end
 
         println("Configuration: Circuit=$CIRCUIT_NAME, N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH")
+
+        # Construct Experiment Name and Paths (Moved up for incremental saving)
+        experiment_name = _build_experiment_name(
+            NUM_QUBITS, NUM_LAYERS, TAU, NOISE_STRENGTH, MODE, THRESHOLD_MSE, NUM_TRAJECTORIES, CIRCUIT_NAME, OBSERVABLE_BASIS, local_mode, longrange_mode,
+            ENABLE_X_ERROR, ENABLE_Y_ERROR, ENABLE_Z_ERROR
+        )
+        
+        # Prefix filenames with "LargeSystem_" while keeping the directory name unchanged
+        file_experiment_name = "LargeSystem_$(experiment_name)"
+
+        parent_dir = joinpath(@__DIR__, "CTJM_interesting")
+        if !isdir(parent_dir)
+            mkpath(parent_dir)
+        end
+
+        output_dir = joinpath(parent_dir, experiment_name)
+        if !isdir(output_dir)
+            mkpath(output_dir)
+        end
 
         # 1. Prepare Circuits
         # -------------------
@@ -881,7 +943,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if RUN_QISKIT_MPS
             try
-                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_qiskit_mps, exact_stag_ref, "Qiskit MPS")
+                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_qiskit_mps, exact_stag_ref, "Qiskit MPS", output_dir, file_experiment_name)
                 process_results("Qiskit MPS", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
             catch e
                 println("Qiskit MPS Failed: $e")
@@ -889,9 +951,15 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
         end
 
+        # Perform Warmup Just Before Julia Runs (if not already done or if stale)
+        # Even if done at top, re-running here ensures JIT is fresh/kept if Qiskit took long
+        if RUN_JULIA || RUN_JULIA_ANALOG_2PT || RUN_JULIA_ANALOG_GAUSS || RUN_JULIA_PROJECTOR
+            perform_warmup(local_mode, longrange_mode)
+        end
+
         if RUN_JULIA
             try
-                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia")
+                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia", output_dir, file_experiment_name)
                 process_results("Julia", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
             catch e
                 println("Julia Failed: $e")
@@ -901,7 +969,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if RUN_JULIA_ANALOG_2PT
             try
-                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt")
+                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt", output_dir, file_experiment_name)
                 process_results("Julia Analog 2pt", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
             catch e
                 println("Julia Analog 2pt Failed: $e")
@@ -911,7 +979,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if RUN_JULIA_ANALOG_GAUSS
             try
-                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss")
+                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss", output_dir, file_experiment_name)
                 process_results("Julia Analog Gauss", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
             catch e
                 println("Julia Analog Gauss Failed: $e")
@@ -921,7 +989,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if RUN_JULIA_PROJECTOR
             try
-                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector")
+                n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector", output_dir, file_experiment_name)
                 process_results("Julia Projector", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
             catch e
                 println("Julia Projector Failed: $e")
@@ -935,26 +1003,8 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         println("\nGenerating Output...")
 
         # Construct Experiment Name and Paths
-        experiment_name = _build_experiment_name(
-            NUM_QUBITS, NUM_LAYERS, TAU, NOISE_STRENGTH, MODE, THRESHOLD_MSE, NUM_TRAJECTORIES, CIRCUIT_NAME, OBSERVABLE_BASIS, local_mode, longrange_mode,
-            ENABLE_X_ERROR, ENABLE_Y_ERROR, ENABLE_Z_ERROR
-        )
-        # Add SVD threshold to filename for clarity? Or just keep it in metadata.
-        # Let's keep filename shorter but save in metadata.
+        # (Moved to start of loop for incremental saving)
         
-        # Prefix filenames with "LargeSystem_" while keeping the directory name unchanged
-        file_experiment_name = "LargeSystem_$(experiment_name)"
-
-        parent_dir = joinpath(@__DIR__, "CTJM_interesting")
-        if !isdir(parent_dir)
-            mkpath(parent_dir)
-        end
-
-        output_dir = joinpath(parent_dir, experiment_name)
-        if !isdir(output_dir)
-            mkpath(output_dir)
-        end
-
         png_path = joinpath(output_dir, "$(file_experiment_name).png")
         pkl_path = joinpath(output_dir, "$(file_experiment_name).pkl")
 

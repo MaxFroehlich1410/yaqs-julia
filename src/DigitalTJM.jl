@@ -378,11 +378,18 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
                 end
             end
         end
+
+        # Progress logging (overwrite line with \r)
+        current_bond = MPSModule.write_max_bond_dim(state)
+        print("\r\tLayer $l_idx/$num_layers | Max Bond: $current_bond")
+        flush(stdout)
+
         if l_idx in sample_indices
             measure!(current_meas_idx)
             current_meas_idx += 1
         end
     end
+    print("\n") # Newline after finishing all layers of this trajectory
     
     if isempty(sample_indices) && num_obs > 0
         measure!(1)
