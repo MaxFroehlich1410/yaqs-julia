@@ -22,7 +22,7 @@ using .Yaqs.CircuitIngestion
 # ==============================================================================
 
 # Simulation Size
-NUM_QUBITS = 4
+NUM_QUBITS = 25
 NUM_LAYERS = 20
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
@@ -80,7 +80,7 @@ ENABLE_Z_ERROR = false
 
 # Lists for Loop
 CIRCUIT_LIST = ["XY"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
-NOISE_STRENGTH_LIST = [0.1, 0.01, 0.01]
+NOISE_STRENGTH_LIST = [0.1]
 
 # ==============================================================================
 # PYTHON SETUP
