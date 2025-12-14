@@ -1,3 +1,8 @@
+using Pkg
+# Ensure this script runs with the repo environment (and its CondaPkg.toml) even if invoked as:
+#   julia 02_server_exp/server_exp.jl
+Pkg.activate(joinpath(@__DIR__, ".."); io=devnull)
+
 using LinearAlgebra
 using PythonCall
 using Random
@@ -22,18 +27,18 @@ using .Yaqs.CircuitIngestion
 # ==============================================================================
 
 # Simulation Size
-NUM_QUBITS = 25
-NUM_LAYERS = 20
+NUM_QUBITS = 127
+NUM_LAYERS = 5
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Unraveling
-NUM_TRAJECTORIES = 200
+NUM_TRAJECTORIES = 20
 MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just performance
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
-MAX_BOND_DIM = 128
+MAX_BOND_DIM = 64
 SVD_TRUNCATION_THRESHOLD = 1e-16
 
 # Model Specific Params
@@ -68,18 +73,33 @@ SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(In
 
 # Flags
 RUN_QISKIT_MPS = false
-RUN_JULIA = true
-RUN_JULIA_ANALOG_2PT = true
-RUN_JULIA_ANALOG_GAUSS = true
+RUN_JULIA = false
+RUN_JULIA_ANALOG_2PT = false
+RUN_JULIA_ANALOG_GAUSS = false
 RUN_JULIA_PROJECTOR = true
+
+# ------------------------------------------------------------------------------
+# IBM 127q "kicked Ising" benchmark (Kim et al., Nature 618, 500–505 (2023))
+# Paper: https://doi.org/10.1038/s41586-023-06096-3
+#
+# NOTE: This script can run the circuit in Qiskit Aer (MPS) directly. Julia MPS
+# simulation of the heavy-hex 2D connectivity on a 1D chain ordering is typically
+# prohibitively expensive at N=127 (many hardware-neighbor couplings become long-range).
+# ------------------------------------------------------------------------------
+IBM_BACKEND_NAME = "FakeKyiv"     # requires `qiskit_ibm_runtime.fake_provider`
+IBM_THETA_H = 0.7                # RX kick angle (theta_h)
+IBM_THETA_J = -π/2               # RZZ coupling angle (theta_J); paper uses -π/2
+IBM_ADD_BARRIERS = true          # barrier after each step (used as sampling delimiter)
+IBM_INIT_X_EVERY_4 = false       # if true: apply X on qubits 4,8,12,... (1-based)
+FORCE_JULIA_ON_IBM127 = true    # set true only if you really want to attempt Julia MPS on heavy-hex (usually impractical)
 
 # Error Flags
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = false
-ENABLE_Z_ERROR = false
+ENABLE_Y_ERROR = true
+ENABLE_Z_ERROR = true
 
 # Lists for Loop
-CIRCUIT_LIST = ["XY"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test"
+CIRCUIT_LIST = ["IBM127_kicked_ising"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
 NOISE_STRENGTH_LIST = [0.1]
 
 # ==============================================================================
@@ -91,12 +111,16 @@ pickle = pyimport("pickle")
 # Add mqt-yaqs paths (Adjusted for 01_PaperExps location)
 mqt_yaqs_src = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src"))
 mqt_yaqs_inner = abspath(joinpath(@__DIR__, "../../mqt-yaqs/src/mqt/yaqs"))
+server_exp_dir = abspath(@__DIR__)
 
 if !(mqt_yaqs_src in sys.path)
     sys.path.insert(0, mqt_yaqs_src)
 end
 if !(mqt_yaqs_inner in sys.path)
     sys.path.insert(0, mqt_yaqs_inner)
+end
+if !(server_exp_dir in sys.path)
+    sys.path.insert(0, server_exp_dir)
 end
 
 qiskit = pyimport("qiskit")
@@ -112,6 +136,16 @@ catch e
     println("Error importing Python modules: ", e)
     println("Sys path: ", sys.path)
     rethrow(e)
+end
+
+# Optional: IBM 127q kicked-Ising circuit generator (local file in `02_server_exp/`).
+# Keep this optional so other experiment modes don't require Qiskit Runtime fake backends.
+global ibm_127q_circuit = nothing
+global ibm_127q_circuit_import_error = nothing
+try
+    global ibm_127q_circuit = pyimport("ibm_127q_circuit")
+catch e
+    global ibm_127q_circuit_import_error = e
 end
 
 # ==============================================================================
@@ -406,11 +440,32 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         elseif CIRCUIT_NAME == "longrange_test"
             BASE_MODEL = "longrange_test"
             long_range_gates = true
+        elseif CIRCUIT_NAME == "IBM127_kicked_ising"
+            BASE_MODEL = "IBM127_kicked_ising"
         else
             error("Unknown CIRCUIT_NAME: $CIRCUIT_NAME")
         end
 
         println("Configuration: Circuit=$CIRCUIT_NAME, N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH")
+
+        # For IBM127 heavy-hex kicked-Ising, Julia MPS evolution on a 1D chain ordering is typically
+        # prohibitively expensive / unstable (most hardware-neighbor gates become long-range).
+        # Default behavior: run only the Qiskit MPS baseline unless explicitly forced.
+        run_qiskit_mps = RUN_QISKIT_MPS
+        run_julia = RUN_JULIA
+        run_julia_analog_2pt = RUN_JULIA_ANALOG_2PT
+        run_julia_analog_gauss = RUN_JULIA_ANALOG_GAUSS
+        run_julia_projector = RUN_JULIA_PROJECTOR
+
+        if BASE_MODEL == "IBM127_kicked_ising" && !FORCE_JULIA_ON_IBM127
+            run_julia = false
+            run_julia_analog_2pt = false
+            run_julia_analog_gauss = false
+            run_julia_projector = false
+            if !run_qiskit_mps
+                run_qiskit_mps = true
+            end
+        end
 
         # Construct Experiment Name and Paths (Moved up for incremental saving)
         experiment_name = _build_experiment_name(
@@ -436,6 +491,8 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         println("Building Circuits ($CIRCUIT_NAME)...")
 
         # Julia Circuit Construction
+        # NOTE: This is built regardless of RUN_JULIA flags to keep the script structure simple.
+        # For IBM127 heavy-hex, this circuit is extremely expensive to simulate with a 1D MPS.
         circ_jl = DigitalCircuit(NUM_QUBITS)
         # Initial Barrier
         add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
@@ -486,15 +543,56 @@ for CIRCUIT_NAME in CIRCUIT_LIST
                 add_gate!(circ_jl, RzzGate(longrange_theta), [NUM_QUBITS, 1])
                 add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
             end
+        elseif BASE_MODEL == "IBM127_kicked_ising"
+            if isnothing(ibm_127q_circuit)
+                err_str = isnothing(ibm_127q_circuit_import_error) ? "unknown (exception was not captured)" :
+                          sprint(showerror, ibm_127q_circuit_import_error)
+                msg = "CIRCUIT_NAME=IBM127_kicked_ising requested, but `ibm_127q_circuit.py` could not be imported.\n" *
+                      "Most likely Python deps are missing in the PythonCall environment.\n" *
+                      "Underlying error: $err_str"
+                error(msg)
+            end
+            # Build the heavy-hex edge-colored schedule from the backend, then mirror the Python circuit:
+            # for each step: RX(theta_h) on all qubits, then RZZ(theta_J) on all neighbor edges (3 disjoint layers),
+            # then a barrier used as SAMPLE_OBSERVABLES delimiter.
+            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
+            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
+            backend = backend_ctor()
+            n_backend = pyconvert(Int, backend.num_qubits)
+            if n_backend != NUM_QUBITS
+                error("IBM backend qubit count ($n_backend) != NUM_QUBITS ($NUM_QUBITS). Set NUM_QUBITS accordingly.")
+            end
+            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
+            for _ in 1:NUM_LAYERS
+                for q in 1:NUM_QUBITS
+                    add_gate!(circ_jl, RxGate(IBM_THETA_H), [q])
+                end
+                for layer in layers
+                    for edge in layer
+                        # edge is a 2-tuple (i, j), 0-based
+                        i0 = pyconvert(Int, edge[0])
+                        j0 = pyconvert(Int, edge[1])
+                        add_gate!(circ_jl, RzzGate(IBM_THETA_J), [i0 + 1, j0 + 1])
+                    end
+                end
+                if IBM_ADD_BARRIERS
+                    add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+                end
+            end
         else
             error("Unknown BASE_MODEL: $BASE_MODEL")
         end
 
         # Python Circuit Construction
         init_circuit = qiskit.QuantumCircuit(NUM_QUBITS)
-        for i in 0:(NUM_QUBITS-1)
-            if i % 4 == 3
-                init_circuit.x(i)
+        # Default init pattern used across this script: apply X on every 4th qubit (0-based indices 3,7,11,...)
+        # For IBM127_kicked_ising you likely want the all-zero state; controlled via IBM_INIT_X_EVERY_4.
+        do_x_every_4 = (BASE_MODEL == "IBM127_kicked_ising") ? IBM_INIT_X_EVERY_4 : true
+        if do_x_every_4
+            for i in 0:(NUM_QUBITS-1)
+                if i % 4 == 3
+                    init_circuit.x(i)
+                end
             end
         end
 
@@ -525,12 +623,52 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
             local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
             trotter_step = local_circuit_lib.longrange_test_circuit(NUM_QUBITS, longrange_theta)
+        elseif BASE_MODEL == "IBM127_kicked_ising"
+            if isnothing(ibm_127q_circuit)
+                err_str = isnothing(ibm_127q_circuit_import_error) ? "unknown (exception was not captured)" :
+                          sprint(showerror, ibm_127q_circuit_import_error)
+                msg = "CIRCUIT_NAME=IBM127_kicked_ising requested, but `ibm_127q_circuit.py` could not be imported.\n" *
+                      "Underlying error: $err_str"
+                error(msg)
+            end
+            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
+            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
+            backend = backend_ctor()
+            trotter_step = ibm_127q_circuit.build_untwirled_kicked_ising_circuit(
+                backend,
+                1,
+                IBM_THETA_H,
+                theta_J=IBM_THETA_J,
+                add_barriers=IBM_ADD_BARRIERS
+            )
         end
 
 
         # 2. Noise Setup
         # --------------
         processes_jl_dicts = Vector{Dict{String, Any}}()
+
+        # For IBM127_kicked_ising, define the 2-qubit coupling set from the backend edges,
+        # so the Julia-side crosstalk processes match the circuit connectivity.
+        ibm_edges1 = nothing  # Vector{Tuple{Int,Int}} with 1-based indices
+        if BASE_MODEL == "IBM127_kicked_ising"
+            if isnothing(ibm_127q_circuit)
+                error("IBM127_kicked_ising requested, but `ibm_127q_circuit.py` was not importable.")
+            end
+            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
+            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
+            backend = backend_ctor()
+            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
+            edge_set = Set{Tuple{Int,Int}}()
+            for layer in layers
+                for edge in layer
+                    i0 = pyconvert(Int, edge[0])
+                    j0 = pyconvert(Int, edge[1])
+                    push!(edge_set, (i0 + 1, j0 + 1))
+                end
+            end
+            ibm_edges1 = collect(edge_set)
+        end
 
         if ENABLE_X_ERROR
             for i in 1:NUM_QUBITS
@@ -543,12 +681,22 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
             
             # Add Crosstalk XX on pairs
-            for i in 1:(NUM_QUBITS-1)
-                d = Dict{String, Any}()
-                d["name"] = "crosstalk_xx"
-                d["sites"] = [i, i+1]
-                d["strength"] = NOISE_STRENGTH
-                push!(processes_jl_dicts, d)
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i, j) in ibm_edges1
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_xx"
+                    d["sites"] = [i, j]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_xx"
+                    d["sites"] = [i, i+1]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
             end
 
             # Add Crosstalk XX on long-range gate
@@ -573,12 +721,22 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
             
             # Add Crosstalk YY on pairs
-            for i in 1:(NUM_QUBITS-1)
-                d = Dict{String, Any}()
-                d["name"] = "crosstalk_yy"
-                d["sites"] = [i, i+1]
-                d["strength"] = NOISE_STRENGTH
-                push!(processes_jl_dicts, d)
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i, j) in ibm_edges1
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_yy"
+                    d["sites"] = [i, j]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_yy"
+                    d["sites"] = [i, i+1]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
             end
 
             # Add Crosstalk YY on long-range gate
@@ -603,12 +761,22 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
             
             # Add Crosstalk ZZ on pairs
-            for i in 1:(NUM_QUBITS-1)
-                d = Dict{String, Any}()
-                d["name"] = "crosstalk_zz"
-                d["sites"] = [i, i+1]
-                d["strength"] = NOISE_STRENGTH
-                push!(processes_jl_dicts, d)
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i, j) in ibm_edges1
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_zz"
+                    d["sites"] = [i, j]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    d = Dict{String, Any}()
+                    d["name"] = "crosstalk_zz"
+                    d["sites"] = [i, i+1]
+                    d["strength"] = NOISE_STRENGTH
+                    push!(processes_jl_dicts, d)
+                end
             end
 
             # Add Crosstalk ZZ on long-range gate
@@ -666,39 +834,82 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             return aer_noise.errors.PauliLindbladError(pl, py_rates)
         end
 
+        # For IBM127_kicked_ising, apply 2-qubit noise only on the backend coupling edges.
+        # For other circuits, keep the legacy "linear chain + optional (N,1)" behavior below.
+        ibm_edges0 = nothing  # Vector{Tuple{Int,Int}} with 0-based indices
+        if BASE_MODEL == "IBM127_kicked_ising"
+            if isnothing(ibm_127q_circuit)
+                error("IBM127_kicked_ising requested, but `ibm_127q_circuit.py` was not importable.")
+            end
+            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
+            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
+            backend = backend_ctor()
+            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
+            edge_set = Set{Tuple{Int,Int}}()
+            for layer in layers
+                for edge in layer
+                    i0 = pyconvert(Int, edge[0])
+                    j0 = pyconvert(Int, edge[1])
+                    push!(edge_set, (i0, j0))
+                end
+            end
+            ibm_edges0 = collect(edge_set)
+        end
+
         if ENABLE_X_ERROR
             # generators: IX, XI, XX
             error_2q_X = pauli_lindblad_error_from_labels(["IX", "XI", "XX"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
-            for i in 1:(NUM_QUBITS-1)
-                qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [i-1, i])
-            end
-            if long_range_gates
-                qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [NUM_QUBITS-1, 0])
-                qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [0, NUM_QUBITS-1])
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i0, j0) in ibm_edges0
+                    qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [i0, j0])
+                    qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [j0, i0])
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [i-1, i])
+                end
+                if long_range_gates
+                    qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [NUM_QUBITS-1, 0])
+                    qiskit_noise_model.add_quantum_error(error_2q_X, inst_2q, [0, NUM_QUBITS-1])
+                end
             end
         end
 
         if ENABLE_Y_ERROR
             # generators: IY, YI, YY
             error_2q_Y = pauli_lindblad_error_from_labels(["IY", "YI", "YY"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
-            for i in 1:(NUM_QUBITS-1)
-                qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [i-1, i])
-            end
-            if long_range_gates
-                qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [NUM_QUBITS-1, 0])
-                qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [0, NUM_QUBITS-1])
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i0, j0) in ibm_edges0
+                    qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [i0, j0])
+                    qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [j0, i0])
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [i-1, i])
+                end
+                if long_range_gates
+                    qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [NUM_QUBITS-1, 0])
+                    qiskit_noise_model.add_quantum_error(error_2q_Y, inst_2q, [0, NUM_QUBITS-1])
+                end
             end
         end
 
         if ENABLE_Z_ERROR
             # generators: IZ, ZI, ZZ
             error_2q_Z = pauli_lindblad_error_from_labels(["IZ", "ZI", "ZZ"], [NOISE_STRENGTH, NOISE_STRENGTH, NOISE_STRENGTH])
-            for i in 1:(NUM_QUBITS-1)
-                qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [i-1, i])
-            end
-            if long_range_gates
-                qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [NUM_QUBITS-1, 0])
-                qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [0, NUM_QUBITS-1])
+            if BASE_MODEL == "IBM127_kicked_ising"
+                for (i0, j0) in ibm_edges0
+                    qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [i0, j0])
+                    qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [j0, i0])
+                end
+            else
+                for i in 1:(NUM_QUBITS-1)
+                    qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [i-1, i])
+                end
+                if long_range_gates
+                    qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [NUM_QUBITS-1, 0])
+                    qiskit_noise_model.add_quantum_error(error_2q_Z, inst_2q, [0, NUM_QUBITS-1])
+                end
             end
         end
 
@@ -720,9 +931,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             
             # Prepend t=0 state
             init_vals = ones(Float64, NUM_QUBITS)
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    init_vals[i] = -1.0 # X gate applied -> |1> -> -1
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        init_vals[i] = -1.0 # X gate applied -> |1> -> -1
+                    end
                 end
             end
             ref_expvals = hcat(init_vals, raw_ref_expvals)
@@ -739,9 +952,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         function runner_julia()
             # Init State
             psi = MPS(NUM_QUBITS; state="zeros")
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+                    end
                 end
             end
             
@@ -771,9 +986,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         function runner_julia_analog_2pt()
             # Init State
             psi = MPS(NUM_QUBITS; state="zeros")
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+                    end
                 end
             end
             
@@ -802,9 +1019,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         function runner_julia_analog_gauss()
             # Init State
             psi = MPS(NUM_QUBITS; state="zeros")
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+                    end
                 end
             end
             
@@ -833,9 +1052,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         function runner_julia_projector()
             # Init State
             psi = MPS(NUM_QUBITS; state="zeros")
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, DigitalGate(XGate(), [i], nothing))
+                    end
                 end
             end
             
@@ -888,9 +1109,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             
             # Prepend t=0 state to expvals
             init_vals = ones(Float64, NUM_QUBITS)
-            for i in 1:NUM_QUBITS
-                if (i-1) % 4 == 3
-                    init_vals[i] = -1.0 # X gate applied -> |1> -> -1
+            if do_x_every_4
+                for i in 1:NUM_QUBITS
+                    if (i-1) % 4 == 3
+                        init_vals[i] = -1.0 # X gate applied -> |1> -> -1
+                    end
                 end
             end
             full_expvals = hcat(init_vals, expvals)
@@ -941,7 +1164,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             results_data[name] = (n, mse, stag, avg_res, t_total)
         end
 
-        if RUN_QISKIT_MPS
+        if run_qiskit_mps
             try
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_qiskit_mps, exact_stag_ref, "Qiskit MPS", output_dir, file_experiment_name)
                 process_results("Qiskit MPS", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
@@ -953,11 +1176,11 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         # Perform Warmup Just Before Julia Runs (if not already done or if stale)
         # Even if done at top, re-running here ensures JIT is fresh/kept if Qiskit took long
-        if RUN_JULIA || RUN_JULIA_ANALOG_2PT || RUN_JULIA_ANALOG_GAUSS || RUN_JULIA_PROJECTOR
+        if run_julia || run_julia_analog_2pt || run_julia_analog_gauss || run_julia_projector
             perform_warmup(local_mode, longrange_mode)
         end
 
-        if RUN_JULIA
+        if run_julia
             try
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia", output_dir, file_experiment_name)
                 process_results("Julia", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
@@ -967,7 +1190,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
         end
 
-        if RUN_JULIA_ANALOG_2PT
+        if run_julia_analog_2pt
             try
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt", output_dir, file_experiment_name)
                 process_results("Julia Analog 2pt", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
@@ -977,7 +1200,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
         end
 
-        if RUN_JULIA_ANALOG_GAUSS
+        if run_julia_analog_gauss
             try
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss", output_dir, file_experiment_name)
                 process_results("Julia Analog Gauss", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
@@ -987,7 +1210,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             end
         end
 
-        if RUN_JULIA_PROJECTOR
+        if run_julia_projector
             try
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector", output_dir, file_experiment_name)
                 process_results("Julia Projector", n, mse, stag, avg_res, var_res, avg_bonds, t_total)

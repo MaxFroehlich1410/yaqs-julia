@@ -1,7 +1,11 @@
 [deps]
+numpy = ""
 qiskit-aer = ""
 matplotlib = ""
 qutip = ""
+rustworkx = ""
+opt_einsum = ""
+qiskit-ibm-runtime = ""
 
     [deps.qiskit]
     channel = "conda-forge"

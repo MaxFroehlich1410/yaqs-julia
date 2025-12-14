@@ -341,9 +341,41 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         Theta = similar(Amat, l*d1, d2*r)
         mul!(Theta, Amat, Bmat)
         
-        # SVD
-        F = svd(Theta)
+        # SVD (robust):
+        #
+        # We primarily want to avoid rare LAPACK failures (e.g. `LAPACKException(1)`)
+        # that can happen for ill-conditioned matrices in large/noisy evolutions.
+        # Julia's default complex SVD typically uses divide-and-conquer (`gesdd`), which
+        # is fast but can be less robust. We:
+        # 1) scale Theta to avoid overflow/underflow
+        # 2) try the default algorithm
+        # 3) on LAPACK failure, retry with QRIteration (`gesvd`) which is slower but
+        #    usually more stable.
+        #
+        # Note: scaling only affects singular values, not singular vectors.
+        scale = maximum(abs, Theta)
+        if !isfinite(scale)
+            # Something upstream produced NaNs/Infs; keep behavior deterministic.
+            error("truncate!: non-finite entries encountered in Theta (scale=$scale).")
+        end
+        if scale != 0
+            rmul!(Theta, inv(scale))
+        end
+        local F
+        try
+            F = svd(Theta)
+        catch e
+            if e isa LinearAlgebra.LAPACKException
+                # Retry with a more robust algorithm
+                F = svd(Theta; alg=LinearAlgebra.QRIteration())
+            else
+                rethrow(e)
+            end
+        end
         U, S, Vt = F.U, F.S, F.Vt
+        if scale != 0
+            S .*= scale
+        end
         
         # Truncate
         # Match Python YAQS exactly: absolute threshold, not relative

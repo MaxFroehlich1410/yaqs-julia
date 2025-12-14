@@ -1,7 +1,6 @@
 using Test
 
-include("src/Yaqs.jl")
-using .Yaqs
+using Yaqs
 
 @testset "Yaqs.jl Tests" begin
     include("test/test_GateLibrary.jl")
