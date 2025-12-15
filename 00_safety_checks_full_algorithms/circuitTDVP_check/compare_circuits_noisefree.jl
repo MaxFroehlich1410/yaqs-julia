@@ -16,7 +16,7 @@ using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
 # ==============================================================================
 
 # Select Circuit: "Ising", "Heisenberg", "XY", "FermiHubbard", "QAOA", "HEA", "longrange_test"
-CIRCUIT_NAME = "longrange_test" 
+CIRCUIT_NAME = "Heisenberg" 
 periodic = true
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"

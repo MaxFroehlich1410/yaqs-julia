@@ -1,17 +1,140 @@
 module Algorithms
 
 using LinearAlgebra
+using Printf
 using TensorOperations
 using KrylovKit
+using Random
+using Base.Threads
 using ..MPSModule
 using ..MPOModule
 using ..SimulationConfigs
 using ..Decompositions
-using ..Timing: @t
 
-export single_site_tdvp!, two_site_tdvp!
+# Timing is available when this module is loaded as part of `Yaqs`.
+# Some standalone scripts `include("src/Algorithms.jl")` directly under `Main`,
+# in which case `..Timing` does not exist. For those cases, fall back to a no-op `@t`.
+if isdefined(parentmodule(@__MODULE__), :Timing)
+    @eval using ..Timing: @t
+else
+    macro t(_key, ex)
+        return esc(ex)
+    end
+end
+
+export single_site_tdvp!, two_site_tdvp!, set_krylov_ishermitian_mode!, reset_krylov_ishermitian_cache!,
+       reset_krylov_ishermitian_stats!, print_krylov_ishermitian_stats
 
 # --- Krylov Subspace Methods ---
+
+const _KRYLOV_ISHERMITIAN_MODE = Ref{Symbol}(:auto)  # :auto | :true | :false
+const _KRYLOV_ISHERMITIAN_CACHE = Ref{Vector{Union{Nothing, Bool}}}(Vector{Union{Nothing, Bool}}(undef, 0))
+
+# Statistics (thread-safe counters)
+const _KRYLOV_CALLS_LANCZOS = Atomic{Int}(0)  # expm_krylov calls with ishermitian=true
+const _KRYLOV_CALLS_ARNOLDI = Atomic{Int}(0)  # expm_krylov calls with ishermitian=false
+const _KRYLOV_AUTO_DECISIONS_LANCZOS = Atomic{Int}(0)  # per-thread cache decisions in :auto
+const _KRYLOV_AUTO_DECISIONS_ARNOLDI = Atomic{Int}(0)
+
+function __init__()
+    # Ensure cache is sized to current thread count (important if precompiled with fewer threads).
+    v = Vector{Union{Nothing, Bool}}(undef, Base.Threads.maxthreadid())
+    fill!(v, nothing)
+    _KRYLOV_ISHERMITIAN_CACHE[] = v
+    return nothing
+end
+
+"""
+    set_krylov_ishermitian_mode!(mode::Symbol)
+
+Controls whether KrylovKit uses Hermitian mode (Lanczos) or general mode (Arnoldi) in `expm_krylov`.
+
+- `:auto`  : run a quick self-adjointness check once per thread and use Lanczos only if it passes.
+- `:lanczos`  : force Lanczos (`ishermitian=true`) (unsafe if the effective map is not self-adjoint).
+- `:arnoldi`  : force Arnoldi (`ishermitian=false`) (always safe).
+
+You can also call `set_krylov_ishermitian_mode!(flag::Bool)`:
+- `true`  => `:lanczos`
+- `false` => `:arnoldi`
+"""
+function set_krylov_ishermitian_mode!(mode::Symbol)
+    @assert mode === :auto || mode === :lanczos || mode === :arnoldi
+    _KRYLOV_ISHERMITIAN_MODE[] = mode
+    reset_krylov_ishermitian_cache!()
+    return nothing
+end
+
+function set_krylov_ishermitian_mode!(flag::Bool)
+    return set_krylov_ishermitian_mode!(flag ? :lanczos : :arnoldi)
+end
+
+"""
+    reset_krylov_ishermitian_cache!()
+
+Clear the per-thread cached decision used by `:auto` mode.
+"""
+function reset_krylov_ishermitian_cache!()
+    v = _KRYLOV_ISHERMITIAN_CACHE[]
+    if isempty(v) || length(v) < Base.Threads.maxthreadid()
+        v2 = Vector{Union{Nothing, Bool}}(undef, Base.Threads.maxthreadid())
+        fill!(v2, nothing)
+        _KRYLOV_ISHERMITIAN_CACHE[] = v2
+    else
+        fill!(v, nothing)
+    end
+    return nothing
+end
+
+"""
+    reset_krylov_ishermitian_stats!()
+
+Reset counters tracking how often `expm_krylov` ran in Lanczos vs Arnoldi mode.
+"""
+function reset_krylov_ishermitian_stats!()
+    atomic_xchg!(_KRYLOV_CALLS_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_CALLS_ARNOLDI, 0)
+    atomic_xchg!(_KRYLOV_AUTO_DECISIONS_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_AUTO_DECISIONS_ARNOLDI, 0)
+    return nothing
+end
+
+"""
+    print_krylov_ishermitian_stats(; header="Krylov ishermitian stats")
+
+Print how often `expm_krylov` used Lanczos (`ishermitian=true`) vs Arnoldi (`false`).
+Also prints how many times `:auto` mode decided for each (one decision per thread).
+"""
+function print_krylov_ishermitian_stats(; header::AbstractString="Krylov ishermitian stats")
+    # `Threads.Atomic` supports `getindex` for atomic load.
+    l = _KRYLOV_CALLS_LANCZOS[]
+    a = _KRYLOV_CALLS_ARNOLDI[]
+    dl = _KRYLOV_AUTO_DECISIONS_LANCZOS[]
+    da = _KRYLOV_AUTO_DECISIONS_ARNOLDI[]
+    total = l + a
+    @printf "\n\t%s\n" header
+    @printf "\t  expm_krylov calls: total=%d  lanczos=%d  arnoldi=%d\n" total l a
+    @printf "\t  auto decisions (per thread): lanczos=%d  arnoldi=%d\n" dl da
+    return nothing
+end
+
+@inline function _ishermitian_check(A_func::Function, v::AbstractArray{T}) where {T}
+    # Diagnostic: check <x, A(y)> ≈ <A(x), y> and imag(<x,A(x)>) ≈ 0 in Euclidean inner product.
+    x = randn!(similar(v, T))
+    y = randn!(similar(v, T))
+    Ax = A_func(x)
+    Ay = A_func(y)
+
+    lhs = dot(vec(x), vec(Ay))
+    rhs = dot(vec(Ax), vec(y))
+    denom = max(abs(lhs), abs(rhs), one(real(eltype(lhs))))
+    rel = abs(lhs - rhs) / denom
+
+    q = dot(vec(x), vec(Ax))
+    imag_rel = abs(imag(q)) / max(abs(q), one(real(eltype(q))))
+
+    # Loose tolerance: we only want to avoid obviously non-Hermitian cases.
+    return (rel ≤ 1e-8) && (imag_rel ≤ 1e-8)
+end
 
 """
     expm_krylov(A_func, v, dt, k)
@@ -25,7 +148,41 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     end
         
     t_val = -1im * dt
-    val, info = @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=false)
+    mode = _KRYLOV_ISHERMITIAN_MODE[]
+    local isherm::Bool
+    if mode === :lanczos
+        isherm = true
+    elseif mode === :arnoldi
+        isherm = false
+    else
+        # :auto mode: cache once per thread to avoid paying the check cost in hot loops.
+        tid = Base.Threads.threadid()
+        cache = _KRYLOV_ISHERMITIAN_CACHE[]
+        if tid > length(cache)
+            reset_krylov_ishermitian_cache!()
+            cache = _KRYLOV_ISHERMITIAN_CACHE[]
+        end
+        cached = cache[tid]
+        if cached === nothing
+            isherm = _ishermitian_check(A_func, v)
+            cache[tid] = isherm
+            if isherm
+                atomic_add!(_KRYLOV_AUTO_DECISIONS_LANCZOS, 1)
+            else
+                atomic_add!(_KRYLOV_AUTO_DECISIONS_ARNOLDI, 1)
+            end
+        else
+            isherm = cached::Bool
+        end
+    end
+
+    if isherm
+        atomic_add!(_KRYLOV_CALLS_LANCZOS, 1)
+    else
+        atomic_add!(_KRYLOV_CALLS_ARNOLDI, 1)
+    end
+
+    val, info = @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; tol=1e-10, krylovdim=k, maxiter=1, ishermitian=isherm)
     return val
 end
 
