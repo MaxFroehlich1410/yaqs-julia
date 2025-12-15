@@ -80,7 +80,7 @@ THRESHOLD_MSE = 1e-3
 SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(Int, 3*NUM_QUBITS/4), NUM_QUBITS] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
-RUN_QISKIT_MPS = true
+RUN_QISKIT_MPS = false
 RUN_JULIA = false
 RUN_JULIA_ANALOG_2PT = false
 RUN_JULIA_ANALOG_GAUSS = false

@@ -117,7 +117,7 @@ function print_krylov_ishermitian_stats(; header::AbstractString="Krylov ishermi
     return nothing
 end
 
-@inline function _ishermitian_check(A_func::Function, v::AbstractArray{T}) where {T}
+@inline function _ishermitian_check(A_func, v::AbstractArray{T}) where {T}
     # Diagnostic: check <x, A(y)> ≈ <A(x), y> and imag(<x,A(x)>) ≈ 0 in Euclidean inner product.
     x = randn!(similar(v, T))
     y = randn!(similar(v, T))
@@ -141,7 +141,7 @@ end
 
 Compute exp(-im * dt * A) * v using Krylov subspace.
 """
-function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) where T
+function expm_krylov(A_func, v::AbstractArray{T}, dt::Number, k::Int) where T
     norm_v = norm(v)
     if norm_v == 0
         return v
@@ -225,6 +225,185 @@ function project_bond(C, L, R)
     return C_new
 end
 
+# --- Allocation-free projector workspaces for Krylov matvec ---
+#
+# KrylovKit will still need a fresh output object for every matvec (because it stores
+# Krylov basis vectors). The goal here is to avoid *additional* temporaries (T1/T2)
+# inside the matvec, by reusing per-thread buffers.
+
+mutable struct _ProjectSiteWS{T}
+    T1::Array{T,4}
+    T2::Array{T,4}
+end
+
+mutable struct _ProjectBondWS{T}
+    T1::Array{T,3}
+end
+
+const _PROJECT_SITE_WS_C64 = Ref{Vector{Union{Nothing, _ProjectSiteWS{ComplexF64}}}}(Vector{Union{Nothing, _ProjectSiteWS{ComplexF64}}}(undef, 0))
+const _PROJECT_BOND_WS_C64 = Ref{Vector{Union{Nothing, _ProjectBondWS{ComplexF64}}}}(Vector{Union{Nothing, _ProjectBondWS{ComplexF64}}}(undef, 0))
+
+# Toggle for A/B benchmarking: projector workspaces in TDVP matvecs.
+const _TDVP_USE_PROJECTOR_WORKSPACES = Ref{Bool}(true)
+
+"""
+    set_tdvp_projector_workspaces!(flag::Bool)
+
+Enable/disable per-thread scratch workspaces for the TDVP projector matvecs used by KrylovKit.
+
+When `true` (default), intermediate tensors are reused (fewer allocations, faster).
+When `false`, fall back to the simpler allocating `project_site`/`project_bond` implementations.
+"""
+function set_tdvp_projector_workspaces!(flag::Bool)
+    _TDVP_USE_PROJECTOR_WORKSPACES[] = flag
+    return nothing
+end
+
+get_tdvp_projector_workspaces() = _TDVP_USE_PROJECTOR_WORKSPACES[]
+
+@inline _use_tdvp_ws_val() = Val(_TDVP_USE_PROJECTOR_WORKSPACES[] ? true : false)
+
+@inline function _site_op(::Val{true}, L, R, W)
+    return _ProjectSiteOpC64(L, R, W, _get_project_site_ws(ComplexF64))
+end
+@inline function _site_op(::Val{false}, L, R, W)
+    return (x) -> project_site(x, L, R, W)
+end
+
+@inline function _bond_op(::Val{true}, L, R)
+    return _ProjectBondOpC64(L, R, _get_project_bond_ws(ComplexF64))
+end
+@inline function _bond_op(::Val{false}, L, R)
+    return (x) -> project_bond(x, L, R)
+end
+
+@inline function _get_project_site_ws(::Type{ComplexF64})
+    v = _PROJECT_SITE_WS_C64[]
+    nt = Base.Threads.maxthreadid()
+    if isempty(v) || length(v) < nt
+        v2 = Vector{Union{Nothing, _ProjectSiteWS{ComplexF64}}}(undef, nt)
+        fill!(v2, nothing)
+        if !isempty(v)
+            copyto!(v2, 1, v, 1, length(v))
+        end
+        _PROJECT_SITE_WS_C64[] = v2
+        v = v2
+    end
+    tid = Base.Threads.threadid()
+    ws = v[tid]
+    if ws === nothing
+        ws = _ProjectSiteWS{ComplexF64}(Array{ComplexF64,4}(undef, 0, 0, 0, 0),
+                                       Array{ComplexF64,4}(undef, 0, 0, 0, 0))
+        v[tid] = ws
+    end
+    return ws:: _ProjectSiteWS{ComplexF64}
+end
+
+@inline function _get_project_bond_ws(::Type{ComplexF64})
+    v = _PROJECT_BOND_WS_C64[]
+    nt = Base.Threads.maxthreadid()
+    if isempty(v) || length(v) < nt
+        v2 = Vector{Union{Nothing, _ProjectBondWS{ComplexF64}}}(undef, nt)
+        fill!(v2, nothing)
+        if !isempty(v)
+            copyto!(v2, 1, v, 1, length(v))
+        end
+        _PROJECT_BOND_WS_C64[] = v2
+        v = v2
+    end
+    tid = Base.Threads.threadid()
+    ws = v[tid]
+    if ws === nothing
+        ws = _ProjectBondWS{ComplexF64}(Array{ComplexF64,3}(undef, 0, 0, 0))
+        v[tid] = ws
+    end
+    return ws:: _ProjectBondWS{ComplexF64}
+end
+
+@inline function _ensure_size!(A::Array{T,N}, dims::NTuple{N,Int}) where {T,N}
+    if size(A) != dims
+        return Array{T,N}(undef, dims...)
+    end
+    return A
+end
+
+@inline function _project_site_ws!(A_new::Array{ComplexF64,3},
+                                  ws::_ProjectSiteWS{ComplexF64},
+                                  A::AbstractArray{ComplexF64,3},
+                                  L::AbstractArray{ComplexF64,3},
+                                  R::AbstractArray{ComplexF64,3},
+                                  W::AbstractArray{ComplexF64,4})
+    # Sizes:
+    #   L: (Dl_bra, mpo_l, Dl_ket)
+    #   A: (Dl_ket, p_in, Dr_ket)
+    #   W: (mpo_l, p_out, p_in, mpo_r)
+    #   R: (Dl_bra_r, mpo_r, Dr_ket)
+    Dl_bra  = size(L, 1)
+    mpo_l   = size(L, 2)
+    Dl_ket  = size(L, 3)
+    p_in    = size(A, 2)
+    Dr_ket  = size(A, 3)
+    p_out   = size(W, 2)
+    mpo_r   = size(W, 4)
+    # NOTE: we assume dimensions are consistent (as they should be in TDVP).
+    # Avoid runtime asserts here; this runs inside Krylov matvec hot loops.
+
+    ws.T1 = _ensure_size!(ws.T1, (Dl_bra, mpo_l, p_in, Dr_ket))
+    ws.T2 = _ensure_size!(ws.T2, (Dl_bra, Dr_ket, p_out, mpo_r))
+
+    @t :tdvp_proj_site_T1 @tensor ws.T1[bra_l, mpo_l, p_in, ket_r] =
+        L[bra_l, mpo_l, k] * A[k, p_in, ket_r]
+    @t :tdvp_proj_site_T2 @tensor ws.T2[bra_l, ket_r, p_out, mpo_r] =
+        ws.T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
+    @t :tdvp_proj_site_out @tensor A_new[bra_l, p_out, bra_r] =
+        ws.T2[bra_l, k_kr, p_out, k_mr] * R[bra_r, k_mr, k_kr]
+    return nothing
+end
+
+@inline function _project_bond_ws!(C_new::Array{ComplexF64,2},
+                                  ws::_ProjectBondWS{ComplexF64},
+                                  C::AbstractArray{ComplexF64,2},
+                                  L::AbstractArray{ComplexF64,3},
+                                  R::AbstractArray{ComplexF64,3})
+    bra_l = size(L, 1)
+    mpo   = size(L, 2)
+    ket_l = size(L, 3)
+    ket_r = size(C, 2)
+    # NOTE: we assume dimensions are consistent (as they should be in TDVP).
+
+    ws.T1 = _ensure_size!(ws.T1, (bra_l, mpo, ket_r))
+    @t :tdvp_proj_bond_T1 @tensor ws.T1[bra_l, mpo, ket_r] =
+        L[bra_l, mpo, k] * C[k, ket_r]
+    @t :tdvp_proj_bond_out @tensor C_new[bra_l, bra_r] =
+        ws.T1[bra_l, k_mpo, k_kr] * R[bra_r, k_mpo, k_kr]
+    return nothing
+end
+
+struct _ProjectSiteOpC64{TL<:AbstractArray{ComplexF64,3}, TR<:AbstractArray{ComplexF64,3}, TW<:AbstractArray{ComplexF64,4}}
+    L::TL
+    R::TR
+    W::TW
+    ws::_ProjectSiteWS{ComplexF64}
+end
+
+@inline function (op::_ProjectSiteOpC64)(A::AbstractArray{ComplexF64,3})
+    A_new = Array{ComplexF64,3}(undef, size(op.L, 1), size(op.W, 2), size(op.R, 1))
+    _project_site_ws!(A_new, op.ws, A, op.L, op.R, op.W)
+    return A_new
+end
+
+struct _ProjectBondOpC64{TL<:AbstractArray{ComplexF64,3}, TR<:AbstractArray{ComplexF64,3}}
+    L::TL
+    R::TR
+    ws::_ProjectBondWS{ComplexF64}
+end
+
+@inline function (op::_ProjectBondOpC64)(C::AbstractArray{ComplexF64,2})
+    C_new = Array{ComplexF64,2}(undef, size(op.L, 1), size(op.R, 1))
+    _project_bond_ws!(C_new, op.ws, C, op.L, op.R)
+    return C_new
+end
+
 # --- SVD Helper ---
 
 function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
@@ -294,6 +473,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
     shift_orthogonality_center!(state, 1)
     L = state.length
     dt = config.dt
+    use_ws = _use_tdvp_ws_val()
     
     # Init Envs
     E_left, E_right = _init_envs(state, H)
@@ -301,7 +481,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
     # Forward (1 -> L)
     for i in 1:L
         W = H.tensors[i]
-        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
         # Evolve Site (dt/2)
         state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
@@ -317,7 +497,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
             E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
             
             # Evolve Bond Backward (-dt/2)
-            func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1])
+            func_bond = _bond_op(use_ws, E_left[i+1], E_right[i+1])
             C_new = expm_krylov(func_bond, R_mat, -dt/2, 25)
             
             @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
@@ -328,7 +508,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
     # Backward (L -> 1)
     for i in L:-1:1
         W = H.tensors[i]
-        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
         state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
         
@@ -342,7 +522,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
             
             E_right[i] = update_right_environment(state.tensors[i], W, E_right[i+1])
             
-            func_bond(x) = project_bond(x, E_left[i], E_right[i])
+            func_bond = _bond_op(use_ws, E_left[i], E_right[i])
             C_new = expm_krylov(func_bond, L_mat, -dt/2, 25)
             
             @tensor Prev[l, p, r] := state.tensors[i-1][l, p, k] * C_new[k, r]
@@ -356,6 +536,7 @@ end
 function _tdvp_sweep_circuit_1site!(state, H, config)
     shift_orthogonality_center!(state, 1)
     L = state.length
+    use_ws = _use_tdvp_ws_val()
     
     # Circuit Logic: dt starts at 2.0
     dt = 2.0
@@ -365,7 +546,7 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
     # Forward Sweep (1 -> L-1)
     for i in 1:(L-1)
         W = H.tensors[i]
-        func_site(x) = project_site(x, E_left[i], E_right[i+1], W)
+        func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
         # Evolve Site (0.5 * dt = 1.0)
         state.tensors[i] = expm_krylov(func_site, state.tensors[i], 0.5 * dt, 25)
@@ -379,7 +560,7 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
         E_left[i+1] = update_left_environment(state.tensors[i], W, E_left[i])
         
         # Evolve Bond (-0.5 * dt = -1.0)
-        func_bond(x) = project_bond(x, E_left[i+1], E_right[i+1])
+        func_bond = _bond_op(use_ws, E_left[i+1], E_right[i+1])
         C_new = expm_krylov(func_bond, R_mat, -0.5 * dt, 25)
         
         @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
@@ -389,7 +570,7 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
     # Final Site Update (dt becomes 1.0)
     dt = 1.0
     W = H.tensors[L]
-    func_site_last(x) = project_site(x, E_left[L], E_right[L+1], W)
+    func_site_last = _site_op(use_ws, E_left[L], E_right[L+1], W)
     state.tensors[L] = expm_krylov(func_site_last, state.tensors[L], dt, 25)
     
     # No Backward Sweep
@@ -448,6 +629,7 @@ end
 # --- Helpers for 2-Site ---
 
 function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
+    use_ws = _use_tdvp_ws_val()
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
     @t :tdvp_theta_contract @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
@@ -464,7 +646,7 @@ function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config
     Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
     
     # Evolve Theta
-    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
     Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # Split (Move Center Right: Keep S with V)
@@ -481,7 +663,7 @@ function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config
     A2_temp = @t :tdvp_form_A2temp reshape(Diagonal(S) * Vt, keep, p2, r_theta)
     
     if evolve_back
-        func_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
+        func_back = _site_op(use_ws, E_left[i+1], E_right[i+2], W2)
         A2_new = @t :tdvp_expm_back expm_krylov(func_back, A2_temp, -dt_step, 25)
         state.tensors[i+1] = A2_new
     else
@@ -491,6 +673,7 @@ end
 
 function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_step, config)
     # Edge Step: Evolve by dt_step. Split Left (Center moves to L-1).
+    use_ws = _use_tdvp_ws_val()
     
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
@@ -508,7 +691,7 @@ function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_ste
     Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
     
     # Evolve Theta (Full dt)
-    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
     Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # Split Left (Move Center Left: Keep S with U)
@@ -538,8 +721,9 @@ function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_
     W2 = H.tensors[i+1]
     # Note: state[i+1] is currently Right Canonical (from prev step split).
     # Is it okay to evolve it? Yes, we treat it as the "Center" of the previous bond that needs time adjustment.
+    use_ws = _use_tdvp_ws_val()
     
-    func_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
+    func_back = _site_op(use_ws, E_left[i+1], E_right[i+2], W2)
     state.tensors[i+1] = expm_krylov(func_back, state.tensors[i+1], -dt_step, 25)
     
     # 2. Merge
@@ -558,7 +742,7 @@ function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_
     Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
     
     # 3. Evolve Theta
-    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
     Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # 4. Split Left (Center moves to i)
@@ -580,6 +764,7 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     # Note: Python splits "right" here!
     # "state.tensors[i], state.tensors[i+1] = split_mps_tensor(..., "right", ...)"
     # So Center stays at Right (i+1).
+    use_ws = _use_tdvp_ws_val()
     
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
@@ -597,7 +782,7 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
     
     # Evolve Theta
-    func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
+    func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
     Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # Split Right (Center moves to i+1)

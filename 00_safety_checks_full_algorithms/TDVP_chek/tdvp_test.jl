@@ -32,7 +32,7 @@ using .Algorithms
 # --- Configuration ---
 const L = 6
 const dt = 0.1
-const t_max = 2.0
+const t_max = 2.5
 const steps = Int(floor(t_max / dt))
 const max_bond_dim = 32
 const trunc_err = 1e-12
