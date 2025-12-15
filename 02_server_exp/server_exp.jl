@@ -35,8 +35,8 @@ Yaqs.DigitalTJM.set_timing_print_each_call!(false)  # aggregate across trajector
 Yaqs.Algorithms.set_krylov_ishermitian_mode!(:auto)
 
 # Simulation Size
-NUM_QUBITS = 14
-NUM_LAYERS = 10
+NUM_QUBITS = 127
+NUM_LAYERS = 5
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
@@ -46,7 +46,7 @@ MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just perform
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
-MAX_BOND_DIM = 64
+MAX_BOND_DIM = 32
 SVD_TRUNCATION_THRESHOLD = 1e-16
 
 # Model Specific Params
@@ -80,10 +80,10 @@ THRESHOLD_MSE = 1e-3
 SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(Int, 3*NUM_QUBITS/4), NUM_QUBITS] # 1-based index, will be adjusted for Python/Plots
 
 # Flags
-RUN_QISKIT_MPS = false
-RUN_JULIA = true
-RUN_JULIA_ANALOG_2PT = true
-RUN_JULIA_ANALOG_GAUSS = true
+RUN_QISKIT_MPS = true
+RUN_JULIA = false
+RUN_JULIA_ANALOG_2PT = false
+RUN_JULIA_ANALOG_GAUSS = false
 RUN_JULIA_PROJECTOR = true
 
 # ------------------------------------------------------------------------------
@@ -107,7 +107,7 @@ ENABLE_Y_ERROR = false
 ENABLE_Z_ERROR = false
 
 # Lists for Loop
-CIRCUIT_LIST = ["XY", "XY_longrange"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
+CIRCUIT_LIST = ["IBM127_kicked_ising"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
 NOISE_STRENGTH_LIST = [0.1]
 
 # ==============================================================================
