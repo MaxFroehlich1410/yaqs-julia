@@ -8,6 +8,7 @@ using ..MPOModule
 using ..NoiseModule
 using ..SimulationConfigs
 using ..Algorithms
+using ..Timing: @t
 
 export StochasticProcess, calculate_stochastic_factor, create_probability_distribution, stochastic_process!
 
@@ -32,7 +33,7 @@ Calculate the stochastic factor dp = 1 - <psi|psi>.
 This assumes the state norm has decayed due to dissipation.
 """
 function calculate_stochastic_factor(state::MPS)
-    norm_sq = real(MPSModule.scalar_product(state, state))
+    norm_sq = @t :stoch_scalar_product real(MPSModule.scalar_product(state, state))
     return 1.0 - norm_sq
 end
 
@@ -54,11 +55,11 @@ function apply_mpo_jump!(state::MPS, mpo::MPO{T}, sim_params) where T
         # A: [la, pi, ra]
         # W: [lw, po, pi, rw]
         # Result C: [la, lw, po, ra, rw]
-        @tensor C[la, lw, po, ra, rw] := A[la, pi, ra] * W[lw, po, pi, rw]
+        @t :stoch_mpo_contract @tensor C[la, lw, po, ra, rw] := A[la, pi, ra] * W[lw, po, pi, rw]
         
         # Reshape to merge virtual bonds: (La*Lw, Po, Ra*Rw)
         la, lw, po, ra, rw = size(C)
-        state.tensors[i] = reshape(C, la * lw, po, ra * rw)
+        state.tensors[i] = @t :stoch_mpo_reshape reshape(C, la * lw, po, ra * rw)
     end
     
     # Truncate to control bond dimension growth
@@ -77,7 +78,7 @@ function apply_mpo_jump!(state::MPS, mpo::MPO{T}, sim_params) where T
         max_bond = sim_params.max_bond_dim
     end
     
-    MPSModule.truncate!(state; threshold=threshold, max_bond_dim=max_bond)
+    @t :stoch_mpo_truncate MPSModule.truncate!(state; threshold=threshold, max_bond_dim=max_bond)
 end
 
 """
@@ -98,10 +99,12 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
     # Iterate over sites to minimize orthogonality center shifts
     for site in 1:L
         # Shift OC to site (efficient access for local norms)
-        if site > 1
-             MPSModule.shift_orthogonality_center!(state, site)
-        else
-             MPSModule.shift_orthogonality_center!(state, 1)
+        @t :stoch_shift_oc begin
+            if site > 1
+                MPSModule.shift_orthogonality_center!(state, site)
+            else
+                MPSModule.shift_orthogonality_center!(state, 1)
+            end
         end
 
         # --- 1-site jumps at this site ---
@@ -113,15 +116,15 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
                 # Check if Pauli (efficient norm)
                 if is_pauli(op)
                     # For Pauli L = sqrt(gamma)*P, L^dag L = gamma I.
-                    nrm = norm(state.tensors[site])^2
+                    nrm = @t :stoch_local_norm norm(state.tensors[site])^2
                     dp_m = dt * gamma * nrm
                     push!(dp_m_list, dp_m)
                     push!(jump_candidates, (proc, op, "local_1", [site]))
                 else
                     # Non-Pauli: apply and measure
                     T_orig = state.tensors[site]
-                    @tensor T_new[l, p, r] := op[p, k] * T_orig[l, k, r]
-                    nrm = norm(T_new)^2
+                    @t :stoch_1site_contract @tensor T_new[l, p, r] := op[p, k] * T_orig[l, k, r]
+                    nrm = @t :stoch_local_norm norm(T_new)^2
                     dp_m = dt * gamma * nrm
                     push!(dp_m_list, dp_m)
                     push!(jump_candidates, (proc, op, "local_1", [site]))
@@ -146,13 +149,13 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
                              # Non-Pauli: merge and apply
                              A1 = state.tensors[site]
                              A2 = state.tensors[site+1]
-                             @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+                             @t :stoch_2site_merge @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
                              
                              op = proc.matrix
                              op_ten = reshape(op, 2, 2, 2, 2)
-                             @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+                             @t :stoch_2site_apply @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
                              
-                             nrm = norm(Theta_new)^2
+                             nrm = @t :stoch_local_norm norm(Theta_new)^2
                              dp_m = dt * gamma * nrm
                              push!(dp_m_list, dp_m)
                              push!(jump_candidates, (proc, op, "local_2", [site, site+1]))
@@ -176,16 +179,16 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
                  # we can just use current norm if we assume state is unnormalized only due to dissipation
                  # But we might need to be careful.
                  # Let's use the same logic as before: current norm squared.
-                 nrm = norm(state.tensors[state.orth_center])^2
+                 nrm = @t :stoch_local_norm norm(state.tensors[state.orth_center])^2
                  dp_m = dt * gamma * nrm
                  push!(dp_m_list, dp_m)
                  push!(jump_candidates, (proc, proc.factors, "pauli_long_range", proc.sites))
              else
                  # General MPO Jump (e.g. Projector or Unitary-2pt components, or Pauli w/o factors)
                  # Need to apply MPO to get norm
-                 temp_state = deepcopy(state)
-                 apply_mpo_jump!(temp_state, proc.mpo, sim_params)
-                 nrm = MPSModule.norm(temp_state)^2
+                 temp_state = @t :stoch_mpo_deepcopy deepcopy(state)
+                 @t :stoch_apply_mpo_jump apply_mpo_jump!(temp_state, proc.mpo, sim_params)
+                 nrm = @t :stoch_temp_norm MPSModule.norm(temp_state)^2
                  dp_m = dt * gamma * nrm
                  push!(dp_m_list, dp_m)
                  push!(jump_candidates, (proc, proc.mpo, "mpo_general", proc.sites))
@@ -214,22 +217,26 @@ end
 Perform a stochastic quantum jump.
 """
 function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, sim_params::AbstractSimConfig)
-    dp = calculate_stochastic_factor(state)
+    dp = @t :stoch_calc_dp calculate_stochastic_factor(state)
     rng = Random.default_rng()
     
     if isempty(noise_model.processes) || rand(rng) >= dp
         # No Jump
-        MPSModule.shift_orthogonality_center!(state, 1)
-        MPSModule.normalize!(state) # Enforce norm 1
+        @t :stoch_nojump_finalize begin
+            MPSModule.shift_orthogonality_center!(state, 1)
+            MPSModule.normalize!(state) # Enforce norm 1
+        end
         return state
     end
     
     # Jump Occurs
-    probs, candidates = create_probability_distribution(state, noise_model, dt, sim_params)
+    probs, candidates = @t :stoch_create_prob_dist create_probability_distribution(state, noise_model, dt, sim_params)
     
     if isempty(probs)
-        MPSModule.shift_orthogonality_center!(state, 1)
-        MPSModule.normalize!(state)
+        @t :stoch_empty_probs_finalize begin
+            MPSModule.shift_orthogonality_center!(state, 1)
+            MPSModule.normalize!(state)
+        end
         return state
     end
     
@@ -237,11 +244,13 @@ function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, s
     r = rand(rng)
     accum = 0.0
     chosen_idx = 1
-    for (i, p) in enumerate(probs)
-        accum += p
-        if r <= accum
-            chosen_idx = i
-            break
+    @t :stoch_sample_loop begin
+        for (i, p) in enumerate(probs)
+            accum += p
+            if r <= accum
+                chosen_idx = i
+                break
+            end
         end
     end
     
@@ -249,41 +258,43 @@ function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, s
     
     if type == "local_1"
         site = sites[1]
-        MPSModule.shift_orthogonality_center!(state, site)
+        @t :stoch_apply_local1_shift MPSModule.shift_orthogonality_center!(state, site)
         T = state.tensors[site]
-        @tensor T_new[l, p, r] := op[p, k] * T[l, k, r]
-        state.tensors[site] = T_new
+        @t :stoch_apply_local1_contract @tensor T_new[l, p, r] := op[p, k] * T[l, k, r]
+        @t :stoch_apply_local1_writeback state.tensors[site] = T_new
         
     elseif type == "local_2"
         s1, s2 = sites
-        MPSModule.shift_orthogonality_center!(state, s1)
+        @t :stoch_apply_local2_shift MPSModule.shift_orthogonality_center!(state, s1)
         
         A1 = state.tensors[s1]
         A2 = state.tensors[s2]
-        @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+        @t :stoch_apply_local2_merge @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
         
         op_ten = reshape(op, 2, 2, 2, 2)
-        @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
+        @t :stoch_apply_local2_apply @tensor Theta_new[l, p1n, p2n, r] := op_ten[p1n, p2n, p1, p2] * Theta[l, p1, p2, r]
         
         # Split back
         l_dim, _, _, r_dim = size(Theta_new)
-        Mat = reshape(Theta_new, l_dim*2, 2*r_dim)
-        F = svd(Mat)
+        Mat = @t :stoch_apply_local2_reshape reshape(Theta_new, l_dim*2, 2*r_dim)
+        F = @t :stoch_apply_local2_svd svd(Mat)
         
         # Truncation logic
         threshold = hasproperty(sim_params, :truncation_threshold) ? sim_params.truncation_threshold : 1e-12
         max_bond = hasproperty(sim_params, :max_bond_dim) ? sim_params.max_bond_dim : typemax(Int)
         
         U, S, Vt = F.U, F.S, F.Vt
-        
-        norm_sq = sum(abs2, S)
-        current_sum = 0.0
+
         rank = length(S)
-        for k in length(S):-1:1
-            current_sum += abs2(S[k])
-            if current_sum > threshold * norm_sq
-                rank = k
-                break
+        @t :stoch_apply_local2_trunc begin
+            norm_sq = sum(abs2, S)
+            current_sum = 0.0
+            for k in length(S):-1:1
+                current_sum += abs2(S[k])
+                if current_sum > threshold * norm_sq
+                    rank = k
+                    break
+                end
             end
         end
         rank = clamp(rank, 1, max_bond)
@@ -292,27 +303,29 @@ function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, s
         S = S[1:rank]
         Vt = Vt[1:rank, :]
         
-        state.tensors[s1] = reshape(U, l_dim, 2, rank)
-        state.tensors[s2] = reshape(Diagonal(S)*Vt, rank, 2, r_dim)
+        @t :stoch_apply_local2_writeback begin
+            state.tensors[s1] = reshape(U, l_dim, 2, rank)
+            state.tensors[s2] = reshape(Diagonal(S)*Vt, rank, 2, r_dim)
+        end
         
     elseif type == "mpo_pauli"
         # Apply factors if available
         if hasproperty(proc, :factors) && !isempty(proc.factors)
-            MPSModule.shift_orthogonality_center!(state, proc.sites[1])
-            state.tensors[proc.sites[1]] = permutedims(proc.factors[1] * permutedims(state.tensors[proc.sites[1]], (2,1,3)), (2,1,3))
+            @t :stoch_apply_mpo_pauli_shift MPSModule.shift_orthogonality_center!(state, proc.sites[1])
+            @t :stoch_apply_mpo_pauli_apply state.tensors[proc.sites[1]] = permutedims(proc.factors[1] * permutedims(state.tensors[proc.sites[1]], (2,1,3)), (2,1,3))
             
-            MPSModule.shift_orthogonality_center!(state, proc.sites[2])
-            state.tensors[proc.sites[2]] = permutedims(proc.factors[2] * permutedims(state.tensors[proc.sites[2]], (2,1,3)), (2,1,3))
+            @t :stoch_apply_mpo_pauli_shift MPSModule.shift_orthogonality_center!(state, proc.sites[2])
+            @t :stoch_apply_mpo_pauli_apply state.tensors[proc.sites[2]] = permutedims(proc.factors[2] * permutedims(state.tensors[proc.sites[2]], (2,1,3)), (2,1,3))
         else
             # Apply MPO
-            apply_mpo_jump!(state, proc.mpo, sim_params)
+            @t :stoch_apply_mpo_jump apply_mpo_jump!(state, proc.mpo, sim_params)
         end
         
     elseif type == "mpo_general"
-        apply_mpo_jump!(state, op, sim_params) # op is the mpo here
+        @t :stoch_apply_mpo_jump apply_mpo_jump!(state, op, sim_params) # op is the mpo here
     end
     
-    MPSModule.normalize!(state)
+    @t :stoch_finalize_normalize MPSModule.normalize!(state)
     return state
 end
 

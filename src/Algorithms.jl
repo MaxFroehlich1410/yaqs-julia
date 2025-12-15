@@ -7,6 +7,7 @@ using ..MPSModule
 using ..MPOModule
 using ..SimulationConfigs
 using ..Decompositions
+using ..Timing: @t
 
 export single_site_tdvp!, two_site_tdvp!
 
@@ -24,7 +25,7 @@ function expm_krylov(A_func::Function, v::AbstractArray{T}, dt::Number, k::Int) 
     end
         
     t_val = -1im * dt
-    val, info = exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=false)
+    val, info = @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; tol=1e-12, krylovdim=k, maxiter=1, ishermitian=false)
     return val
 end
 
@@ -39,31 +40,31 @@ function make_identity_env(dim::Int, mpo_dim::Int)
 end
 
 function update_left_environment(A, W, E_left)
-    @tensor T1[bra_l, mpo_l, p_in, ket_r] := E_left[bra_l, mpo_l, k] * A[k, p_in, ket_r]
-    @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
-    @tensor E_next[bra_r, mpo_r, ket_r] := T2[k_bl, ket_r, k_pout, mpo_r] * conj(A[k_bl, k_pout, bra_r])
+    @t :tdvp_env_L_T1 @tensor T1[bra_l, mpo_l, p_in, ket_r] := E_left[bra_l, mpo_l, k] * A[k, p_in, ket_r]
+    @t :tdvp_env_L_T2 @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
+    @t :tdvp_env_L_E_next @tensor E_next[bra_r, mpo_r, ket_r] := T2[k_bl, ket_r, k_pout, mpo_r] * conj(A[k_bl, k_pout, bra_r])
     return E_next
 end
 
 function update_right_environment(A, W, E_right)
-    @tensor T1[ket_l, p_in, bra_r, mpo_r] := A[ket_l, p_in, k] * E_right[bra_r, mpo_r, k]
-    @tensor T2[mpo_l, p_out, ket_l, bra_r] := W[mpo_l, p_out, k_pin, k_mr] * T1[ket_l, k_pin, bra_r, k_mr]
-    @tensor E_next[bra_l, mpo_l, ket_l] := T2[mpo_l, k_pout, ket_l, k_br] * conj(A[bra_l, k_pout, k_br])
+    @t :tdvp_env_R_T1 @tensor T1[ket_l, p_in, bra_r, mpo_r] := A[ket_l, p_in, k] * E_right[bra_r, mpo_r, k]
+    @t :tdvp_env_R_T2 @tensor T2[mpo_l, p_out, ket_l, bra_r] := W[mpo_l, p_out, k_pin, k_mr] * T1[ket_l, k_pin, bra_r, k_mr]
+    @t :tdvp_env_R_E_next @tensor E_next[bra_l, mpo_l, ket_l] := T2[mpo_l, k_pout, ket_l, k_br] * conj(A[bra_l, k_pout, k_br])
     return E_next
 end
 
 # --- Projectors ---
 
 function project_site(A, L, R, W)
-    @tensor T1[bra_l, mpo_l, p_in, ket_r] := L[bra_l, mpo_l, k] * A[k, p_in, ket_r]
-    @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
-    @tensor A_new[bra_l, p_out, bra_r] := T2[bra_l, k_kr, p_out, k_mr] * R[bra_r, k_mr, k_kr]
+    @t :tdvp_proj_site_T1 @tensor T1[bra_l, mpo_l, p_in, ket_r] := L[bra_l, mpo_l, k] * A[k, p_in, ket_r]
+    @t :tdvp_proj_site_T2 @tensor T2[bra_l, ket_r, p_out, mpo_r] := T1[bra_l, k_ml, k_pin, ket_r] * W[k_ml, p_out, k_pin, mpo_r]
+    @t :tdvp_proj_site_out @tensor A_new[bra_l, p_out, bra_r] := T2[bra_l, k_kr, p_out, k_mr] * R[bra_r, k_mr, k_kr]
     return A_new
 end
 
 function project_bond(C, L, R)
-    @tensor T1[bra_l, mpo, ket_r] := L[bra_l, mpo, k] * C[k, ket_r]
-    @tensor C_new[bra_l, bra_r] := T1[bra_l, k_mpo, k_kr] * R[bra_r, k_mpo, k_kr]
+    @t :tdvp_proj_bond_T1 @tensor T1[bra_l, mpo, ket_r] := L[bra_l, mpo, k] * C[k, ket_r]
+    @t :tdvp_proj_bond_out @tensor C_new[bra_l, bra_r] := T1[bra_l, k_mpo, k_kr] * R[bra_r, k_mpo, k_kr]
     return C_new
 end
 
@@ -71,16 +72,16 @@ end
 
 function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     # Reshape for SVD (L*p1, p2*R)
-    Mat = reshape(Theta, l_virt*p1, p2*r_virt)
+    Mat = @t :tdvp_svd_reshape reshape(Theta, l_virt*p1, p2*r_virt)
     
     # Check for NaNs/Infs which cause LAPACKException
-    if any(!isfinite, Mat)
+    if @t :tdvp_svd_check_finite any(!isfinite, Mat)
         @warn "NaN or Inf detected in tensor before SVD. Replacing with zeros to avoid crash, but simulation may be compromised."
         replace!(Mat, NaN => 0.0, Inf => 0.0, -Inf => 0.0)
     end
 
     # Use QRIteration for robustness against LAPACKException(1)
-    F = svd(Mat)
+    F = @t :tdvp_svd svd(Mat)
     
     # Truncation
     discarded_sq = 0.0
@@ -88,11 +89,13 @@ function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     threshold = config.truncation_threshold
     min_keep = 2
     
-    for k in length(F.S):-1:1
-        discarded_sq += F.S[k]^2
-        if discarded_sq >= threshold
-            keep_rank = max(k, min_keep)
-            break
+    @t :tdvp_truncation_loop begin
+        for k in length(F.S):-1:1
+            discarded_sq += F.S[k]^2
+            if discarded_sq >= threshold
+                keep_rank = max(k, min_keep)
+                break
+            end
         end
     end
     
@@ -263,10 +266,10 @@ end
 
 # 4. Circuit 2-Site (Forward Only)
 function _tdvp_sweep_circuit_2site!(state, H, config)
-    shift_orthogonality_center!(state, 1)
+    @t :tdvp_shift_orth_center shift_orthogonality_center!(state, 1)
     L = state.length
     
-    E_left, E_right = _init_envs(state, H)
+    E_left, E_right = @t :tdvp_init_envs _init_envs(state, H)
     
     # Circuit Logic: 
     # Bulk dt=2.0 (split into +1.0, -1.0)
@@ -290,39 +293,39 @@ end
 function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
-    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    @t :tdvp_theta_contract @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
     
     W1 = H.tensors[i]
     W2 = H.tensors[i+1]
-    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
-    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    @t :tdvp_mpo_merge @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = @t :tdvp_mpo_permute permutedims(W_merge, (1, 2, 4, 3, 5, 6))
     l1, p1o, p1i, b1 = size(W1)
     l2, p2o, p2i, b2 = size(W2)
-    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    W_group = @t :tdvp_mpo_reshape reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
     
     l_theta, p1, p2, r_theta = size(Theta)
-    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
     
     # Evolve Theta
     func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
-    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # Split (Move Center Right: Keep S with V)
-    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
-    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = @t :tdvp_split_svd split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
     
     # Assign Left (U) -> Left Canonical
     state.tensors[i] = reshape(U, l_theta, p1, keep)
     
     # Update Left Env for next site
-    E_left[i+1] = update_left_environment(state.tensors[i], W1, E_left[i])
+    E_left[i+1] = @t :tdvp_update_left_env update_left_environment(state.tensors[i], W1, E_left[i])
     
     # Form Right (S*V) -> Center
-    A2_temp = reshape(Diagonal(S) * Vt, keep, p2, r_theta)
+    A2_temp = @t :tdvp_form_A2temp reshape(Diagonal(S) * Vt, keep, p2, r_theta)
     
     if evolve_back
         func_back(x) = project_site(x, E_left[i+1], E_right[i+2], W2)
-        A2_new = expm_krylov(func_back, A2_temp, -dt_step, 25)
+        A2_new = @t :tdvp_expm_back expm_krylov(func_back, A2_temp, -dt_step, 25)
         state.tensors[i+1] = A2_new
     else
         state.tensors[i+1] = A2_temp
@@ -423,35 +426,35 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
-    @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+    @t :tdvp_theta_contract @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
     
     W1 = H.tensors[i]
     W2 = H.tensors[i+1]
-    @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
-    W_perm = permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    @t :tdvp_mpo_merge @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = @t :tdvp_mpo_permute permutedims(W_merge, (1, 2, 4, 3, 5, 6))
     l1, p1o, p1i, b1 = size(W1)
     l2, p2o, p2i, b2 = size(W2)
-    W_group = reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+    W_group = @t :tdvp_mpo_reshape reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
     
     l_theta, p1, p2, r_theta = size(Theta)
-    Theta_group = reshape(Theta, l_theta, p1*p2, r_theta)
+    Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
     
     # Evolve Theta
     func_two(x) = project_site(x, E_left[i], E_right[i+2], W_group)
-    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
     
     # Split Right (Center moves to i+1)
-    Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
-    U, S, Vt, keep = split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+    Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = @t :tdvp_split_svd split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
     
     # Assign Left (U) -> Left Canonical
     state.tensors[i] = reshape(U, l_theta, p1, keep)
     
     # Update Left Env
-    E_left[i+1] = update_left_environment(state.tensors[i], W1, E_left[i])
+    E_left[i+1] = @t :tdvp_update_left_env update_left_environment(state.tensors[i], W1, E_left[i])
     
     # Assign Right (S*V) -> Center
-    state.tensors[i+1] = reshape(Diagonal(S) * Vt, keep, p2, r_theta)
+    state.tensors[i+1] = @t :tdvp_form_A2temp reshape(Diagonal(S) * Vt, keep, p2, r_theta)
 end
 
 function _init_envs(state, H)
@@ -459,16 +462,16 @@ function _init_envs(state, H)
     E_right = Vector{Array{ComplexF64, 3}}(undef, L+1)
     r_bond = size(state.tensors[L], 3)
     r_mpo = size(H.tensors[L], 4)
-    E_right[L+1] = make_identity_env(r_bond, r_mpo)
+    E_right[L+1] = @t :tdvp_env_make_id make_identity_env(r_bond, r_mpo)
     
     for i in L:-1:2
-        E_right[i] = update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
+        E_right[i] = @t :tdvp_env_update_right update_right_environment(state.tensors[i], H.tensors[i], E_right[i+1])
     end
     
     E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
     l_bond = size(state.tensors[1], 1)
     l_mpo = size(H.tensors[1], 1)
-    E_left[1] = make_identity_env(l_bond, l_mpo)
+    E_left[1] = @t :tdvp_env_make_id make_identity_env(l_bond, l_mpo)
     
     return E_left, E_right
 end

@@ -7,6 +7,7 @@ using ..MPSModule
 using ..NoiseModule
 using ..Decompositions
 using ..SimulationConfigs
+using ..Timing: @t
 
 export apply_dissipation
 
@@ -37,8 +38,10 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
     # 1. Check if noise is present
     if isnothing(noise_model) || all(p.strength == 0 for p in noise_model.processes)
         # Shift orthogonality center to Left (1)
-        for i in mps.length:-1:2
-            MPSModule.shift_orthogonality_center!(mps, i - 1)
+        @t :dissipation_shift_only begin
+            for i in mps.length:-1:2
+                MPSModule.shift_orthogonality_center!(mps, i - 1)
+            end
         end
         return
     end
@@ -53,63 +56,62 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
             if proc isa LocalNoiseProcess && length(proc.sites) == 1 && proc.sites[1] == i
                 gamma = proc.strength
                 if is_pauli(proc)
-                    factor = exp(-0.5 * dt * gamma)
-                    mps.tensors[i] .*= factor
+                    factor = @t :dissipation_exp_scalar exp(-0.5 * dt * gamma)
+                    @t :dissipation_1site_pauli_scale mps.tensors[i] .*= factor
                 else
                     L_op = proc.matrix
-                    mat = L_op' * L_op
-                    op = exp(-0.5 * dt * gamma * mat) # (2,2)
+                    mat = @t :dissipation_1site_matmul (L_op' * L_op)
+                    op = @t :dissipation_1site_expm exp(-0.5 * dt * gamma * mat) # (2,2)
                     
                     # Contract: op[p_new, p_old] * T[l, p_old, r]
                     T_ten = mps.tensors[i]
-                    @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
-                    mps.tensors[i] = T_new
+                    @t :dissipation_1site_contract @tensor T_new[l, p, r] := op[p, k] * T_ten[l, k, r]
+                    @t :dissipation_1site_writeback mps.tensors[i] = T_new
                 end
             end
         end
 
         # 2. Apply 2-site dissipators on (i-1, i)
         if i > 1
-            processes_here = [
-                p for p in noise_model.processes 
-                if length(p.sites) == 2 && maximum(p.sites) == i
-            ]
+            processes_here = @t :dissipation_collect_2site_processes begin
+                [p for p in noise_model.processes if length(p.sites) == 2 && maximum(p.sites) == i]
+            end
             
             for proc in processes_here
                 gamma = proc.strength
                 
                 if proc isa LocalNoiseProcess
                      if is_pauli(proc)
-                        factor = exp(-0.5 * dt * gamma)
-                        mps.tensors[i] .*= factor 
+                        factor = @t :dissipation_exp_scalar exp(-0.5 * dt * gamma)
+                        @t :dissipation_2site_pauli_scale mps.tensors[i] .*= factor 
                         
                      elseif is_longrange(proc)
-                        handle_longrange_scalar!(mps, proc, i, processed_projector_pairs, processes_here, dt)
+                        @t :dissipation_longrange_scalar handle_longrange_scalar!(mps, proc, i, processed_projector_pairs, processes_here, dt)
                         
                      else
                         # General 2-site local (adjacent)
                         L_op = proc.matrix 
-                        mat = L_op' * L_op
-                        op = exp(-0.5 * dt * gamma * mat) # 4x4
+                        mat = @t :dissipation_2site_matmul (L_op' * L_op)
+                        op = @t :dissipation_2site_expm exp(-0.5 * dt * gamma * mat) # 4x4
                         
                         # Merge i-1 and i
                         A = mps.tensors[i-1] # (l, p1, k)
                         B = mps.tensors[i]   # (k, p2, r)
                         
-                        @tensor C[l, p1, p2, r] := A[l, p1, k] * B[k, p2, r]
+                        @t :dissipation_2site_merge @tensor C[l, p1, p2, r] := A[l, p1, k] * B[k, p2, r]
                         
                         # Apply Op
                         # Op is 4x4 acting on (p1, p2)
                         op_tensor = reshape(op, 2, 2, 2, 2) # (p1', p2', p1, p2)
-                        @tensor C_new[l, p1_new, p2_new, r] := op_tensor[p1_new, p2_new, p1, p2] * C[l, p1, p2, r]
+                        @t :dissipation_2site_apply @tensor C_new[l, p1_new, p2_new, r] := op_tensor[p1_new, p2_new, p1, p2] * C[l, p1, p2, r]
                         
                         # Split (Keep B Right Canonical approx, put S on B)
                         # We use standard SVD: C = U S V'.
                         # A = U. B = S V'.
                         
                         l_dim, _, _, r_dim = size(C_new)
-                        C_split = reshape(C_new, l_dim * 2, 2 * r_dim)
-                        F = svd(C_split)
+                        C_split = @t :dissipation_2site_reshape reshape(C_new, l_dim * 2, 2 * r_dim)
+                        F = @t :dissipation_2site_svd svd(C_split)
                         U, S, Vt = F.U, F.S, F.Vt
                         
                         # Truncation
@@ -118,14 +120,16 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
                         max_bond = hasproperty(sim_params, :max_bond_dim) ? sim_params.max_bond_dim : typemax(Int)
                         
                         # Calculate kept rank
-                        norm_sq = sum(abs2, S)
-                        current_sum = 0.0
                         rank = length(S)
-                        for k in length(S):-1:1
-                            current_sum += abs2(S[k])
-                            if current_sum > threshold * norm_sq
-                                rank = k
-                                break
+                        @t :dissipation_2site_trunc begin
+                            norm_sq = sum(abs2, S)
+                            current_sum = 0.0
+                            for k in length(S):-1:1
+                                current_sum += abs2(S[k])
+                                if current_sum > threshold * norm_sq
+                                    rank = k
+                                    break
+                                end
                             end
                         end
                         # Ensure at least 1 and at most max_bond
@@ -135,19 +139,21 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
                         S = S[1:rank]
                         Vt = Vt[1:rank, :]
                         
-                        mps.tensors[i-1] = reshape(U, l_dim, 2, rank)
-                        mps.tensors[i] = reshape(Diagonal(S) * Vt, rank, 2, r_dim)
+                        @t :dissipation_2site_writeback begin
+                            mps.tensors[i-1] = reshape(U, l_dim, 2, rank)
+                            mps.tensors[i] = reshape(Diagonal(S) * Vt, rank, 2, r_dim)
+                        end
                      end
                 
                 elseif proc isa MPONoiseProcess
-                    handle_longrange_scalar!(mps, proc, i, processed_projector_pairs, processes_here, dt)
+                    @t :dissipation_longrange_scalar handle_longrange_scalar!(mps, proc, i, processed_projector_pairs, processes_here, dt)
                 end
             end
         end
 
         # Shift center left
         if i > 1
-             MPSModule.shift_orthogonality_center!(mps, i - 1)
+             @t :dissipation_shift_center MPSModule.shift_orthogonality_center!(mps, i - 1)
         end
     end
 end
@@ -177,18 +183,21 @@ function handle_longrange_scalar!(mps, proc, i, processed_set, processes_here, d
         end
         
         gamma_pair = mates[1].strength + mates[2].strength
-        mps.tensors[i] .*= exp(-0.5 * dt * gamma_pair)
+        factor = @t :dissipation_longrange_exp_scalar exp(-0.5 * dt * gamma_pair)
+        @t :dissipation_longrange_scale mps.tensors[i] .*= factor
         
         push!(processed_set, pair_key)
         
     elseif startswith(nm, "unitary2pt_") || startswith(nm, "unitary_gauss_")
         gamma_comp = proc.strength
-        mps.tensors[i] .*= exp(-0.5 * dt * gamma_comp)
+        factor = @t :dissipation_longrange_exp_scalar exp(-0.5 * dt * gamma_comp)
+        @t :dissipation_longrange_scale mps.tensors[i] .*= factor
     
     elseif startswith(nm, "crosstalk_") || startswith(nm, "pauli_")
         # Standard Pauli MPO dissipation (L†L = I, so it's just scalar decay)
         gamma = proc.strength
-        mps.tensors[i] .*= exp(-0.5 * dt * gamma)
+        factor = @t :dissipation_longrange_exp_scalar exp(-0.5 * dt * gamma)
+        @t :dissipation_longrange_scale mps.tensors[i] .*= factor
     else
         error("Non-Pauli long-range processes not fully implemented for: $nm")
     end

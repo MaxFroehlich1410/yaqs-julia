@@ -26,14 +26,19 @@ using .Yaqs.CircuitIngestion
 # CONFIGURATION
 # ==============================================================================
 
+# Timing prints (per trajectory) from DigitalTJM
+ENABLE_FUNCTION_TIMING = true
+Yaqs.DigitalTJM.enable_timing!(ENABLE_FUNCTION_TIMING)
+Yaqs.DigitalTJM.set_timing_print_each_call!(false)  # aggregate across trajectories
+
 # Simulation Size
-NUM_QUBITS = 127
-NUM_LAYERS = 5
+NUM_QUBITS = 14
+NUM_LAYERS = 10
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Unraveling
-NUM_TRAJECTORIES = 20
+NUM_TRAJECTORIES = 5
 MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just performance
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
@@ -73,9 +78,9 @@ SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(In
 
 # Flags
 RUN_QISKIT_MPS = false
-RUN_JULIA = false
-RUN_JULIA_ANALOG_2PT = false
-RUN_JULIA_ANALOG_GAUSS = false
+RUN_JULIA = true
+RUN_JULIA_ANALOG_2PT = true
+RUN_JULIA_ANALOG_GAUSS = true
 RUN_JULIA_PROJECTOR = true
 
 # ------------------------------------------------------------------------------
@@ -95,11 +100,11 @@ FORCE_JULIA_ON_IBM127 = true    # set true only if you really want to attempt Ju
 
 # Error Flags
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = true
-ENABLE_Z_ERROR = true
+ENABLE_Y_ERROR = false
+ENABLE_Z_ERROR = false
 
 # Lists for Loop
-CIRCUIT_LIST = ["IBM127_kicked_ising"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
+CIRCUIT_LIST = ["XY", "XY_longrange"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
 NOISE_STRENGTH_LIST = [0.1]
 
 # ==============================================================================
@@ -205,6 +210,11 @@ end
 
 function perform_warmup(loc_mode, lr_mode)
     println("Pre-compiling Julia functions on small system (N=4)...")
+    # Warmup should not pollute timing stats / output
+    local _timing_was_enabled = ENABLE_FUNCTION_TIMING
+    if _timing_was_enabled
+        Yaqs.DigitalTJM.enable_timing!(false)
+    end
     N = 4
     psi = MPS(N; state="zeros")
     circ = DigitalCircuit(N)
@@ -274,6 +284,9 @@ function perform_warmup(loc_mode, lr_mode)
     end
 
     println("Pre-compilation complete.")
+    if _timing_was_enabled
+        Yaqs.DigitalTJM.enable_timing!(true)
+    end
 end
 
 # ==============================================================================
@@ -1182,8 +1195,14 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if run_julia
             try
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.reset_timing!()
+                end
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia, exact_stag_ref, "Julia", output_dir, file_experiment_name)
                 process_results("Julia", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.print_timing_summary!(header="DigitalTJM aggregated timing | Circuit=$(CIRCUIT_NAME) | Method=Julia | Noise=$(NOISE_STRENGTH)")
+                end
             catch e
                 println("Julia Failed: $e")
                 Base.showerror(stdout, e, catch_backtrace())
@@ -1192,8 +1211,14 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if run_julia_analog_2pt
             try
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.reset_timing!()
+                end
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_2pt, exact_stag_ref, "Julia Analog 2pt", output_dir, file_experiment_name)
                 process_results("Julia Analog 2pt", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.print_timing_summary!(header="DigitalTJM aggregated timing | Circuit=$(CIRCUIT_NAME) | Method=Julia Analog 2pt | Noise=$(NOISE_STRENGTH)")
+                end
             catch e
                 println("Julia Analog 2pt Failed: $e")
                 Base.showerror(stdout, e, catch_backtrace())
@@ -1202,8 +1227,14 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if run_julia_analog_gauss
             try
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.reset_timing!()
+                end
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_analog_gauss, exact_stag_ref, "Julia Analog Gauss", output_dir, file_experiment_name)
                 process_results("Julia Analog Gauss", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.print_timing_summary!(header="DigitalTJM aggregated timing | Circuit=$(CIRCUIT_NAME) | Method=Julia Analog Gauss | Noise=$(NOISE_STRENGTH)")
+                end
             catch e
                 println("Julia Analog Gauss Failed: $e")
                 Base.showerror(stdout, e, catch_backtrace())
@@ -1212,8 +1243,14 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         if run_julia_projector
             try
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.reset_timing!()
+                end
                 n, mse, stag, avg_res, var_res, avg_bonds, t_total = run_trajectories(runner_julia_projector, exact_stag_ref, "Julia Projector", output_dir, file_experiment_name)
                 process_results("Julia Projector", n, mse, stag, avg_res, var_res, avg_bonds, t_total)
+                if ENABLE_FUNCTION_TIMING
+                    Yaqs.DigitalTJM.print_timing_summary!(header="DigitalTJM aggregated timing | Circuit=$(CIRCUIT_NAME) | Method=Julia Projector | Noise=$(NOISE_STRENGTH)")
+                end
             catch e
                 println("Julia Projector Failed: $e")
                 Base.showerror(stdout, e, catch_backtrace())
