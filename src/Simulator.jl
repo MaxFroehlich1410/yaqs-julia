@@ -68,7 +68,7 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
     SimulationConfigs.aggregate_trajectories!(sim_params)
 end
 
-function _run_digital(initial_state::MPS, circuit::DigitalCircuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
+function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
     
     # Noise check
     if isnothing(noise_model) || all(p -> p.strength == 0, noise_model.processes)
@@ -130,7 +130,7 @@ function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=no
     if isa(sim_params, TimeEvolutionConfig)
         if isa(operator_or_circuit, MPO)
             return _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
-        elseif isa(operator_or_circuit, DigitalCircuit)
+        elseif isa(operator_or_circuit, DigitalCircuit) || isa(operator_or_circuit, DigitalTJM.RepeatedDigitalCircuit)
             return _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         else
              error("Simulation requires MPO (Analog) or DigitalCircuit (Digital).")

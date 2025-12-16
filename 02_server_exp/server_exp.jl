@@ -19,7 +19,7 @@ using .Yaqs.GateLibrary
 using .Yaqs.NoiseModule
 using .Yaqs.SimulationConfigs
 using .Yaqs.CircuitLibrary
-using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, DigitalGate
+using .Yaqs.DigitalTJM: DigitalCircuit, RepeatedDigitalCircuit, add_gate!, DigitalGate
 using .Yaqs.CircuitIngestion
 
 # ==============================================================================
@@ -46,7 +46,7 @@ MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just perform
 
 longrange_mode = "TDVP" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
-MAX_BOND_DIM = 32
+MAX_BOND_DIM = 64
 SVD_TRUNCATION_THRESHOLD = 1e-16
 
 # Model Specific Params
@@ -81,10 +81,10 @@ SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(In
 
 # Flags
 RUN_QISKIT_MPS = false
-RUN_JULIA = false
+RUN_JULIA = true
 RUN_JULIA_ANALOG_2PT = false
 RUN_JULIA_ANALOG_GAUSS = false
-RUN_JULIA_PROJECTOR = true
+RUN_JULIA_PROJECTOR = false
 
 # ------------------------------------------------------------------------------
 # IBM 127q "kicked Ising" benchmark (Kim et al., Nature 618, 500–505 (2023))
@@ -94,7 +94,7 @@ RUN_JULIA_PROJECTOR = true
 # simulation of the heavy-hex 2D connectivity on a 1D chain ordering is typically
 # prohibitively expensive at N=127 (many hardware-neighbor couplings become long-range).
 # ------------------------------------------------------------------------------
-IBM_BACKEND_NAME = "FakeKyiv"     # requires `qiskit_ibm_runtime.fake_provider`
+IBM_BACKEND_NAME = "FakeKyiv"     # legacy (no longer required): we load Kyiv connectivity from the local wheel JSON
 IBM_THETA_H = 0.7                # RX kick angle (theta_h)
 IBM_THETA_J = -π/2               # RZZ coupling angle (theta_J); paper uses -π/2
 IBM_ADD_BARRIERS = true          # barrier after each step (used as sampling delimiter)
@@ -103,8 +103,8 @@ FORCE_JULIA_ON_IBM127 = true    # set true only if you really want to attempt Ju
 
 # Error Flags
 ENABLE_X_ERROR = true
-ENABLE_Y_ERROR = false
-ENABLE_Z_ERROR = false
+ENABLE_Y_ERROR = true
+ENABLE_Z_ERROR = true
 
 # Lists for Loop
 CIRCUIT_LIST = ["IBM127_kicked_ising"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
@@ -159,6 +159,88 @@ end
 # ==============================================================================
 # HELPERS
 # ==============================================================================
+
+const KYIV_WHEEL_PATH = joinpath(@__DIR__, "qiskit_ibm_runtime-0.43.1-py3-none-any.whl")
+const KYIV_CONF_PATH_IN_WHEEL = "qiskit_ibm_runtime/fake_provider/backends/kyiv/conf_kyiv.json"
+const KYIV_CONF_EXTRACTED_PATH = joinpath(@__DIR__, "conf_kyiv.json")
+
+function _kyiv_load_conf_from_wheel(; wheel_path::AbstractString=KYIV_WHEEL_PATH,
+                                    conf_path_in_wheel::AbstractString=KYIV_CONF_PATH_IN_WHEEL)
+    if !isfile(wheel_path)
+        error("Missing local wheel file: $wheel_path\n" *
+              "Expected it in `02_server_exp/`. Please ensure `qiskit_ibm_runtime-0.43.1-py3-none-any.whl` exists there.")
+    end
+    zipfile = pyimport("zipfile")
+    json = pyimport("json")
+    z = zipfile.ZipFile(wheel_path)
+    raw = z.read(conf_path_in_wheel)
+
+    # "Unpack" (extract) the JSON next to this script for debugging/inspection and future-proofing.
+    if !isfile(KYIV_CONF_EXTRACTED_PATH)
+        try
+            write(KYIV_CONF_EXTRACTED_PATH, pyconvert(Vector{UInt8}, raw))
+            println("Extracted Kyiv backend configuration JSON to $KYIV_CONF_EXTRACTED_PATH")
+        catch e
+            println("Warning: failed to extract Kyiv JSON to disk: $e")
+        end
+    end
+
+    # json.loads accepts bytes; no need to decode explicitly.
+    return json.loads(raw)
+end
+
+"""
+    kyiv_edge_colored_layers_from_wheel(; wheel_path=KYIV_WHEEL_PATH)
+
+Load IBM Kyiv backend connectivity from `conf_kyiv.json` stored inside the local
+`qiskit_ibm_runtime-*.whl` file, and compute an edge-coloring into disjoint layers
+using `rustworkx.graph_bipartite_edge_color`.
+
+Returns `(n_qubits::Int, layers0::Vector{Vector{Tuple{Int,Int}}})` where qubit indices are **0-based**.
+Each layer is a sorted vector of undirected edges `(min(i,j), max(i,j))`.
+
+This avoids `pyimport("qiskit_ibm_runtime.fake_provider")`, which may be unavailable in the PythonCall env.
+"""
+function kyiv_edge_colored_layers_from_wheel(; wheel_path::AbstractString=KYIV_WHEEL_PATH)
+    conf = _kyiv_load_conf_from_wheel(; wheel_path=wheel_path)
+    n = pyconvert(Int, conf["n_qubits"])
+
+    # Build undirected graph from coupling_map
+    rx = pyimport("rustworkx")
+    g = rx.PyGraph()
+    g.add_nodes_from(pybuiltins.list(pybuiltins.range(n)))
+    coupling = conf["coupling_map"]  # list of [i, j] (directed in config; we treat as undirected here)
+    for e in coupling
+        i0 = pyconvert(Int, e[0])
+        j0 = pyconvert(Int, e[1])
+        g.add_edge(i0, j0, nothing)
+    end
+
+    # Edge coloring (Δ colors for bipartite graphs)
+    edge_coloring = rx.graph_bipartite_edge_color(g)  # dict: edge_idx -> color
+
+    layer_map = Dict{Int, Vector{Tuple{Int,Int}}}()
+    for item in edge_coloring.items()
+        edge_idx = pyconvert(Int, item[0])
+        color = pyconvert(Int, item[1])
+        endpoints = g.get_edge_endpoints_by_index(edge_idx)
+        u = pyconvert(Int, endpoints[0])
+        v = pyconvert(Int, endpoints[1])
+        a = min(u, v)
+        b = max(u, v)
+        push!(get!(layer_map, color, Tuple{Int,Int}[]), (a, b))
+    end
+
+    colors = sort!(collect(keys(layer_map)))
+    layers0 = Vector{Vector{Tuple{Int,Int}}}(undef, length(colors))
+    for (k, c) in enumerate(colors)
+        layer = layer_map[c]
+        sort!(layer)
+        layers0[k] = layer
+    end
+
+    return n, layers0
+end
 
 function staggered_magnetization(expvals::Vector{Float64}, L::Int)
     sum_val = 0.0
@@ -464,6 +546,31 @@ for CIRCUIT_NAME in CIRCUIT_LIST
 
         println("Configuration: Circuit=$CIRCUIT_NAME, N=$NUM_QUBITS, Layers=$NUM_LAYERS, Noise=$NOISE_STRENGTH")
 
+        # Preload IBM Kyiv connectivity (0-based) from local wheel JSON, and derive edge-disjoint layers.
+        # This is used for BOTH Julia-side gates/noise (1-based indices) and Qiskit noise (0-based indices).
+        ibm_layers0 = nothing  # Vector{Vector{Tuple{Int,Int}}} with 0-based indices
+        ibm_edges0 = nothing   # Vector{Tuple{Int,Int}} 0-based undirected edges
+        ibm_edges1 = nothing   # Vector{Tuple{Int,Int}} 1-based undirected edges
+        if BASE_MODEL == "IBM127_kicked_ising"
+            n_backend, layers0 = kyiv_edge_colored_layers_from_wheel()
+            if n_backend != NUM_QUBITS
+                error("Kyiv conf n_qubits ($n_backend) != NUM_QUBITS ($NUM_QUBITS). Set NUM_QUBITS accordingly.")
+            end
+            ibm_layers0 = layers0
+            if length(ibm_layers0) != 3
+                println("Warning: expected 3 edge-disjoint layers for Kyiv heavy-hex, got $(length(ibm_layers0)). Continuing anyway.")
+            end
+
+            edge_set0 = Set{Tuple{Int,Int}}()
+            for layer in ibm_layers0
+                for (i0, j0) in layer
+                    push!(edge_set0, (i0, j0))
+                end
+            end
+            ibm_edges0 = collect(edge_set0)
+            ibm_edges1 = [(i0 + 1, j0 + 1) for (i0, j0) in ibm_edges0]
+        end
+
         # For IBM127 heavy-hex kicked-Ising, Julia MPS evolution on a 1D chain ordering is typically
         # prohibitively expensive / unstable (most hardware-neighbor gates become long-range).
         # Default behavior: run only the Qiskit MPS baseline unless explicitly forced.
@@ -507,94 +614,84 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         println("Building Circuits ($CIRCUIT_NAME)...")
 
         # Julia Circuit Construction
-        # NOTE: This is built regardless of RUN_JULIA flags to keep the script structure simple.
-        # For IBM127 heavy-hex, this circuit is extremely expensive to simulate with a 1D MPS.
-        circ_jl = DigitalCircuit(NUM_QUBITS)
-        # Initial Barrier
-        add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+        # NOTE: built regardless of RUN_JULIA flags to keep script structure simple.
+        #
+        # IMPORTANT: For all circuits here, we treat the per-layer gate pattern as a "trotter step"
+        # and repeat it `NUM_LAYERS` times using `RepeatedDigitalCircuit(step, NUM_LAYERS)` to avoid
+        # storing `NUM_LAYERS` copies of an identical gate list (critical for large systems like IBM127).
+        circ_jl = nothing
 
         # Circuit Construction
         if BASE_MODEL == "Ising"
-            circ_jl = create_ising_circuit(NUM_QUBITS, J, g, dt, NUM_LAYERS, periodic=periodic)
+            step = create_ising_circuit(NUM_QUBITS, J, g, dt, 1, periodic=periodic)
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
             
         elseif BASE_MODEL == "XY"
-            for _ in 1:NUM_LAYERS
-                if long_range_gates
-                    layer = xy_trotter_layer_longrange(NUM_QUBITS, tau)
-                else
-                    layer = xy_trotter_layer(NUM_QUBITS, tau)
-                end
-                for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
-                add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+            # Build ONE trotter step and repeat it NUM_LAYERS times in DigitalTJM.
+            step = DigitalCircuit(NUM_QUBITS)
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample at t=0
+            if long_range_gates
+                layer = xy_trotter_layer_longrange(NUM_QUBITS, tau)
+            else
+                layer = xy_trotter_layer(NUM_QUBITS, tau)
             end
+            for g in layer.gates; add_gate!(step, g.op, g.sites); end
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample after each step
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
 
         elseif BASE_MODEL == "Heisenberg"
-            circ_jl = create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, NUM_LAYERS, periodic=periodic)
+            step = create_heisenberg_circuit(NUM_QUBITS, Jx, Jy, Jz, h_field, dt, 1, periodic=periodic)
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
 
         elseif BASE_MODEL == "QAOA"
-            for _ in 1:NUM_LAYERS
-                layer = qaoa_ising_layer(NUM_QUBITS; beta=beta_qaoa, gamma=gamma_qaoa)
-                for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
-                add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
-            end
+            step = DigitalCircuit(NUM_QUBITS)
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample at t=0
+            layer = qaoa_ising_layer(NUM_QUBITS; beta=beta_qaoa, gamma=gamma_qaoa)
+            for g in layer.gates; add_gate!(step, g.op, g.sites); end
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample after each step
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
 
         elseif BASE_MODEL == "HEA"
             phis = fill(phi_hea, NUM_QUBITS)
             thetas = fill(theta_hea, NUM_QUBITS)
             lams = fill(lam_hea, NUM_QUBITS)
-            for _ in 1:NUM_LAYERS
-                layer = hea_layer(NUM_QUBITS; phis=phis, thetas=thetas, lams=lams, start_parity=start_parity_hea)
-                for g in layer.gates; add_gate!(circ_jl, g.op, g.sites); end
-                add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
-            end
+            step = DigitalCircuit(NUM_QUBITS)
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample at t=0
+            layer = hea_layer(NUM_QUBITS; phis=phis, thetas=thetas, lams=lams, start_parity=start_parity_hea)
+            for g in layer.gates; add_gate!(step, g.op, g.sites); end
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample after each step
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
 
         elseif BASE_MODEL == "longrange_test"
             # Longrange test circuit: H gates on all qubits, then one RXX gate between qubits L and 1
-            for _ in 1:NUM_LAYERS
-                # Apply H gates to all qubits
-                for q in 1:NUM_QUBITS
-                    add_gate!(circ_jl, HGate(), [q])
-                end
-                # Apply exactly ONE long-range two-qubit gate: RXX between qubits L and 1
-                add_gate!(circ_jl, RzzGate(longrange_theta), [NUM_QUBITS, 1])
-                add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+            step = DigitalCircuit(NUM_QUBITS)
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample at t=0
+            for q in 1:NUM_QUBITS
+                add_gate!(step, HGate(), [q])
             end
+            add_gate!(step, RzzGate(longrange_theta), [NUM_QUBITS, 1])
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample after each step
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
         elseif BASE_MODEL == "IBM127_kicked_ising"
-            if isnothing(ibm_127q_circuit)
-                err_str = isnothing(ibm_127q_circuit_import_error) ? "unknown (exception was not captured)" :
-                          sprint(showerror, ibm_127q_circuit_import_error)
-                msg = "CIRCUIT_NAME=IBM127_kicked_ising requested, but `ibm_127q_circuit.py` could not be imported.\n" *
-                      "Most likely Python deps are missing in the PythonCall environment.\n" *
-                      "Underlying error: $err_str"
-                error(msg)
-            end
-            # Build the heavy-hex edge-colored schedule from the backend, then mirror the Python circuit:
+            # Build the heavy-hex edge-colored schedule from the local wheel JSON, then mirror the Python circuit:
             # for each step: RX(theta_h) on all qubits, then RZZ(theta_J) on all neighbor edges (3 disjoint layers),
             # then a barrier used as SAMPLE_OBSERVABLES delimiter.
-            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
-            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
-            backend = backend_ctor()
-            n_backend = pyconvert(Int, backend.num_qubits)
-            if n_backend != NUM_QUBITS
-                error("IBM backend qubit count ($n_backend) != NUM_QUBITS ($NUM_QUBITS). Set NUM_QUBITS accordingly.")
+            # Build ONE kicked-Ising step and repeat it NUM_LAYERS times in DigitalTJM.
+            step = DigitalCircuit(NUM_QUBITS)
+            add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample at t=0
+            for q in 1:NUM_QUBITS
+                add_gate!(step, RxGate(IBM_THETA_H), [q])
             end
-            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
-            for _ in 1:NUM_LAYERS
-                for q in 1:NUM_QUBITS
-                    add_gate!(circ_jl, RxGate(IBM_THETA_H), [q])
-                end
-                for layer in layers
-                    for edge in layer
-                        # edge is a 2-tuple (i, j), 0-based
-                        i0 = pyconvert(Int, edge[0])
-                        j0 = pyconvert(Int, edge[1])
-                        add_gate!(circ_jl, RzzGate(IBM_THETA_J), [i0 + 1, j0 + 1])
-                    end
-                end
-                if IBM_ADD_BARRIERS
-                    add_gate!(circ_jl, Barrier("SAMPLE_OBSERVABLES"), Int[])
+            for layer in ibm_layers0
+                for edge in layer
+                    i0, j0 = edge
+                    add_gate!(step, RzzGate(IBM_THETA_J), [i0 + 1, j0 + 1])  # Julia uses 1-based
                 end
             end
+            if IBM_ADD_BARRIERS
+                add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])
+            end
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
         else
             error("Unknown BASE_MODEL: $BASE_MODEL")
         end
@@ -640,23 +737,17 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
             trotter_step = local_circuit_lib.longrange_test_circuit(NUM_QUBITS, longrange_theta)
         elseif BASE_MODEL == "IBM127_kicked_ising"
-            if isnothing(ibm_127q_circuit)
-                err_str = isnothing(ibm_127q_circuit_import_error) ? "unknown (exception was not captured)" :
-                          sprint(showerror, ibm_127q_circuit_import_error)
-                msg = "CIRCUIT_NAME=IBM127_kicked_ising requested, but `ibm_127q_circuit.py` could not be imported.\n" *
-                      "Underlying error: $err_str"
-                error(msg)
+            # Build a single kicked-Ising trotter step in Qiskit from the precomputed edge-colored layers.
+            trotter_step = qiskit.QuantumCircuit(NUM_QUBITS)
+            trotter_step.rx(IBM_THETA_H, pybuiltins.range(NUM_QUBITS))
+            for layer in ibm_layers0
+                for (i0, j0) in layer
+                    trotter_step.rzz(IBM_THETA_J, i0, j0)
+                end
             end
-            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
-            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
-            backend = backend_ctor()
-            trotter_step = ibm_127q_circuit.build_untwirled_kicked_ising_circuit(
-                backend,
-                1,
-                IBM_THETA_H,
-                theta_J=IBM_THETA_J,
-                add_barriers=IBM_ADD_BARRIERS
-            )
+            if IBM_ADD_BARRIERS
+                trotter_step.barrier()
+            end
         end
 
 
@@ -664,27 +755,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         # --------------
         processes_jl_dicts = Vector{Dict{String, Any}}()
 
-        # For IBM127_kicked_ising, define the 2-qubit coupling set from the backend edges,
-        # so the Julia-side crosstalk processes match the circuit connectivity.
-        ibm_edges1 = nothing  # Vector{Tuple{Int,Int}} with 1-based indices
-        if BASE_MODEL == "IBM127_kicked_ising"
-            if isnothing(ibm_127q_circuit)
-                error("IBM127_kicked_ising requested, but `ibm_127q_circuit.py` was not importable.")
-            end
-            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
-            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
-            backend = backend_ctor()
-            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
-            edge_set = Set{Tuple{Int,Int}}()
-            for layer in layers
-                for edge in layer
-                    i0 = pyconvert(Int, edge[0])
-                    j0 = pyconvert(Int, edge[1])
-                    push!(edge_set, (i0 + 1, j0 + 1))
-                end
-            end
-            ibm_edges1 = collect(edge_set)
-        end
+        # For IBM127_kicked_ising, `ibm_edges1` was already computed above from the Kyiv conf connectivity.
 
         if ENABLE_X_ERROR
             for i in 1:NUM_QUBITS
@@ -850,27 +921,7 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             return aer_noise.errors.PauliLindbladError(pl, py_rates)
         end
 
-        # For IBM127_kicked_ising, apply 2-qubit noise only on the backend coupling edges.
-        # For other circuits, keep the legacy "linear chain + optional (N,1)" behavior below.
-        ibm_edges0 = nothing  # Vector{Tuple{Int,Int}} with 0-based indices
-        if BASE_MODEL == "IBM127_kicked_ising"
-            if isnothing(ibm_127q_circuit)
-                error("IBM127_kicked_ising requested, but `ibm_127q_circuit.py` was not importable.")
-            end
-            fake_provider = pyimport("qiskit_ibm_runtime.fake_provider")
-            backend_ctor = pygetattr(fake_provider, IBM_BACKEND_NAME)
-            backend = backend_ctor()
-            layers = ibm_127q_circuit.edge_colored_layers_from_backend(backend)
-            edge_set = Set{Tuple{Int,Int}}()
-            for layer in layers
-                for edge in layer
-                    i0 = pyconvert(Int, edge[0])
-                    j0 = pyconvert(Int, edge[1])
-                    push!(edge_set, (i0, j0))
-                end
-            end
-            ibm_edges0 = collect(edge_set)
-        end
+        # For IBM127_kicked_ising, `ibm_edges0` was already computed above from the Kyiv conf connectivity.
 
         if ENABLE_X_ERROR
             # generators: IX, XI, XX

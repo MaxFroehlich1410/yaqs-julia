@@ -14,7 +14,7 @@ using ..StochasticProcessModule
 import ..Timing
 using ..Timing: @t
 
-export DigitalGate, DigitalCircuit, add_gate!, process_circuit, run_digital_tjm, TJMOptions,
+export DigitalGate, DigitalCircuit, RepeatedDigitalCircuit, add_gate!, process_circuit, run_digital_tjm, TJMOptions,
        enable_timing!, set_timing_print_each_call!, reset_timing!, print_timing_summary!
 
 """
@@ -42,6 +42,19 @@ mutable struct DigitalCircuit
     num_qubits::Int
     gates::Vector{DigitalGate}
     layers::Vector{Vector{DigitalGate}} # Optional: processed layers
+end
+
+"""
+    RepeatedDigitalCircuit(step::DigitalCircuit, repeats::Int)
+
+Represents a circuit obtained by repeating the same `step` circuit `repeats` times.
+
+This avoids materializing `repeats` copies of an identical gate list, which is
+important for very large systems (e.g. IBM127-style circuits).
+"""
+struct RepeatedDigitalCircuit
+    step::DigitalCircuit
+    repeats::Int
 end
 
 function DigitalCircuit(n::Int)
@@ -129,6 +142,29 @@ function process_circuit(circuit::DigitalCircuit)
     end
     
     return layers, barrier_map
+end
+
+@inline function _has_sample_barrier(barrier_map::Dict{Int, Vector{String}}, idx::Int)
+    if !haskey(barrier_map, idx)
+        return false
+    end
+    for label in barrier_map[idx]
+        if uppercase(label) == "SAMPLE_OBSERVABLES"
+            return true
+        end
+    end
+    return false
+end
+
+@inline function _sample_plan(barrier_map::Dict{Int, Vector{String}}, num_layers::Int)
+    sample_at_start = _has_sample_barrier(barrier_map, 0)
+    sample_after = Int[]
+    for l in 1:num_layers
+        if _has_sample_barrier(barrier_map, l)
+            push!(sample_after, l)
+        end
+    end
+    return sample_at_start, sample_after
 end
 
 # --- Noise Helpers ---
@@ -333,33 +369,14 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     try
         state = @t :deepcopy_state deepcopy(initial_state)
         layers, barrier_map = @t :process_circuit process_circuit(circuit)
-    num_layers = length(layers)
-    num_obs = length(sim_params.observables)
-    sample_indices = Int[]
-    
-    if haskey(barrier_map, 0)
-        for label in barrier_map[0]
-            if uppercase(label) == "SAMPLE_OBSERVABLES"
-                push!(sample_indices, 0)
-                break 
-            end
+        num_layers = length(layers)
+        num_obs = length(sim_params.observables)
+
+        sample_at_start, sample_after = _sample_plan(barrier_map, num_layers)
+        num_steps = (sample_at_start ? 1 : 0) + length(sample_after)
+        if num_steps == 0
+            num_steps = 1
         end
-    end
-    for l in 1:num_layers
-        if haskey(barrier_map, l)
-            for label in barrier_map[l]
-                if uppercase(label) == "SAMPLE_OBSERVABLES"
-                    push!(sample_indices, l)
-                    break
-                end
-            end
-        end
-    end
-    if isempty(sample_indices)
-        num_steps = 1
-    else
-        num_steps = length(sample_indices)
-    end
     
     results = zeros(ComplexF64, num_obs, num_steps)
     bond_dims = zeros(Int, num_steps)
@@ -374,7 +391,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         end
     end
     
-    if 0 in sample_indices
+    if sample_at_start
         measure!(current_meas_idx)
         current_meas_idx += 1
     end
@@ -408,18 +425,111 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         print("\r\tLayer $l_idx/$num_layers | Max Bond: $current_bond")
         flush(stdout)
 
-        if l_idx in sample_indices
+        if l_idx in sample_after
             measure!(current_meas_idx)
             current_meas_idx += 1
         end
     end
     print("\n") # Newline after finishing all layers of this trajectory
     
-    if isempty(sample_indices) && num_obs > 0
+    # If the circuit did not request sampling (no SAMPLE_OBSERVABLES barriers),
+    # still produce at least one measurement for compatibility.
+    if !sample_at_start && isempty(sample_after) && num_obs > 0
         measure!(1)
     end
+        # If the circuit did not request sampling (no SAMPLE_OBSERVABLES barriers),
+        # still produce at least one measurement for compatibility.
+        if !sample_at_start && isempty(sample_after) && num_obs > 0
+            measure!(1)
+        end
     
     return state, results, bond_dims
+    finally
+        Timing.end_scope!(ts; header="DigitalTJM per-trajectory timing")
+    end
+end
+
+function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
+                         noise_model::Union{NoiseModel, Nothing},
+                         sim_params::AbstractSimConfig;
+                         alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP))
+    local ts = Timing.begin_scope!()
+    try
+        state = @t :deepcopy_state deepcopy(initial_state)
+        layers, barrier_map = @t :process_circuit process_circuit(circuit.step)
+        step_layers = length(layers)
+        repeats = circuit.repeats
+
+        num_obs = length(sim_params.observables)
+        sample_at_start, sample_after = _sample_plan(barrier_map, step_layers)
+
+        num_steps = (sample_at_start ? 1 : 0) + repeats * length(sample_after)
+        if num_steps == 0
+            num_steps = 1
+        end
+
+        results = zeros(ComplexF64, num_obs, num_steps)
+        bond_dims = zeros(Int, num_steps)
+        current_meas_idx = 1
+
+        function measure!(idx)
+            @t :measure begin
+                for (i, obs) in enumerate(sim_params.observables)
+                    results[i, idx] = @t :expect SimulationConfigs.expect(state, obs)
+                end
+                bond_dims[idx] = @t :write_max_bond_dim MPSModule.write_max_bond_dim(state)
+            end
+        end
+
+        if sample_at_start
+            measure!(current_meas_idx)
+            current_meas_idx += 1
+        end
+
+        total_layers = repeats * step_layers
+        for rep in 1:repeats
+            for (l_idx, layer) in enumerate(layers)
+                for gate in layer
+                    if length(gate.sites) == 1
+                        @t :apply_single_qubit_gate apply_single_qubit_gate!(state, gate)
+                    end
+                end
+                for gate in layer
+                    if length(gate.sites) == 2
+                        @t :apply_window apply_window!(state, gate, sim_params, alg_options)
+                        if !isnothing(noise_model) && !isempty(noise_model.processes)
+                            s1, s2 = sort(gate.sites)
+                            local_noise = @t :create_local_noise_model create_local_noise_model(noise_model, s1, s2)
+                            if !isempty(local_noise.processes)
+                                @t :apply_dissipation apply_dissipation(state, local_noise, 1.0, sim_params)
+                                @t :stochastic_process stochastic_process!(state, local_noise, 1.0, sim_params)
+                            else
+                                @t :normalize MPSModule.normalize!(state)
+                            end
+                        else
+                            @t :normalize MPSModule.normalize!(state)
+                        end
+                    end
+                end
+
+                global_layer = (rep - 1) * step_layers + l_idx
+                current_bond = @t :write_max_bond_dim MPSModule.write_max_bond_dim(state)
+                print("\r\tLayer $global_layer/$total_layers | Max Bond: $current_bond")
+                flush(stdout)
+
+                if l_idx in sample_after
+                    measure!(current_meas_idx)
+                    current_meas_idx += 1
+                end
+            end
+        end
+        print("\n")
+
+        if num_steps == 1 && num_obs > 0 && !sample_at_start && isempty(sample_after)
+            measure!(1)
+        end
+
+        return state, results, bond_dims
     finally
         Timing.end_scope!(ts; header="DigitalTJM per-trajectory timing")
     end
