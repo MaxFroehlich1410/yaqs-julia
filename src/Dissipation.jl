@@ -153,7 +153,7 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
 
         # Shift center left
         if i > 1
-             @t :dissipation_shift_center MPSModule.shift_orthogonality_center!(mps, i - 1)
+             @t :center MPSModule.shift_orthogonality_center!(mps, i - 1)
         end
     end
 end
