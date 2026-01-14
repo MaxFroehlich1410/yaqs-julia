@@ -41,12 +41,12 @@ TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction
 
 # Unraveling
-NUM_TRAJECTORIES = 5
+NUM_TRAJECTORIES = 100
 MODE = "Large" # "DM" to verify against Density Matrix, "Large" for just performance
 
-longrange_mode = "TEBD" # "TEBD" or "TDVP"
-local_mode = "TEBD" # "TEBD" or "TDVP"
-MAX_BOND_DIM = 64
+longrange_mode = "TDVP" # "TEBD" or "TDVP"
+local_mode = "TDVP" # "TEBD" or "TDVP"
+MAX_BOND_DIM = 128
 SVD_TRUNCATION_THRESHOLD = 1e-16
 
 # Model Specific Params
@@ -81,10 +81,10 @@ SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(In
 
 # Flags
 RUN_QISKIT_MPS = false
-RUN_JULIA = true
+RUN_JULIA = false
 RUN_JULIA_ANALOG_2PT = false
 RUN_JULIA_ANALOG_GAUSS = false
-RUN_JULIA_PROJECTOR = false
+RUN_JULIA_PROJECTOR = true
 
 # ------------------------------------------------------------------------------
 # IBM 127q "kicked Ising" benchmark (Kim et al., Nature 618, 500–505 (2023))
@@ -95,8 +95,8 @@ RUN_JULIA_PROJECTOR = false
 # prohibitively expensive at N=127 (many hardware-neighbor couplings become long-range).
 # ------------------------------------------------------------------------------
 IBM_BACKEND_NAME = "FakeKyiv"     # legacy (no longer required): we load Kyiv connectivity from the local wheel JSON
-IBM_THETA_H = 0.7                # RX kick angle (theta_h)
-IBM_THETA_J = -π/2               # RZZ coupling angle (theta_J); paper uses -π/2
+IBM_THETA_H = π/8             # RX kick angle (theta_h)IBM_THETA_H in [0, π/8, π/4, 3π/8, π/2] https://www.nature.com/articles/s41586-023-06096-3
+IBM_THETA_J = -π/2             # RZZ coupling angle (theta_J); paper uses 5*π/2 https://www.nature.com/articles/s41586-023-06096-3
 IBM_ADD_BARRIERS = true          # barrier after each step (used as sampling delimiter)
 IBM_INIT_X_EVERY_4 = false       # if true: apply X on qubits 4,8,12,... (1-based)
 FORCE_JULIA_ON_IBM127 = true    # set true only if you really want to attempt Julia MPS on heavy-hex (usually impractical)
@@ -163,6 +163,10 @@ end
 const KYIV_WHEEL_PATH = joinpath(@__DIR__, "qiskit_ibm_runtime-0.43.1-py3-none-any.whl")
 const KYIV_CONF_PATH_IN_WHEEL = "qiskit_ibm_runtime/fake_provider/backends/kyiv/conf_kyiv.json"
 const KYIV_CONF_EXTRACTED_PATH = joinpath(@__DIR__, "conf_kyiv.json")
+
+# If true, `run_trajectories` will try to resume from already-written batch pickle files
+# in `output_dir` (per method label + file_prefix) and continue with the next batch index.
+RESUME_FROM_EXISTING_BATCHES = true
 
 function _kyiv_load_conf_from_wheel(; wheel_path::AbstractString=KYIV_WHEEL_PATH,
                                     conf_path_in_wheel::AbstractString=KYIV_CONF_PATH_IN_WHEEL)
@@ -281,7 +285,64 @@ function _format_float_short(value::Float64)
     return replace(string(round(value, digits=4)), "." => "p")
 end
 
-function _build_experiment_name(num_qubits, num_layers, tau, noise_strength, mode, threshold_mse, trajectories, circuit_name, observable_basis, local_mode, longrange_mode, enable_x, enable_y, enable_z)
+function _format_theta_value(theta::Real)
+    """
+    Format a theta value for filename, converting π to 'pi' in symbolic representation.
+    For example: 0 -> "0", 5π/2 -> "5pi2", π -> "pi", 2π -> "2pi"
+    """
+    if theta == 0
+        return "0"
+    end
+    
+    # Check if it's a multiple of π
+    pi_val = Float64(π)
+    ratio = theta / pi_val
+    
+    # Check for common rational multiples of π (within tolerance)
+    tol = 1e-10
+    
+    # Check for integer multiples
+    if abs(ratio - round(ratio)) < tol
+        n = Int(round(ratio))
+        if n == 1
+            return "pi"
+        elseif n == -1
+            return "m1pi"  # negative
+        else
+            return "$(n)pi"
+        end
+    end
+    
+    # Check for common fractions: π/2, 3π/2, 5π/2, etc.
+    if abs(ratio - 0.5) < tol
+        return "pi2"  # π/2
+    elseif abs(ratio - 1.5) < tol
+        return "3pi2"  # 3π/2
+    elseif abs(ratio - 2.5) < tol
+        return "5pi2"  # 5π/2
+    elseif abs(ratio - 3.5) < tol
+        return "7pi2"  # 7π/2
+    elseif abs(ratio + 0.5) < tol
+        return "mpi2"  # -π/2
+    elseif abs(ratio + 1.5) < tol
+        return "m3pi2"  # -3π/2
+    end
+    
+    # For other values, format numerically
+    return _format_float_short(Float64(theta))
+end
+
+"""
+    _regex_escape(s)
+
+Escape a string so it can be used literally inside a Regex.
+"""
+function _regex_escape(s::AbstractString)::String
+    # Escape regex meta characters: \ ^ $ . | ? * + ( ) [ ] { }
+    return replace(s, r"([\\\^\$\.\|\?\*\+\(\)\[\]\{\}])" => s"\\\1")
+end
+
+function _build_experiment_name(num_qubits, num_layers, tau, noise_strength, mode, threshold_mse, trajectories, circuit_name, observable_basis, local_mode, longrange_mode, enable_x, enable_y, enable_z; theta_h=nothing, theta_j=nothing)
     tokens = [
         "unraveling_eff",
         "N$num_qubits",
@@ -293,6 +354,14 @@ function _build_experiment_name(num_qubits, num_layers, tau, noise_strength, mod
         "loc$(local_mode)",
         "lr$(longrange_mode)"
     ]
+    
+    # Append theta values if provided (for IBM127_kicked_ising)
+    if !isnothing(theta_h)
+        push!(tokens, "thetaH$(_format_theta_value(theta_h))")
+    end
+    if !isnothing(theta_j)
+        push!(tokens, "thetaJ$(_format_theta_value(theta_j))")
+    end
     
     # Append enabled errors to filename
     err_str = "Err"
@@ -396,12 +465,124 @@ end
 # TRAJECTORY FINDER
 # ==============================================================================
 
+"""
+    _load_existing_batches(output_dir, file_prefix, safe_label; pickle)
+
+Load already saved batch pickle files matching:
+`<file_prefix>_<safe_label>_batch<i>.pkl` from `output_dir`.
+
+Returns `(loaded_count::Int, last_batch_index::Int, sum_res, sum_sq_res, sum_bonds_or_nothing)`
+where sums are accumulated across loaded trajectories.
+"""
+function _load_existing_batches(output_dir::AbstractString,
+                                file_prefix::AbstractString,
+                                safe_label::AbstractString;
+                                pickle)
+    if !isdir(output_dir)
+        return 0, 0, nothing, nothing, nothing
+    end
+
+    # Match exact filenames produced by `run_trajectories`
+    # Example: LargeSystem_unraveling_eff_..._Qiskit_MPS_batch3.pkl
+    base = _regex_escape(string(file_prefix, "_", safe_label, "_batch"))
+    rx = Regex("^" * base * raw"(\d+)\.pkl$")
+
+    files = String[]
+    for f in readdir(output_dir)
+        if match(rx, f) !== nothing
+            push!(files, f)
+        end
+    end
+    if isempty(files)
+        return 0, 0, nothing, nothing, nothing
+    end
+
+    parsed = Tuple{Int, String}[]
+    for f in files
+        m = match(rx, f)
+        if m === nothing
+            continue
+        end
+        idx = parse(Int, m.captures[1])
+        push!(parsed, (idx, f))
+    end
+    sort!(parsed, by = x -> x[1])
+
+    loaded_count = 0
+    last_batch_idx = 0
+    sum_res = nothing
+    sum_sq_res = nothing
+    sum_bonds = nothing
+
+    for (batch_idx, fname) in parsed
+        fpath = joinpath(output_dir, fname)
+        # Robustness: if the file is corrupt/partial, stop at the last good batch.
+        try
+            py_file = pybuiltins.open(fpath, "rb")
+            py_data = pickle.load(py_file)
+            py_file.close()
+
+            # Expect the file structure we wrote:
+            # {"results": [res_mat...], "bonds": [bond_vec...], "trajectories_in_batch": k, ...}
+            py_results = py_data["results"]
+            k = pyconvert(Int, py_data["trajectories_in_batch"])
+
+            # Bonds can be empty list even if present.
+            py_bonds = nothing
+            has_bonds = false
+            try
+                py_bonds = py_data["bonds"]
+                has_bonds = (pybuiltins.len(py_bonds) > 0)
+            catch
+                has_bonds = false
+                py_bonds = nothing
+            end
+
+            for t in 1:k
+                res_mat = pyconvert(Matrix{Float64}, py_results[t-1])
+                if isnothing(sum_res)
+                    sum_res = copy(res_mat)
+                    sum_sq_res = res_mat .^ 2
+                else
+                    # Guard against shape mismatches across restarts.
+                    if size(res_mat) != size(sum_res)
+                        error("Resume error: batch result matrix size $(size(res_mat)) != accumulated size $(size(sum_res)) in $fname")
+                    end
+                    sum_res .+= res_mat
+                    sum_sq_res .+= (res_mat .^ 2)
+                end
+
+                if has_bonds
+                    bond_vec = pyconvert(Vector{Int}, py_bonds[t-1])
+                    if isnothing(sum_bonds)
+                        sum_bonds = Float64.(bond_vec)
+                    else
+                        if length(bond_vec) != length(sum_bonds)
+                            error("Resume error: batch bond trace length $(length(bond_vec)) != accumulated length $(length(sum_bonds)) in $fname")
+                        end
+                        sum_bonds .+= Float64.(bond_vec)
+                    end
+                end
+            end
+
+            loaded_count += k
+            last_batch_idx = batch_idx
+        catch e
+            println("  Resume: failed to load $fpath ($e). Will stop resuming at batch $last_batch_idx and continue from there.")
+            break
+        end
+    end
+
+    return loaded_count, last_batch_idx, sum_res, sum_sq_res, sum_bonds
+end
+
 function run_trajectories(runner_single_shot::Function, 
                           exact_stag::Union{Vector{Float64}, Nothing}, 
                           label::String,
                           output_dir::String,
                           file_prefix::String;
-                          batch_size::Int=10)
+                          batch_size::Int=1,
+                          resume::Bool=RESUME_FROM_EXISTING_BATCHES)
     
     println("\n--- Running $label ---")
     
@@ -416,11 +597,30 @@ function run_trajectories(runner_single_shot::Function,
     
     final_stag = Float64[]
     final_mse = 0.0
+
+    # Resume support: load existing batches and continue without overwriting.
+    safe_label = replace(label, " " => "_")
+    already_done = 0
+    if resume
+        loaded_count, last_batch_idx, sum_res, sum_sq_res, sum_bonds = _load_existing_batches(output_dir, file_prefix, safe_label; pickle=pickle)
+        if loaded_count > 0
+            already_done = loaded_count
+            cumulative_results = sum_res
+            cumulative_sq_results = sum_sq_res
+            cumulative_bond_dims = sum_bonds
+            batch_count = last_batch_idx
+            println("  Resume: found $already_done trajectories across $batch_count batch file(s) for $label. Continuing at traj $(already_done + 1).")
+        end
+    end
     
     # Measure pure simulation loop time (after warmup)
     t_start = time()
     
-    for n in 1:NUM_TRAJECTORIES
+    if already_done >= NUM_TRAJECTORIES
+        println("  Resume: already have $already_done trajectories (>= $NUM_TRAJECTORIES). Skipping simulation for $label.")
+    end
+
+    for n in (already_done + 1):NUM_TRAJECTORIES
         res_mat, bond_dims = runner_single_shot()
 
         # Add to batch
@@ -448,9 +648,15 @@ function run_trajectories(runner_single_shot::Function,
         if length(batch_results) >= batch_size || n == NUM_TRAJECTORIES
              batch_count += 1
              # Save batch
-             safe_label = replace(label, " " => "_")
-             fname = "$(file_prefix)_$(safe_label)_batch$(batch_count).pkl"
-             fpath = joinpath(output_dir, fname)
+             # Never overwrite an existing batch file (e.g., after resume).
+             # If a name is taken, increment until we find a free index.
+             local fname = "$(file_prefix)_$(safe_label)_batch$(batch_count).pkl"
+             local fpath = joinpath(output_dir, fname)
+             while isfile(fpath)
+                 batch_count += 1
+                 fname = "$(file_prefix)_$(safe_label)_batch$(batch_count).pkl"
+                 fpath = joinpath(output_dir, fname)
+             end
              
              data_to_save = Dict{String, Any}(
                 "results" => batch_results,
@@ -478,7 +684,8 @@ function run_trajectories(runner_single_shot::Function,
         
         # Periodic check
         if n % 10 == 0 || n == NUM_TRAJECTORIES
-            avg_res = cumulative_results ./ n
+            total_n = n
+            avg_res = cumulative_results ./ total_n
             T_steps = size(avg_res, 2)
             current_stag = [staggered_magnetization(avg_res[:, t], NUM_QUBITS) for t in 1:T_steps]
             
@@ -494,7 +701,11 @@ function run_trajectories(runner_single_shot::Function,
     end
     
     t_elapsed = time() - t_start
-    @printf "  Time: %.4f s (%.4f s/traj)\n" t_elapsed (t_elapsed / NUM_TRAJECTORIES)
+    if already_done >= NUM_TRAJECTORIES
+        @printf "  Time: %.4f s (0 new trajectories)\n" t_elapsed
+    else
+        @printf "  Time: %.4f s (%.4f s/new traj)\n" t_elapsed (t_elapsed / (NUM_TRAJECTORIES - already_done))
+    end
     
     # Averages
     avg_res = cumulative_results ./ NUM_TRAJECTORIES
@@ -609,15 +820,19 @@ for CIRCUIT_NAME in CIRCUIT_LIST
         end
 
         # Construct Experiment Name and Paths (Moved up for incremental saving)
+        # Include theta values for IBM127_kicked_ising
+        theta_h_val = (BASE_MODEL == "IBM127_kicked_ising") ? IBM_THETA_H : nothing
+        theta_j_val = (BASE_MODEL == "IBM127_kicked_ising") ? IBM_THETA_J : nothing
         experiment_name = _build_experiment_name(
             NUM_QUBITS, NUM_LAYERS, TAU, NOISE_STRENGTH, MODE, THRESHOLD_MSE, NUM_TRAJECTORIES, CIRCUIT_NAME, OBSERVABLE_BASIS, local_mode, longrange_mode,
-            ENABLE_X_ERROR, ENABLE_Y_ERROR, ENABLE_Z_ERROR
+            ENABLE_X_ERROR, ENABLE_Y_ERROR, ENABLE_Z_ERROR;
+            theta_h=theta_h_val, theta_j=theta_j_val
         )
         
         # Prefix filenames with "LargeSystem_" while keeping the directory name unchanged
         file_experiment_name = "LargeSystem_$(experiment_name)"
 
-        parent_dir = joinpath(@__DIR__, "CTJM_interesting")
+        parent_dir = joinpath(@__DIR__, "127_datapoints_L5")
         if !isdir(parent_dir)
             mkpath(parent_dir)
         end
@@ -690,6 +905,8 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             add_gate!(step, RzzGate(longrange_theta), [NUM_QUBITS, 1])
             add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])  # sample after each step
             circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
+
+
         elseif BASE_MODEL == "IBM127_kicked_ising"
             # Build the heavy-hex edge-colored schedule from the local wheel JSON, then mirror the Python circuit:
             # for each step: RX(theta_h) on all qubits, then RZZ(theta_J) on all neighbor edges (3 disjoint layers),
@@ -709,7 +926,8 @@ for CIRCUIT_NAME in CIRCUIT_LIST
             if IBM_ADD_BARRIERS
                 add_gate!(step, Barrier("SAMPLE_OBSERVABLES"), Int[])
             end
-            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)
+            circ_jl = RepeatedDigitalCircuit(step, NUM_LAYERS)  
+
         else
             error("Unknown BASE_MODEL: $BASE_MODEL")
         end

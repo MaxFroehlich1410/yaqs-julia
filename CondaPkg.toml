@@ -1,4 +1,5 @@
 [deps]
+python = "3.12.*"
 numpy = ""
 qiskit-aer = ""
 matplotlib = ""
@@ -9,9 +10,3 @@ qiskit-ibm-runtime = ""
 
     [deps.qiskit]
     channel = "conda-forge"
-
-[pip]
-mqt-yaqs = ""
-
-    [pip.deps]
-    mqt-yaqs = ""
