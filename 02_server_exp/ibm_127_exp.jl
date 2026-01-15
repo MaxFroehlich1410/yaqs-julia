@@ -81,10 +81,10 @@ SITES_TO_PLOT = [1, floor(Int, NUM_QUBITS/4), floor(Int, NUM_QUBITS/2), floor(In
 
 # Flags
 RUN_QISKIT_MPS = false
-RUN_JULIA = false
+RUN_JULIA = true
 RUN_JULIA_ANALOG_2PT = false
 RUN_JULIA_ANALOG_GAUSS = false
-RUN_JULIA_PROJECTOR = true
+RUN_JULIA_PROJECTOR = false
 
 # ------------------------------------------------------------------------------
 # IBM 127q "kicked Ising" benchmark (Kim et al., Nature 618, 500–505 (2023))
@@ -108,7 +108,7 @@ ENABLE_Z_ERROR = true
 
 # Lists for Loop
 CIRCUIT_LIST = ["IBM127_kicked_ising"] # Options: "Ising", "Ising_periodic", "Heisenberg", "Heisenberg_periodic", "XY", "XY_longrange", "QAOA", "HEA", "longrange_test", "IBM127_kicked_ising"
-NOISE_STRENGTH_LIST = [0.1]
+NOISE_STRENGTH_LIST = [0.1, 0.01, 0.001]
 
 # ==============================================================================
 # PYTHON SETUP
