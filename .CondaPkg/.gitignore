@@ -2,3 +2,74 @@
 # pixi environments
 .pixi
 *.egg-info
+# --- OS junk ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# --- Editor/IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.code-workspace
+.cursor/
+
+# --- Julia ---
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+*.jl.prof
+coverage/
+lcov.info
+
+# If you build docs locally
+docs/build/
+docs/site/
+
+# Package artifacts / scratch
+artifacts/
+deps/
+scratch/
+tmp/
+temp/
+*.log
+
+# --- CondaPkg / Pixi (PythonCall backend) ---
+.CondaPkg/
+.pixi/
+pixi.lock
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Results / generated data (common in this repo) ---
+results/
+output/
+outputs/
+figures/
+plots/
+*.png
+*.pdf
+*.svg
+*.csv
+*.tsv
+*.pkl
+*.npy
+*.npz
+*.jld2
+*.h5
+*.hdf5
