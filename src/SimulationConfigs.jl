@@ -10,15 +10,18 @@ export initialize!, aggregate_trajectories!, aggregate_measurements!, expect
 # --- Observable ---
 
 """
-    Observable{O<:AbstractOperator}
+Represent a measurable observable on a quantum state.
 
-Represents an observable to be measured on the quantum state.
+This stores the operator, target sites, and buffers for per-trajectory data and aggregated results.
+It is used by simulation configurations to track measurements across trajectories.
 
-# Fields
-- `op::O`: The operator (gate) to measure.
-- `sites::Vector{Int}`: The site(s) to measure on.
-- `results::Vector{Float64}`: Aggregated results (e.g. mean).
-- `trajectories::Matrix{ComplexF64}`: Per-trajectory data.
+Args:
+    name (String): Observable name.
+    op (AbstractOperator): Operator to measure.
+    sites (Union{Int, Vector{Int}}): Target site indices.
+
+Returns:
+    Observable{O}: Observable container with initialized buffers.
 """
 mutable struct Observable{O<:AbstractOperator}
     name::String
@@ -34,10 +37,20 @@ mutable struct Observable{O<:AbstractOperator}
 end
 
 """
-    expect(psi::MPS, obs::Observable)
+Compute the expectation value of an observable on an MPS.
 
-Compute the expectation value of the observable on the MPS.
-Currently supports single-site and two-site observables.
+This dispatches to single-site or two-site expectation routines based on the observable's site list
+and returns the real part of the expectation value.
+
+Args:
+    psi (MPS): State to evaluate.
+    obs (Observable): Observable to measure.
+
+Returns:
+    Float64: Expectation value of the observable.
+
+Raises:
+    ErrorException: If the observable acts on more than two sites.
 """
 function expect(psi::MPS, obs::Observable)
     # Get matrix from GateLibrary
@@ -58,12 +71,38 @@ end
 
 # --- Simulation Configurations ---
 
+"""
+Abstract supertype for simulation configuration objects.
+
+This provides a common parent for time-evolution and measurement configuration structs.
+
+Args:
+    None
+
+Returns:
+    AbstractSimConfig: Abstract configuration type.
+"""
 abstract type AbstractSimConfig end
 
 """
-    TimeEvolutionConfig (AnalogSimParams)
+Configuration for time evolution simulations.
 
-Configuration for time evolution simulations (TEBD/TDVP).
+This stores observables, time stepping parameters, and truncation settings for TEBD/TDVP runs,
+including whether to sample at intermediate timesteps.
+
+Args:
+    observables (Vector{Observable}): Observables to record.
+    total_time (Float64): Total evolution time.
+    dt (Float64): Time step size.
+    num_traj (Int): Number of trajectories to simulate.
+    max_bond_dim (Int): Maximum bond dimension.
+    min_bond_dim (Int): Minimum bond dimension.
+    truncation_threshold (Float64): Truncation threshold.
+    sample_timesteps (Bool): Whether to sample at each timestep.
+    order (Int): Trotter order.
+
+Returns:
+    TimeEvolutionConfig: Time-evolution configuration object.
 """
 mutable struct TimeEvolutionConfig <: AbstractSimConfig
     observables::Vector{<:Observable}
@@ -92,9 +131,19 @@ mutable struct TimeEvolutionConfig <: AbstractSimConfig
 end
 
 """
-    MeasurementConfig (WeakSimParams)
+Configuration for weak measurement simulations.
 
-Configuration for weak measurement simulations (Shots).
+This stores shot counts and truncation settings for sampling-based measurements, along with
+per-shot and aggregated measurement results.
+
+Args:
+    shots (Int): Number of measurement shots.
+    max_bond_dim (Int): Maximum bond dimension.
+    min_bond_dim (Int): Minimum bond dimension.
+    truncation_threshold (Float64): Truncation threshold.
+
+Returns:
+    MeasurementConfig: Measurement configuration object.
 """
 mutable struct MeasurementConfig <: AbstractSimConfig
     shots::Int
@@ -114,9 +163,21 @@ mutable struct MeasurementConfig <: AbstractSimConfig
 end
 
 """
-    StrongMeasurementConfig (StrongSimParams)
+Configuration for strong measurement simulations.
 
-Configuration for strong simulation (Trajectories).
+This stores observables and truncation settings for trajectory-based simulations, optionally
+sampling after each circuit layer.
+
+Args:
+    observables (Vector{Observable}): Observables to record.
+    num_traj (Int): Number of trajectories to simulate.
+    max_bond_dim (Int): Maximum bond dimension.
+    min_bond_dim (Int): Minimum bond dimension.
+    truncation_threshold (Float64): Truncation threshold.
+    sample_layers (Bool): Whether to sample after each layer.
+
+Returns:
+    StrongMeasurementConfig: Strong measurement configuration object.
 """
 mutable struct StrongMeasurementConfig <: AbstractSimConfig
     observables::Vector{<:Observable}
@@ -139,9 +200,17 @@ end
 # --- Initialization & Aggregation Logic ---
 
 """
-    initialize!(obs::Observable, config::AbstractSimConfig)
+Initialize observable buffers for time-evolution simulations.
 
-Initialize results/trajectories buffers for an observable based on config.
+This allocates trajectory and result buffers sized to the number of timesteps and trajectories,
+respecting whether intermediate sampling is enabled.
+
+Args:
+    obs (Observable): Observable to initialize.
+    config (TimeEvolutionConfig): Time-evolution configuration.
+
+Returns:
+    Nothing: Observable buffers are updated in-place.
 """
 function initialize!(obs::Observable, config::TimeEvolutionConfig)
     if config.sample_timesteps
@@ -153,6 +222,20 @@ function initialize!(obs::Observable, config::TimeEvolutionConfig)
     end
 end
 
+"""
+Initialize observable buffers for strong measurement simulations.
+
+This allocates trajectory and result buffers sized to the number of layers (if sampling per layer)
+or a single measurement otherwise.
+
+Args:
+    obs (Observable): Observable to initialize.
+    config (StrongMeasurementConfig): Strong measurement configuration.
+    num_layers (Int): Number of circuit layers for sizing when sampling per layer.
+
+Returns:
+    Nothing: Observable buffers are updated in-place.
+"""
 function initialize!(obs::Observable, config::StrongMeasurementConfig; num_layers::Int=0)
     # If sample_layers is true, we need space for each layer (+ initial state)
     steps = config.sample_layers ? (num_layers + 1) : 1
@@ -161,9 +244,16 @@ function initialize!(obs::Observable, config::StrongMeasurementConfig; num_layer
 end
 
 """
-    aggregate_trajectories!(config::TimeEvolutionConfig)
+Aggregate trajectory results for time-evolution simulations.
 
-Compute mean of trajectories for all observables.
+This computes the mean of observable trajectories across all trajectories and stores the results
+in each observable's `results` field.
+
+Args:
+    config (TimeEvolutionConfig): Configuration containing observables to aggregate.
+
+Returns:
+    Nothing: Observable results are updated in-place.
 """
 function aggregate_trajectories!(config::TimeEvolutionConfig)
     for obs in config.observables
@@ -181,6 +271,18 @@ function aggregate_trajectories!(config::TimeEvolutionConfig)
     end
 end
 
+"""
+Aggregate trajectory results for strong measurement simulations.
+
+This computes the mean of observable trajectories across all trajectories and stores the results
+in each observable's `results` field.
+
+Args:
+    config (StrongMeasurementConfig): Configuration containing observables to aggregate.
+
+Returns:
+    Nothing: Observable results are updated in-place.
+"""
 function aggregate_trajectories!(config::StrongMeasurementConfig)
     for obs in config.observables
         if !isempty(obs.trajectories)
@@ -191,9 +293,15 @@ function aggregate_trajectories!(config::StrongMeasurementConfig)
 end
 
 """
-    aggregate_measurements!(config::MeasurementConfig)
+Aggregate shot results for weak measurement simulations.
 
-Aggregate shot results.
+This sums per-shot count dictionaries into a single aggregated results dictionary.
+
+Args:
+    config (MeasurementConfig): Configuration containing per-shot measurements.
+
+Returns:
+    Nothing: Aggregated results are stored in `config.results`.
 """
 function aggregate_measurements!(config::MeasurementConfig)
     total_counts = Dict{Int, Int}()

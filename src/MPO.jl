@@ -9,25 +9,34 @@ using ..GateLibrary
 export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_general_hamiltonian
 export orthogonalize!, truncate!
 
+"""
+Abstract supertype for tensor network containers.
+
+This provides a common parent for MPS and MPO types used throughout the library.
+
+Args:
+    None
+
+Returns:
+    AbstractTensorNetwork: Abstract type for tensor network containers.
+"""
 abstract type AbstractTensorNetwork end
 
 """
-    MPO{T} <: AbstractTensorNetwork
+Represent a matrix product operator with an optional orthogonality center.
 
-Matrix Product Operator (MPO) using Column-Major memory layout.
+This stores rank-4 tensors in `(Left_Bond, Phys_Out, Phys_In, Right_Bond)` layout and tracks an
+optional orthogonality center for canonicalization. It is the core operator container used for
+Hamiltonians and channel representations.
 
-# Layout
-Tensors are stored with indices: `(Left_Bond, Phys_Out, Phys_In, Right_Bond)`.
-- `Left_Bond`: Connection to left neighbor MPO tensor.
-- `Phys_Out`: Outgoing physical index (upper leg, bra).
-- `Phys_In`: Incoming physical index (lower leg, ket).
-- `Right_Bond`: Connection to right neighbor MPO tensor.
+Args:
+    tensors (Vector{Array{T,4}}): MPO tensors in `(Dl, d_out, d_in, Dr)` layout.
+    phys_dims (Vector{Int}): Physical dimensions per site.
+    length (Int): Number of sites in the chain.
+    orth_center (Int): Orthogonality center index (1-based), or 0 if unknown.
 
-# Fields
-- `tensors::Vector{Array{T, 4}}`: The MPO tensors.
-- `phys_dims::Vector{Int}`: Physical dimension of each site.
-- `length::Int`: Number of sites.
-- `orth_center::Int`: Orthogonality center (1-based). 0 if unknown/mixed.
+Returns:
+    MPO{T}: Matrix product operator container.
 """
 mutable struct MPO{T<:Number} <: AbstractTensorNetwork
     tensors::Vector{Array{T, 4}}
@@ -40,7 +49,20 @@ mutable struct MPO{T<:Number} <: AbstractTensorNetwork
     end
 end
 
-# Outer constructor
+"""
+Construct an MPO with type inference for the element type.
+
+This outer constructor infers `T` from the provided tensors and delegates to the inner constructor.
+
+Args:
+    length (Int): Number of sites in the chain.
+    tensors (Vector{Array{T,4}}): MPO tensors in `(Dl, d_out, d_in, Dr)` layout.
+    phys_dims (Vector{Int}): Physical dimensions per site.
+    orth_center (Int): Orthogonality center index (1-based), or 0 if unknown.
+
+Returns:
+    MPO{T}: Matrix product operator container.
+"""
 function MPO(length::Int, tensors::Vector{Array{T, 4}}, phys_dims::Vector{Int}, orth_center::Int=0) where T
     return MPO{T}(length, tensors, phys_dims, orth_center)
 end
@@ -48,9 +70,21 @@ end
 # --- Constructors ---
 
 """
-    MPO(length::Int; identity=false, physical_dimensions=nothing)
+Initialize an MPO, optionally as an identity operator.
 
-Initialize an MPO. 
+This constructs an MPO with the specified physical dimensions, creating either identity tensors
+or zero tensors depending on the `identity` flag.
+
+Args:
+    length (Int): Number of sites in the chain.
+    identity (Bool): Whether to initialize as the identity MPO.
+    physical_dimensions (Union{Vector{Int}, Int, Nothing}): Physical dimensions per site or scalar.
+
+Returns:
+    MPO: Initialized matrix product operator.
+
+Raises:
+    AssertionError: If the physical dimension length does not match `length`.
 """
 function MPO(length::Int; 
              identity::Bool=false,
@@ -87,7 +121,17 @@ function MPO(length::Int;
 end
 
 """
-    init_ising(length::Int, J, g) -> MPO
+Construct a transverse-field Ising Hamiltonian MPO.
+
+This builds an MPO for `H = -∑ J_i Z_i Z_{i+1} - ∑ g_i X_i` with scalar or site-dependent parameters.
+
+Args:
+    length (Int): Number of sites.
+    J (Union{Real, Vector{Real}}): Ising coupling(s) per bond.
+    g (Union{Real, Vector{Real}}): Transverse field(s) per site.
+
+Returns:
+    MPO: Hamiltonian MPO for the Ising model.
 """
 function init_ising(length::Int, J::Union{Real, Vector{<:Real}}, g::Union{Real, Vector{<:Real}})
     # Operators
@@ -102,6 +146,18 @@ function init_ising(length::Int, J::Union{Real, Vector{<:Real}}, g::Union{Real, 
     get_J(i) = isa(J, Vector) ? (i <= Base.length(J) ? J[i] : 0.0) : J
     get_g(i) = isa(g, Vector) ? g[i] : g
     
+    """
+    Convert a block matrix of operators into an MPO tensor.
+
+    This expands a matrix of 2x2 operator blocks into a rank-4 MPO tensor with the corresponding
+    left and right bond dimensions.
+
+    Args:
+        W_block: Matrix of operator blocks.
+
+    Returns:
+        Array{ComplexF64,4}: MPO tensor built from the block matrix.
+    """
     function block_to_tensor(W_block)
         rows, cols = size(W_block) # Left, Right bond dims
         T = zeros(ComplexF64, rows, 2, 2, cols)
@@ -164,13 +220,22 @@ end
 
 
 """
-    init_general_hamiltonian(length::Int, Jxx, Jyy, Jzz, hx, hy, hz) -> MPO
+Construct an MPO for a general XYZ Hamiltonian with fields.
 
-Construct MPO for general Hamiltonian:
-H = sum_i (Jxx_i X_i X_{i+1} + Jyy_i Y_i Y_{i+1} + Jzz_i Z_i Z_{i+1})
-  + sum_i (hx_i X_i + hy_i Y_i + hz_i Z_i)
+This builds an MPO for `H = ∑ (Jxx_i X_i X_{i+1} + Jyy_i Y_i Y_{i+1} + Jzz_i Z_i Z_{i+1}) + ∑ (hx_i X_i + hy_i Y_i + hz_i Z_i)`,
+accepting scalar or site-dependent parameters.
 
-Parameters can be Vectors (site-dependent) or Scalars (uniform).
+Args:
+    length (Int): Number of sites.
+    Jxx: XX coupling(s) per bond.
+    Jyy: YY coupling(s) per bond.
+    Jzz: ZZ coupling(s) per bond.
+    hx: X field(s) per site.
+    hy: Y field(s) per site.
+    hz: Z field(s) per site.
+
+Returns:
+    MPO: Hamiltonian MPO for the general model.
 """
 function init_general_hamiltonian(length::Int, Jxx, Jyy, Jzz, hx, hy, hz)
     X_op = Matrix(matrix(XGate()))
@@ -186,6 +251,18 @@ function init_general_hamiltonian(length::Int, Jxx, Jyy, Jzz, hx, hy, hz)
     get_param(p, i) = isa(p, Vector) ? (i <= Base.length(p) ? p[i] : 0.0) : p
 
     # Block to tensor helper
+    """
+    Convert a block matrix of operators into an MPO tensor.
+
+    This expands a matrix of 2x2 operator blocks into a rank-4 MPO tensor with the corresponding
+    left and right bond dimensions.
+
+    Args:
+        W_block: Matrix of operator blocks.
+
+    Returns:
+        Array{ComplexF64,4}: MPO tensor built from the block matrix.
+    """
     function block_to_tensor(W_block)
         rows, cols = size(W_block)
         T = zeros(ComplexF64, rows, 2, 2, cols)
@@ -263,10 +340,17 @@ end
 # --- Optimization & Compression ---
 
 """
-    orthogonalize!(mpo::MPO, new_center::Int)
+Shift the orthogonality center of an MPO.
 
-Shift the orthogonality center of the MPO to `new_center`.
-Uses QR/LQ decomposition on the "effective" physical dimension (d_out * d_in).
+This canonicalizes the MPO by sweeping with QR/LQ decompositions on the combined physical index
+`(d_out * d_in)` so that the orthogonality center is positioned at `new_center`.
+
+Args:
+    mpo (MPO): MPO to orthogonalize in-place.
+    new_center (Int): Target orthogonality center index.
+
+Returns:
+    Nothing: The MPO tensors and `orth_center` are updated in-place.
 """
 function orthogonalize!(mpo::MPO{T}, new_center::Int) where T
     # If current center is unknown (0), we must assume nothing and start sweeping.
@@ -331,9 +415,18 @@ function orthogonalize!(mpo::MPO{T}, new_center::Int) where T
 end
 
 """
-    truncate!(mpo::MPO; threshold=1e-12, max_bond_dim=nothing)
+Truncate an MPO by compressing internal bonds.
 
-Compress the MPO by truncating small singular values.
+This sweeps left-to-right, merges neighboring tensors, performs an SVD, and truncates singular
+values based on the provided threshold and optional maximum bond dimension.
+
+Args:
+    mpo (MPO): MPO to truncate in-place.
+    threshold (Float64): Truncation threshold on discarded weight.
+    max_bond_dim (Union{Int, Nothing}): Optional maximum bond dimension to keep.
+
+Returns:
+    Float64: Total truncation error accumulated over the sweep.
 """
 function truncate!(mpo::MPO{T}; threshold::Float64=1e-12, max_bond_dim::Union{Int, Nothing}=nothing) where T
     # Sweep 1 -> L-1
@@ -400,9 +493,20 @@ end
 # --- Application (MPO x MPS) ---
 
 """
-    contract_mpo_mps(w::MPO, psi::MPS) -> MPS
+Apply an MPO to an MPS and return the resulting MPS.
 
-Apply MPO `w` to MPS `psi`.
+This contracts each MPO tensor with the corresponding MPS tensor, expanding the bond dimensions
+accordingly. The resulting MPS has an undefined/mixed orthogonality center.
+
+Args:
+    w (MPO): Operator to apply.
+    psi (MPS): State to transform.
+
+Returns:
+    MPS: Resulting state after applying the MPO.
+
+Raises:
+    AssertionError: If the MPO and MPS lengths do not match.
 """
 function contract_mpo_mps(w::MPO, psi::MPS)
     @assert w.length == psi.length
@@ -435,9 +539,19 @@ end
 # --- Expectation Value ---
 
 """
-    expect_mpo(w::MPO, psi::MPS) -> ComplexF64
+Compute the expectation value of an MPO in an MPS state.
 
-Compute <ψ|W|ψ>.
+This contracts the bra and ket MPS with the MPO to evaluate ⟨ψ|W|ψ⟩ as a scalar.
+
+Args:
+    w (MPO): Operator MPO.
+    psi (MPS): State MPS.
+
+Returns:
+    ComplexF64: Expectation value ⟨ψ|W|ψ⟩.
+
+Raises:
+    AssertionError: If the MPO and MPS lengths do not match.
 """
 function expect_mpo(w::MPO, psi::MPS)
     @assert w.length == psi.length
@@ -479,9 +593,20 @@ end
 # --- MPO-MPO Multiplication & Addition ---
 
 """
-    Base.:+(a::MPO, b::MPO) -> MPO
+Add two MPOs by direct-sum bond expansion.
 
-Exact addition of two MPOs by direct sum of bonds.
+This constructs an exact MPO representing `a + b` by block-diagonalizing the bond spaces at each
+site, increasing the bond dimensions as needed.
+
+Args:
+    a (MPO): First MPO.
+    b (MPO): Second MPO.
+
+Returns:
+    MPO: Sum of the two MPOs.
+
+Raises:
+    AssertionError: If the MPO lengths do not match.
 """
 function Base.:+(a::MPO{T}, b::MPO{T}) where T
     @assert a.length == b.length
@@ -520,18 +645,54 @@ function Base.:+(a::MPO{T}, b::MPO{T}) where T
     return MPO(L, new_tensors, a.phys_dims, 0)
 end
 
+"""
+Scale an MPO by a scalar factor.
+
+This multiplies the first tensor of the MPO by the scalar, which is equivalent to scaling the
+entire operator.
+
+Args:
+    c (Number): Scalar factor.
+    mpo (MPO): MPO to scale.
+
+Returns:
+    MPO: Scaled MPO.
+"""
 function Base.:*(c::Number, mpo::MPO{T}) where T
     new_tensors = copy(mpo.tensors)
     new_tensors[1] = c .* new_tensors[1]
     return MPO(mpo.length, new_tensors, mpo.phys_dims, mpo.orth_center)
 end
 
+"""
+Scale an MPO by a scalar factor (right multiplication).
+
+This forwards to the left-multiplication definition so `mpo * c` and `c * mpo` behave identically.
+
+Args:
+    mpo (MPO): MPO to scale.
+    c (Number): Scalar factor.
+
+Returns:
+    MPO: Scaled MPO.
+"""
 Base.:*(mpo::MPO, c::Number) = c * mpo
 
 """
-    contract_mpo_mpo(a::MPO, b::MPO) -> MPO
+Contract two MPOs to form their product.
 
-Contract A * B (A acting on B).
+This contracts the output physical index of `a` with the input physical index of `b` at each site,
+producing an MPO representing the operator product `a * b`.
+
+Args:
+    a (MPO): Left MPO operator.
+    b (MPO): Right MPO operator.
+
+Returns:
+    MPO: MPO representing the product operator.
+
+Raises:
+    AssertionError: If the MPO lengths do not match.
 """
 function contract_mpo_mpo(a::MPO, b::MPO)
     @assert a.length == b.length

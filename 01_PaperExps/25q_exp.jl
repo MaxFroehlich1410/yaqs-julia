@@ -61,7 +61,7 @@ else
 end
 
 # Simulation Size
-NUM_QUBITS = 81
+NUM_QUBITS = 25
 NUM_LAYERS = 20
 TAU = 0.1
 dt = TAU  # Alias for consistency with circuit construction

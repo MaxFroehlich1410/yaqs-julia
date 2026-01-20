@@ -13,24 +13,50 @@ using ..Timing: @t
 export StochasticProcess, calculate_stochastic_factor, create_probability_distribution, stochastic_process!
 
 """
-    StochasticProcess{T}
+Wrapper type for stochastic processes driven by a noise model.
 
-A lightweight wrapper around `NoiseModel` to maintain API compatibility.
+This stores a `NoiseModel` and exists primarily to preserve compatibility with earlier APIs that
+expected a dedicated stochastic-process object.
+
+Args:
+    noise_model (NoiseModel{T}): Noise model driving the stochastic dynamics.
+
+Returns:
+    StochasticProcess{T}: Wrapper around the noise model.
 """
 struct StochasticProcess{T}
     noise_model::NoiseModel{T}
 end
 
+"""
+Construct a StochasticProcess while ignoring the Hamiltonian argument.
+
+This maintains backward compatibility with APIs that passed both a Hamiltonian and a noise model,
+returning a wrapper around the noise model only.
+
+Args:
+    hamiltonian (MPO{T}): Ignored Hamiltonian argument.
+    noise_model (NoiseModel{T}): Noise model driving the stochastic dynamics.
+
+Returns:
+    StochasticProcess{T}: Wrapper around the noise model.
+"""
 # Constructor for backward compatibility (ignores H argument)
 function StochasticProcess(hamiltonian::MPO{T}, noise_model::NoiseModel{T}) where T
     return StochasticProcess(noise_model)
 end
 
 """
-    calculate_stochastic_factor(state::MPS)
+Compute the stochastic factor for jump probability.
 
-Calculate the stochastic factor dp = 1 - <psi|psi>.
-This assumes the state norm has decayed due to dissipation.
+This calculates `dp = 1 - ⟨ψ|ψ⟩`, assuming the norm has decayed due to dissipation and indicating
+the probability mass available for jumps.
+
+Args:
+    state (MPS): State whose norm determines the stochastic factor.
+
+Returns:
+    Float64: Stochastic factor `dp`.
 """
 function calculate_stochastic_factor(state::MPS)
     norm_sq = @t :stoch_scalar_product real(MPSModule.scalar_product(state, state))
@@ -38,10 +64,18 @@ function calculate_stochastic_factor(state::MPS)
 end
 
 """
-    apply_mpo_jump!(state::MPS, mpo::MPO, sim_params)
+Apply an MPO jump operator to an MPS in-place.
 
-Apply an MPO jump operator to the MPS in-place.
-Contracts site-by-site (growing bond dimensions) and then truncates.
+This contracts the MPO with the MPS site-by-site, increasing bond dimensions, and then truncates
+according to the simulation parameters to control growth.
+
+Args:
+    state (MPS): State to update in-place.
+    mpo (MPO): MPO jump operator to apply.
+    sim_params: Simulation parameters containing truncation settings.
+
+Returns:
+    Nothing: The MPS is updated in-place.
 """
 function apply_mpo_jump!(state::MPS, mpo::MPO{T}, sim_params) where T
     @assert state.length == mpo.length
@@ -82,9 +116,20 @@ function apply_mpo_jump!(state::MPS, mpo::MPO{T}, sim_params) where T
 end
 
 """
-    create_probability_distribution(state, noise_model, dt, sim_params)
+Create a probability distribution over possible jumps.
 
-Generate probabilities for all possible jumps.
+This evaluates jump probabilities for local and MPO-based noise processes, returning normalized
+probabilities and a list of corresponding jump candidates.
+
+Args:
+    state (MPS): Current state used to compute jump norms.
+    noise_model (NoiseModel): Noise model with candidate processes.
+    dt (Float64): Time step for probability scaling.
+    sim_params (AbstractSimConfig): Simulation parameters for truncation and scaling.
+
+Returns:
+    Tuple: `(probs, jump_candidates)` where `probs` is a vector of probabilities and
+        `jump_candidates` stores process metadata for sampling.
 """
 function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt::Float64, sim_params::AbstractSimConfig)
     if isempty(noise_model.processes)
@@ -212,9 +257,19 @@ function create_probability_distribution(state::MPS, noise_model::NoiseModel, dt
 end
 
 """
-    stochastic_process!(state, noise_model, dt, sim_params)
+Perform a stochastic quantum jump on the state.
 
-Perform a stochastic quantum jump.
+This computes jump probabilities, samples a jump event, and applies the corresponding operator
+to the state, including necessary truncation and normalization steps.
+
+Args:
+    state (MPS): State to update in-place.
+    noise_model (NoiseModel): Noise model with candidate processes.
+    dt (Float64): Time step for probability scaling.
+    sim_params (AbstractSimConfig): Simulation parameters for truncation and scaling.
+
+Returns:
+    Nothing: The MPS is updated in-place.
 """
 function stochastic_process!(state::MPS, noise_model::NoiseModel, dt::Float64, sim_params::AbstractSimConfig)
     dp = @t :stoch_calc_dp calculate_stochastic_factor(state)
@@ -333,6 +388,18 @@ end
 
 # --- Helpers ---
 
+"""
+Check whether a matrix is a Pauli operator (up to phase).
+
+This compares the matrix against the standard Pauli X, Y, and Z operators to enable fast
+probability calculations for Pauli jumps.
+
+Args:
+    op (AbstractMatrix): Operator matrix to classify.
+
+Returns:
+    Bool: `true` if the operator matches a Pauli matrix, otherwise `false`.
+"""
 function is_pauli(op::AbstractMatrix)
     d = size(op, 1)
     # P'P = I
@@ -340,6 +407,18 @@ function is_pauli(op::AbstractMatrix)
     return isapprox(PdagP, Matrix(I, d, d), atol=1e-10)
 end
 
+"""
+Check whether a noise process corresponds to a Pauli channel.
+
+This inspects the process name and, if available, its operator or factors to decide whether it
+represents a Pauli-type jump.
+
+Args:
+    proc (AbstractNoiseProcess): Noise process to classify.
+
+Returns:
+    Bool: `true` if the process is Pauli-type, otherwise `false`.
+"""
 function is_pauli_proc(proc::AbstractNoiseProcess)
     # Heuristic: check name
     if (occursin("pauli", proc.name) || occursin("crosstalk", proc.name)) && !occursin("projector", proc.name)

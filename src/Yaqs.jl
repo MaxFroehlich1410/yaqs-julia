@@ -10,19 +10,68 @@ const _ENABLE_TIMING = Ref(false)
 const _TIMING_TOP = Ref(20)
 const _TIMING_PRINT_EACH_CALL = Ref(true)
 
+"""
+Store timing statistics for named code regions.
+
+This tracks total elapsed time and call counts per timing key and is used to aggregate results
+across nested timing scopes.
+
+Args:
+    times_ns (Dict{Symbol, UInt64}): Accumulated time in nanoseconds per key.
+    counts (Dict{Symbol, Int}): Call counts per key.
+
+Returns:
+    TimingStats: Timing statistics container.
+"""
 mutable struct TimingStats
     times_ns::Dict{Symbol, UInt64}
     counts::Dict{Symbol, Int}
 end
 
+"""
+Create an empty TimingStats container.
+
+This initializes empty dictionaries for time and count accumulation.
+
+Args:
+    None
+
+Returns:
+    TimingStats: Empty timing statistics container.
+"""
 TimingStats() = TimingStats(Dict{Symbol, UInt64}(), Dict{Symbol, Int}())
 
+"""
+Accumulate timing data for a key.
+
+This adds the elapsed time and increments the call count for the specified timing key.
+
+Args:
+    ts (TimingStats): Timing statistics container to update.
+    key (Symbol): Timing key identifier.
+    dt_ns (UInt64): Elapsed time in nanoseconds.
+
+Returns:
+    Nothing: The statistics are updated in-place.
+"""
 @inline function _timing_add!(ts::TimingStats, key::Symbol, dt_ns::UInt64)
     ts.times_ns[key] = get(ts.times_ns, key, UInt64(0)) + dt_ns
     ts.counts[key] = get(ts.counts, key, 0) + 1
     return nothing
 end
 
+"""
+Merge timing statistics from one container into another.
+
+This adds per-key times and counts from `src` into `dst`.
+
+Args:
+    dst (TimingStats): Destination statistics to update.
+    src (TimingStats): Source statistics to merge from.
+
+Returns:
+    Nothing: The destination statistics are updated in-place.
+"""
 @inline function _timing_merge!(dst::TimingStats, src::TimingStats)
     for (k, v) in src.times_ns
         dst.times_ns[k] = get(dst.times_ns, k, UInt64(0)) + v
@@ -35,6 +84,17 @@ end
 
 const _ACTIVE_STATS = Ref{Vector{Union{Nothing, TimingStats}}}(Vector{Union{Nothing, TimingStats}}(undef, 0))
 
+"""
+Initialize thread-local timing statistics storage.
+
+This sizes the per-thread active statistics vector to the current thread count and clears it.
+
+Args:
+    None
+
+Returns:
+    Nothing: Thread-local storage is updated in-place.
+"""
 function __init__()
     v = Vector{Union{Nothing, TimingStats}}(undef, Base.Threads.maxthreadid())
     fill!(v, nothing)
@@ -42,6 +102,18 @@ function __init__()
     return nothing
 end
 
+"""
+Get the active timing stats for the current thread.
+
+This retrieves the thread-local TimingStats object if one is active, resizing storage if the
+thread count has changed.
+
+Args:
+    None
+
+Returns:
+    Union{Nothing, TimingStats}: Active stats for the current thread, or `nothing`.
+"""
 @inline function _active_stats()
     v = _ACTIVE_STATS[]
     tid = threadid()
@@ -58,24 +130,42 @@ end
 const _GLOBAL_TIMING = TimingStats()
 
 """
-    enable_timing!(flag::Bool=true)
+Enable or disable timing collection.
 
-Enable timing collection (thread-local, aggregated into a global summary).
+This toggles timing collection for the current process and controls whether `@t` records timings.
+
+Args:
+    flag (Bool): Whether to enable timing collection.
+
+Returns:
+    Bool: The updated timing enable flag.
 """
 enable_timing!(flag::Bool=true) = (_ENABLE_TIMING[] = flag)
 
 """
-    set_timing_print_each_call!(flag::Bool=true)
+Configure whether timing summaries print after each scope.
 
-If `true`, print a timing summary for every completed scope (e.g. each `run_digital_tjm` call).
-If `false`, only the global summary is kept (use `print_timing_summary!`).
+This controls automatic printing of timing summaries when a scope ends, keeping global summaries
+available regardless of the print setting.
+
+Args:
+    flag (Bool): Whether to print a summary after each scope.
+
+Returns:
+    Bool: The updated print-each-call flag.
 """
 set_timing_print_each_call!(flag::Bool=true) = (_TIMING_PRINT_EACH_CALL[] = flag)
 
 """
-    reset_timing!()
+Clear accumulated global timing statistics.
 
-Clear accumulated (global) timing statistics.
+This resets the global timing dictionaries used to summarize performance.
+
+Args:
+    None
+
+Returns:
+    Nothing: Global timing statistics are cleared.
 """
 function reset_timing!()
     empty!(_GLOBAL_TIMING.times_ns)
@@ -83,6 +173,20 @@ function reset_timing!()
     return nothing
 end
 
+"""
+Print a timing summary for a given TimingStats object.
+
+This computes total time, sorts entries by elapsed time, and prints a formatted summary for the
+top keys.
+
+Args:
+    ts (TimingStats): Timing statistics to print.
+    header (AbstractString): Header text for the summary.
+    top (Int): Maximum number of entries to print.
+
+Returns:
+    Nothing: Summary is printed to stdout.
+"""
 function _print_timing_summary(ts::TimingStats; header::AbstractString="Timing summary", top::Int=_TIMING_TOP[])
     total_ns = UInt64(0)
     @inbounds for v in values(ts.times_ns)
@@ -105,9 +209,16 @@ function _print_timing_summary(ts::TimingStats; header::AbstractString="Timing s
 end
 
 """
-    print_timing_summary!(; header="Timing summary", top=_TIMING_TOP[])
+Print the global timing summary.
 
-Print (and keep) the currently accumulated global timing summary.
+This prints the accumulated global timing statistics without clearing them.
+
+Args:
+    header (AbstractString): Header text for the summary.
+    top (Int): Maximum number of entries to print.
+
+Returns:
+    Nothing: Summary is printed to stdout.
 """
 function print_timing_summary!(; header::AbstractString="Timing summary", top::Int=_TIMING_TOP[])
     _print_timing_summary(_GLOBAL_TIMING; header=header, top=top)
@@ -115,9 +226,15 @@ function print_timing_summary!(; header::AbstractString="Timing summary", top::I
 end
 
 """
-    begin_scope!() -> Union{Nothing,TimingStats}
+Begin a timing scope on the current thread.
 
-Start a timing scope on the current thread (used to collect nested `@t` timings).
+This creates a thread-local TimingStats object used to accumulate `@t` timings within the scope.
+
+Args:
+    None
+
+Returns:
+    Union{Nothing, TimingStats}: Timing stats object if timing is enabled, otherwise `nothing`.
 """
 function begin_scope!()
     if !_ENABLE_TIMING[]
@@ -129,9 +246,17 @@ function begin_scope!()
 end
 
 """
-    end_scope!(ts; header="Timing scope")
+End a timing scope and merge results into the global summary.
 
-End a timing scope, merging into the global summary and optionally printing.
+This clears the thread-local active stats, merges them into the global summary, and optionally
+prints a per-scope summary.
+
+Args:
+    ts (Union{Nothing, TimingStats}): Timing stats from `begin_scope!`.
+    header (AbstractString): Header text for the per-scope summary.
+
+Returns:
+    Nothing: Timing data is merged and optionally printed.
 """
 function end_scope!(ts::Union{Nothing, TimingStats}; header::AbstractString="Timing scope")
     _ACTIVE_STATS[][threadid()] = nothing
@@ -145,6 +270,19 @@ function end_scope!(ts::Union{Nothing, TimingStats}; header::AbstractString="Tim
     return nothing
 end
 
+"""
+Time a code block and record the duration under a key.
+
+This macro wraps an expression, measuring elapsed time when timing is enabled and accumulating
+the result in the current scope's TimingStats.
+
+Args:
+    key (Symbol): Timing key identifier.
+    ex: Expression to execute and time.
+
+Returns:
+    Any: Result of the wrapped expression.
+"""
 macro t(key, ex)
     return quote
         local _ts = Timing._active_stats()

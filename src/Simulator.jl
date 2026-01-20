@@ -11,6 +11,17 @@ using ..DigitalTJM
 
 export run, available_cpus
 
+"""
+Return the number of available CPU threads.
+
+This checks for SLURM-provided CPU counts and falls back to Julia's `Sys.CPU_THREADS`.
+
+Args:
+    None
+
+Returns:
+    Int: Number of available CPU threads.
+"""
 function available_cpus()
     if haskey(ENV, "SLURM_CPUS_ON_NODE")
         return parse(Int, ENV["SLURM_CPUS_ON_NODE"])
@@ -19,6 +30,23 @@ function available_cpus()
     end
 end
 
+"""
+Run an analog (Hamiltonian) simulation over multiple trajectories.
+
+This selects a first- or second-order TJM backend, runs trajectories in parallel when requested,
+and aggregates observable trajectories into results.
+
+Args:
+    initial_state (MPS): Initial state to evolve.
+    operator (MPO): Hamiltonian MPO.
+    sim_params (TimeEvolutionConfig): Simulation configuration.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to disable noise.
+    parallel (Bool): Whether to parallelize over trajectories.
+    kwargs: Additional keyword arguments forwarded to the backend.
+
+Returns:
+    Nothing: Results are stored in `sim_params.observables`.
+"""
 function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
     # Backend selection
     backend = (sim_params.order == 1) ? analog_tjm_1 : analog_tjm_2
@@ -68,6 +96,23 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
     SimulationConfigs.aggregate_trajectories!(sim_params)
 end
 
+"""
+Run a digital circuit simulation over multiple trajectories.
+
+This executes the digital TJM backend for each trajectory, optionally in parallel, and aggregates
+observable trajectories into results while tracking bond dimensions.
+
+Args:
+    initial_state (MPS): Initial state to evolve.
+    circuit: Digital circuit or repeated circuit wrapper.
+    sim_params (TimeEvolutionConfig): Simulation configuration.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to disable noise.
+    parallel (Bool): Whether to parallelize over trajectories.
+    kwargs: Additional keyword arguments forwarded to the backend.
+
+Returns:
+    Vector{Vector{Int}}: Per-trajectory bond dimension traces.
+"""
 function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConfig, noise_model::Union{NoiseModel, Nothing}; parallel::Bool=true, kwargs...)
     
     # Noise check
@@ -124,6 +169,26 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
     return all_bond_dims
 end
 
+"""
+Run a simulation given an MPO or digital circuit.
+
+This normalizes the initial state and dispatches to the analog or digital backend based on the
+operator type, using the provided simulation configuration.
+
+Args:
+    initial_state (MPS): Initial state to evolve.
+    operator_or_circuit: MPO for analog runs or circuit for digital runs.
+    sim_params: Simulation configuration (TimeEvolutionConfig).
+    noise_model: Noise model or `nothing` to disable noise.
+    parallel (Bool): Whether to parallelize over trajectories.
+    kwargs: Additional keyword arguments forwarded to the backend.
+
+Returns:
+    Any: Backend-specific result (e.g., bond dimension traces for digital runs).
+
+Raises:
+    ErrorException: If the operator type or configuration is unsupported.
+"""
 function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=nothing; parallel::Bool=true, kwargs...)
     MPSModule.normalize!(initial_state; form="B") 
     

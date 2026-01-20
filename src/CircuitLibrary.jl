@@ -13,10 +13,18 @@ export create_cz_brickwork_circuit, create_rzz_pi_over_2_brickwork
 # --- Helper Functions ---
 
 """
-    site_index(row, col, num_cols)
+Map 2D lattice coordinates to a 1D snaking index.
 
-Helper for snaking MPS ordering. Maps (row, col) to 1D index.
-Indices are 1-based.
+This converts a `(row, col)` pair into a 1-based linear index using a snake ordering that reverses
+direction on alternating rows, matching the MPS layout used for 2D circuits.
+
+Args:
+    row (Int): Row index (1-based).
+    col (Int): Column index (1-based).
+    num_cols (Int): Total number of columns in the lattice.
+
+Returns:
+    Int: Linear site index in the snaking ordering.
 """
 function site_index(row::Int, col::Int, num_cols::Int)
     # Even index rows (0-based) -> Odd rows (1-based): Left-to-Right
@@ -30,11 +38,17 @@ function site_index(row::Int, col::Int, num_cols::Int)
 end
 
 """
-    lookup_qiskit_ordering(particle, spin)
+Map a particle index and spin to Qiskit-style qubit ordering.
 
-Helper for Fermi-Hubbard mapping.
-Maps particle index (1-based) and spin (:up/:down) to qubit index (1-based).
-Interleaves sites: (Up_1, Down_1, Up_2, Down_2...)
+This returns a 1-based qubit index with interleaved spin ordering `(Up_1, Down_1, Up_2, Down_2, ...)`
+to match Qiskit conventions used in the Fermi-Hubbard circuit construction.
+
+Args:
+    particle (Int): Particle/site index (1-based).
+    spin (Symbol): Spin label, typically `:up` or `:down`.
+
+Returns:
+    Int: Qubit index in the interleaved ordering.
 """
 function lookup_qiskit_ordering(particle::Int, spin::Symbol)
     # Python: 2 * p_idx + (0 if up else 1)
@@ -44,10 +58,23 @@ function lookup_qiskit_ordering(particle::Int, spin::Symbol)
 end
 
 """
-    add_long_range_interaction!(circ, i, j, outer_op, alpha)
+Add a decomposed long-range interaction to a circuit.
 
-Adds a decomposed long-range interaction exp(-i alpha (P_i Z...Z P_j)).
-outer_op can be :X or :Y.
+This inserts a sequence of basis changes, CNOT ladders, and a central rotation to realize
+`exp(-i * alpha * (P_i Z...Z P_j))` with `P` chosen as `X` or `Y` on the endpoints.
+
+Args:
+    circ (DigitalCircuit): Circuit to append gates to.
+    i (Int): Left endpoint qubit index (1-based).
+    j (Int): Right endpoint qubit index (1-based).
+    outer_op (Symbol): Endpoint operator, either `:X` or `:Y`.
+    alpha (Float64): Rotation angle for the interaction.
+
+Returns:
+    Nothing: Gates are appended to `circ` in-place.
+
+Raises:
+    ErrorException: If `i >= j` or `outer_op` is not `:X` or `:Y`.
 """
 function add_long_range_interaction!(circ::DigitalCircuit, i::Int, j::Int, outer_op::Symbol, alpha::Float64)
     if i >= j
@@ -149,9 +176,19 @@ function add_long_range_interaction!(circ::DigitalCircuit, i::Int, j::Int, outer
 end
 
 """
-    add_hopping_term!(circ, i, j, alpha)
+Add a hopping interaction term to a circuit.
 
-Adds hopping term exp(-i alpha (XX + YY)).
+This composes two long-range interactions to implement `exp(-i * alpha * (XX + YY))` between the
+specified qubits.
+
+Args:
+    circ (DigitalCircuit): Circuit to append gates to.
+    i (Int): Left qubit index (1-based).
+    j (Int): Right qubit index (1-based).
+    alpha (Float64): Rotation angle for the hopping term.
+
+Returns:
+    Nothing: Gates are appended to `circ` in-place.
 """
 function add_hopping_term!(circ::DigitalCircuit, i::Int, j::Int, alpha::Float64)
     add_long_range_interaction!(circ, i, j, :X, alpha)
@@ -161,6 +198,23 @@ end
 
 # --- Existing Implementations ---
 
+"""
+Construct a 1D transverse-field Ising circuit.
+
+This builds a digital Trotter circuit with single-qubit `Rx` rotations and nearest-neighbor `Rzz`
+gates, inserting sampling barriers between Trotter steps.
+
+Args:
+    L (Int): Number of qubits.
+    J (Float64): Ising coupling strength.
+    g (Float64): Transverse field strength.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of Trotter steps.
+    periodic (Bool): Whether to include a periodic boundary interaction.
+
+Returns:
+    DigitalCircuit: Circuit implementing the Ising evolution.
+"""
 function create_ising_circuit(L::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     alpha = -2.0 * dt * g
@@ -189,6 +243,25 @@ function create_ising_circuit(L::Int, J::Float64, g::Float64, dt::Float64, times
     return circ
 end
 
+"""
+Construct a 1D Heisenberg circuit with a longitudinal field.
+
+This builds a Trotter circuit that applies `Rz` field rotations and alternating `Rzz`, `Rxx`, and
+`Ryy` two-qubit interactions, with optional periodic boundary coupling.
+
+Args:
+    L (Int): Number of qubits.
+    Jx (Float64): XX coupling strength.
+    Jy (Float64): YY coupling strength.
+    Jz (Float64): ZZ coupling strength.
+    h (Float64): Longitudinal field strength.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of Trotter steps.
+    periodic (Bool): Whether to include a periodic boundary interaction.
+
+Returns:
+    DigitalCircuit: Circuit implementing the Heisenberg evolution.
+"""
 function create_heisenberg_circuit(L::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
     txx = -2.0 * dt * Jx
@@ -243,7 +316,21 @@ end
 # --- New Implementations ---
 
 """
-    create_2d_ising_circuit(num_rows, num_cols, J, g, dt, timesteps)
+Construct a 2D transverse-field Ising circuit with snaking ordering.
+
+This builds a digital circuit for a 2D lattice mapped to a 1D snaking MPS order, applying `Rx`
+rotations and nearest-neighbor `Rzz` interactions in both horizontal and vertical directions.
+
+Args:
+    num_rows (Int): Number of lattice rows.
+    num_cols (Int): Number of lattice columns.
+    J (Float64): Ising coupling strength.
+    g (Float64): Transverse field strength.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of Trotter steps.
+
+Returns:
+    DigitalCircuit: Circuit implementing the 2D Ising evolution.
 """
 function create_2d_ising_circuit(num_rows::Int, num_cols::Int, J::Float64, g::Float64, dt::Float64, timesteps::Int)
     total_qubits = num_rows * num_cols
@@ -299,7 +386,23 @@ function create_2d_ising_circuit(num_rows::Int, num_cols::Int, J::Float64, g::Fl
 end
 
 """
-    create_2d_heisenberg_circuit(num_rows, num_cols, Jx, Jy, Jz, h, dt, timesteps)
+Construct a 2D Heisenberg circuit with snaking ordering.
+
+This builds a digital circuit for a 2D lattice mapped to a 1D snaking order, applying on-site `Rz`
+rotations and alternating `Rzz`, `Rxx`, and `Ryy` interactions across horizontal and vertical bonds.
+
+Args:
+    num_rows (Int): Number of lattice rows.
+    num_cols (Int): Number of lattice columns.
+    Jx (Float64): XX coupling strength.
+    Jy (Float64): YY coupling strength.
+    Jz (Float64): ZZ coupling strength.
+    h (Float64): Longitudinal field strength.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of Trotter steps.
+
+Returns:
+    DigitalCircuit: Circuit implementing the 2D Heisenberg evolution.
 """
 function create_2d_heisenberg_circuit(num_rows::Int, num_cols::Int, Jx::Float64, Jy::Float64, Jz::Float64, h::Float64, dt::Float64, timesteps::Int)
     total_qubits = num_rows * num_cols
@@ -358,11 +461,22 @@ function create_2d_heisenberg_circuit(num_rows::Int, num_cols::Int, Jx::Float64,
 end
 
 """
-    create_1d_fermi_hubbard_circuit(L, u, t, mu, num_trotter_steps, dt, timesteps)
+Construct a 1D Fermi-Hubbard Trotter circuit with Qiskit ordering.
 
-Replicates the 1D Fermi-Hubbard circuit.
-Note: Uses Qiskit-style register layout (sites 1..L Up, L+1..2L Down), 
-which is inefficient for MPS if not re-ordered, but matches Python library behavior.
+This uses Qiskit-style register layout `(Up_1..Up_L, Down_1..Down_L)` and applies chemical
+potential, onsite interaction, and kinetic hopping terms per Trotter step.
+
+Args:
+    L (Int): Number of lattice sites.
+    u (Float64): Onsite interaction strength.
+    t (Float64): Hopping strength.
+    mu (Float64): Chemical potential.
+    num_trotter_steps (Int): Trotter sub-steps per timestep.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of outer timesteps.
+
+Returns:
+    DigitalCircuit: Circuit implementing the 1D Fermi-Hubbard evolution.
 """
 function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
     # Up: 1:L, Down: L+1:2L
@@ -371,6 +485,17 @@ function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Flo
     
     n = num_trotter_steps
     
+    """
+    Append the chemical potential term for one sub-step.
+
+    This applies `PhaseGate(theta)` to all up and down qubits using the current Trotter angle.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_chemical_potential()
         theta = mu * dt / (2 * n)
         for j in 1:L
@@ -381,6 +506,18 @@ function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Flo
         end
     end
     
+    """
+    Append the onsite interaction term for one sub-step.
+
+    This applies a controlled-phase gate between each up/down pair at the same lattice site using
+    the current Trotter angle.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_onsite_interaction()
         theta = -u * dt / (2 * n)
         for j in 1:L
@@ -389,6 +526,18 @@ function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Flo
         end
     end
     
+    """
+    Append the kinetic hopping term for one sub-step.
+
+    This applies `Rxx` and `Ryy` gates along even and odd bonds for both spin sectors using the
+    current Trotter angle.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_kinetic_hopping()
         theta = -dt * t / n
         # Python: Rxx then Ryy.
@@ -422,9 +571,23 @@ function create_1d_fermi_hubbard_circuit(L::Int, u::Float64, t::Float64, mu::Flo
 end
 
 """
-    create_2d_fermi_hubbard_circuit(Lx, Ly, u, t, mu, num_trotter_steps, dt, timesteps)
+Construct a 2D Fermi-Hubbard Trotter circuit with interleaved ordering.
 
-Replicates 2D Fermi-Hubbard with interleaved ordering (2*p + spin).
+This builds a circuit using interleaved spin ordering `(Up_1, Down_1, Up_2, Down_2, ...)` and applies
+chemical potential, onsite interaction, and kinetic hopping terms across the 2D lattice.
+
+Args:
+    Lx (Int): Number of sites in the x direction.
+    Ly (Int): Number of sites in the y direction.
+    u (Float64): Onsite interaction strength.
+    t (Float64): Hopping strength.
+    mu (Float64): Chemical potential.
+    num_trotter_steps (Int): Trotter sub-steps per timestep.
+    dt (Float64): Trotter time step.
+    timesteps (Int): Number of outer timesteps.
+
+Returns:
+    DigitalCircuit: Circuit implementing the 2D Fermi-Hubbard evolution.
 """
 function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float64, mu::Float64, num_trotter_steps::Int, dt::Float64, timesteps::Int)
     num_sites = Lx * Ly
@@ -432,6 +595,18 @@ function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float6
     circ = DigitalCircuit(total_qubits)
     n = num_trotter_steps
     
+    """
+    Append the chemical potential term for one sub-step.
+
+    This applies `PhaseGate(theta)` to all up and down qubits using the current Trotter angle and
+    the interleaved spin ordering.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_chemical_potential()
         theta = -mu * dt / (2 * n)
         for j in 1:num_sites
@@ -442,6 +617,18 @@ function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float6
         end
     end
     
+    """
+    Append the onsite interaction term for one sub-step.
+
+    This applies a controlled-phase gate between each up/down pair at the same lattice site using
+    the current Trotter angle and interleaved ordering.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_onsite_interaction()
         theta = -u * dt / (2 * n)
         for j in 1:num_sites
@@ -451,6 +638,18 @@ function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float6
         end
     end
     
+    """
+    Append the kinetic hopping term for one sub-step.
+
+    This applies hopping interactions along horizontal and vertical bonds for both spin sectors,
+    using long-range decompositions where needed.
+
+    Args:
+        None
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function add_kinetic_hopping()
         alpha = t * dt / n
         
@@ -517,7 +716,18 @@ function create_2d_fermi_hubbard_circuit(Lx::Int, Ly::Int, u::Float64, t::Float6
 end
 
 """
-    nearest_neighbour_random_circuit(n_qubits, layers, seed)
+Construct a random nearest-neighbor circuit with alternating entanglers.
+
+This builds a layered circuit with random single-qubit U gates followed by randomly chosen CX/CZ
+gates on alternating bonds per layer.
+
+Args:
+    n_qubits (Int): Number of qubits.
+    layers (Int): Number of circuit layers.
+    seed (Int): Random seed for parameter generation.
+
+Returns:
+    DigitalCircuit: Random nearest-neighbor circuit.
 """
 function nearest_neighbour_random_circuit(n_qubits::Int, layers::Int, seed::Int=42)
     circ = DigitalCircuit(n_qubits)
@@ -593,10 +803,18 @@ function nearest_neighbour_random_circuit(n_qubits::Int, layers::Int, seed::Int=
 end
 
 """
-    qaoa_ising_layer(n_qubits; beta=nothing, gamma=nothing)
+Construct a single QAOA layer for a 1D Ising cost Hamiltonian.
 
-Create one QAOA layer for a 1D Ising cost.
-If parameters are not provided, they are sampled randomly to match Python default behavior.
+This applies `Rx` rotations with angle `2*beta` on all qubits followed by a brickwork of `Rzz`
+interactions with angle `2*gamma`. Missing parameters are sampled randomly.
+
+Args:
+    n_qubits (Int): Number of qubits.
+    beta (Union{Float64, Nothing}): Mixer angle; sampled if `nothing`.
+    gamma (Union{Float64, Nothing}): Cost angle; sampled if `nothing`.
+
+Returns:
+    DigitalCircuit: Circuit implementing a single QAOA layer.
 """
 function qaoa_ising_layer(n_qubits::Int; beta::Union{Float64, Nothing}=nothing, gamma::Union{Float64, Nothing}=nothing)
     circ = DigitalCircuit(n_qubits)
@@ -628,15 +846,20 @@ function qaoa_ising_layer(n_qubits::Int; beta::Union{Float64, Nothing}=nothing, 
 end
 
 """
-    hea_layer(n_qubits; params=nothing)
+Construct a single hardware-efficient ansatz (HEA) layer.
 
-Create one HEA layer.
-If params not provided, random sampling matching Python.
-params should be a vector of (phi, theta, lam) tuples for each qubit, 
-plus an integer 'start' parity (0 or 1) as the last element or separate arg.
-For simplicity, we allow passing arrays:
-- phis, thetas, lams: Vectors of length n_qubits
-- start_parity: 0 (even) or 1 (odd)
+This applies per-qubit `Rz`/`Ry`/`Rz` rotations followed by a CZ brickwork pattern whose parity can
+be specified or randomly chosen.
+
+Args:
+    n_qubits (Int): Number of qubits.
+    phis (Union{Vector{Float64}, Nothing}): Rz(phi) angles per qubit or `nothing` for random.
+    thetas (Union{Vector{Float64}, Nothing}): Ry(theta) angles per qubit or `nothing` for random.
+    lams (Union{Vector{Float64}, Nothing}): Rz(lambda) angles per qubit or `nothing` for random.
+    start_parity (Union{Int, Nothing}): Brickwork start parity (0 or 1), random if `nothing`.
+
+Returns:
+    DigitalCircuit: Circuit implementing one HEA layer.
 """
 function hea_layer(n_qubits::Int; 
                    phis::Union{Vector{Float64}, Nothing}=nothing,
@@ -692,11 +915,34 @@ function hea_layer(n_qubits::Int;
 end
 
 """
-    xy_trotter_layer(N, tau, order="YX")
+Construct a single XY Trotter layer with nearest-neighbor interactions.
+
+This applies `Rxx` and `Ryy` gates on alternating bonds according to the specified order, using a
+rotation angle of `2*tau`.
+
+Args:
+    N (Int): Number of qubits.
+    tau (Float64): Trotter time step.
+    order (String): Interaction order, `"YX"` or `"XY"`.
+
+Returns:
+    DigitalCircuit: Circuit implementing the XY layer.
 """
 function xy_trotter_layer(N::Int, tau::Float64, order::String="YX")
     circ = DigitalCircuit(N)
     
+    """
+    Apply a two-qubit gate type on even and odd bonds.
+
+    This helper appends gates on (1,2), (3,4), ... and (2,3), (4,5), ... with the provided gate
+    constructor and the shared angle `2*tau`.
+
+    Args:
+        gate_type: Gate constructor that takes a single angle argument.
+
+    Returns:
+        Nothing: Gates are appended to `circ` in-place.
+    """
     function apply_pairwise(gate_type)
         # Even (1,2...)
         for i in 1:2:(N-1)
@@ -719,7 +965,18 @@ function xy_trotter_layer(N::Int, tau::Float64, order::String="YX")
 end
 
 """
-    xy_trotter_layer_longrange(N, tau, order="YX")
+Construct an XY Trotter layer with periodic long-range coupling.
+
+This extends the nearest-neighbor XY layer with an additional boundary interaction between qubits
+`N` and `1` to mimic periodic boundary conditions.
+
+Args:
+    N (Int): Number of qubits.
+    tau (Float64): Trotter time step.
+    order (String): Interaction order, `"YX"` or `"XY"`.
+
+Returns:
+    DigitalCircuit: Circuit implementing the long-range XY layer.
 """
 function xy_trotter_layer_longrange(N::Int, tau::Float64, order::String="YX")
     # Reuse base
@@ -738,20 +995,17 @@ function xy_trotter_layer_longrange(N::Int, tau::Float64, order::String="YX")
 end
 
 """
-    longrange_test_circuit(N, theta)
+Construct a minimal circuit to probe long-range noise effects.
 
-Creates a test circuit designed to isolate the effect of long-range noise.
-The circuit has:
-- Single-qubit H gates on all qubits (creates superposition)
-- Exactly ONE two-qubit gate: a long-range RXX gate between qubits N and 1 (periodic boundary)
-- This makes the noise effect on the long-range gate very clear and measurable.
+This prepares a uniform superposition with H gates and applies a single long-range two-qubit gate
+between qubits `N` and `1` to isolate noise effects on that interaction.
 
 Args:
-    N: Number of qubits
-    theta: Rotation angle for the RXX gate (typically π/4 or similar)
+    N (Int): Number of qubits.
+    theta (Float64): Rotation angle for the long-range gate.
 
 Returns:
-    DigitalCircuit with the test structure
+    DigitalCircuit: Circuit with the long-range test structure.
 """
 function longrange_test_circuit(N::Int, theta::Float64)
     circ = DigitalCircuit(N)
@@ -769,7 +1023,17 @@ function longrange_test_circuit(N::Int, theta::Float64)
 end
 
 """
-    create_clifford_cz_frame_circuit(L, timesteps)
+Construct a Clifford CZ frame circuit.
+
+This applies H gates on all qubits followed by even/odd CZ brickwork per timestep, producing a
+Clifford circuit useful for benchmarking.
+
+Args:
+    L (Int): Number of qubits.
+    timesteps (Int): Number of timesteps to apply.
+
+Returns:
+    DigitalCircuit: Circuit implementing the Clifford CZ frame.
 """
 function create_clifford_cz_frame_circuit(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
@@ -790,7 +1054,17 @@ function create_clifford_cz_frame_circuit(L::Int, timesteps::Int)
 end
 
 """
-    create_echoed_xx_pi_over_2(L, timesteps)
+Construct an echoed XX circuit with pi/2 rotations.
+
+This alternates global H layers with brickwork `Rxx(π/2)` gates to form an echoed sequence over
+the specified number of timesteps.
+
+Args:
+    L (Int): Number of qubits.
+    timesteps (Int): Number of timesteps to apply.
+
+Returns:
+    DigitalCircuit: Circuit implementing the echoed XX sequence.
 """
 function create_echoed_xx_pi_over_2(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
@@ -809,7 +1083,17 @@ function create_echoed_xx_pi_over_2(L::Int, timesteps::Int)
 end
 
 """
-    create_sy_cz_parity_frame(L, timesteps)
+Construct a SY-CZ parity frame circuit.
+
+This applies H and S† gates on all qubits followed by even/odd CZ brickwork per timestep, matching
+the parity-frame structure used in related benchmarks.
+
+Args:
+    L (Int): Number of qubits.
+    timesteps (Int): Number of timesteps to apply.
+
+Returns:
+    DigitalCircuit: Circuit implementing the SY-CZ parity frame.
 """
 function create_sy_cz_parity_frame(L::Int, timesteps::Int)
     circ = DigitalCircuit(L)
@@ -826,7 +1110,18 @@ function create_sy_cz_parity_frame(L::Int, timesteps::Int)
 end
 
 """
-    create_cz_brickwork_circuit(L, timesteps; periodic=false)
+Construct a CZ brickwork circuit.
+
+This alternates even and odd CZ layers over the specified number of timesteps, with optional
+periodic boundary coupling.
+
+Args:
+    L (Int): Number of qubits.
+    timesteps (Int): Number of timesteps to apply.
+    periodic (Bool): Whether to add a CZ gate between the last and first qubit.
+
+Returns:
+    DigitalCircuit: Circuit implementing the CZ brickwork pattern.
 """
 function create_cz_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)
@@ -841,7 +1136,18 @@ function create_cz_brickwork_circuit(L::Int, timesteps::Int; periodic::Bool=fals
 end
 
 """
-    create_rzz_pi_over_2_brickwork(L, timesteps; periodic=false)
+Construct an RZZ(π/2) brickwork circuit.
+
+This alternates even and odd `Rzz(π/2)` layers over the specified number of timesteps, with optional
+periodic boundary coupling.
+
+Args:
+    L (Int): Number of qubits.
+    timesteps (Int): Number of timesteps to apply.
+    periodic (Bool): Whether to add an RZZ gate between the last and first qubit.
+
+Returns:
+    DigitalCircuit: Circuit implementing the RZZ brickwork pattern.
 """
 function create_rzz_pi_over_2_brickwork(L::Int, timesteps::Int; periodic::Bool=false)
     circ = DigitalCircuit(L)

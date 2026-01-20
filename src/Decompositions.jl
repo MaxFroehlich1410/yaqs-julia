@@ -6,14 +6,16 @@ using TensorOperations
 export right_qr, left_qr, two_site_svd
 
 """
-    right_qr(tensor::AbstractArray{T,3})
+Perform a right-orthogonal QR split of an MPS tensor.
 
-QR Decomposition shifting orthogonality center to the Right.
-Input Layout: (Left, Phys, Right)
-Operation: Splits (Left, Phys) from (Right).
-Returns: (Q, R)
-- Q: (Left, Phys, NewBond)
-- R: (NewBond, Right)
+This reshapes a rank-3 tensor `(Left, Phys, Right)` into a matrix with `(Left*Phys)` rows and
+`Right` columns, then applies QR to shift the orthogonality center to the right.
+
+Args:
+    tensor (AbstractArray{T,3}): MPS tensor with layout `(Left, Phys, Right)`.
+
+Returns:
+    Tuple: `(Q, R)` where `Q` has shape `(Left, Phys, NewBond)` and `R` has shape `(NewBond, Right)`.
 """
 function right_qr(tensor::AbstractArray{T,3}) where T
     l, p, r = size(tensor)
@@ -36,14 +38,16 @@ function right_qr(tensor::AbstractArray{T,3}) where T
 end
 
 """
-    left_qr(tensor::AbstractArray{T,3})
+Perform a left-orthogonal QR (LQ) split of an MPS tensor.
 
-QR Decomposition shifting orthogonality center to the Left.
-Input Layout: (Left, Phys, Right)
-Operation: Splits (Left) from (Phys, Right).
-Returns: (R, Q)
-- R: (Left, NewBond)
-- Q: (NewBond, Phys, Right)
+This reshapes a rank-3 tensor `(Left, Phys, Right)` into a matrix with `Left` rows and `(Phys*Right)`
+columns, then applies LQ to shift the orthogonality center to the left.
+
+Args:
+    tensor (AbstractArray{T,3}): MPS tensor with layout `(Left, Phys, Right)`.
+
+Returns:
+    Tuple: `(L, Q)` where `L` has shape `(Left, NewBond)` and `Q` has shape `(NewBond, Phys, Right)`.
 """
 function left_qr(tensor::AbstractArray{T,3}) where T
     l, p, r = size(tensor)
@@ -73,14 +77,22 @@ function left_qr(tensor::AbstractArray{T,3}) where T
 end
 
 """
-    two_site_svd(A, B, threshold; max_bond_dim=nothing)
+Split two adjacent MPS tensors with SVD and truncation.
 
-Perform SVD on two adjacent MPS tensors A and B to truncate bond dimension.
-Layouts:
-- A: (Left_A, Phys_A, Bond)
-- B: (Bond, Phys_B, Right_B)
+This contracts tensors `A` and `B` into a two-site tensor, performs an SVD, and truncates the bond
+dimension using an error threshold and optional maximum bond dimension.
 
-Returns updated A_new, B_new.
+Args:
+    A (AbstractArray{T,3}): Left MPS tensor with layout `(Left_A, Phys_A, Bond)`.
+    B (AbstractArray{T,3}): Right MPS tensor with layout `(Bond, Phys_B, Right_B)`.
+    threshold (Real): Truncation threshold on discarded singular values squared.
+    max_bond_dim (Union{Int, Nothing}): Optional maximum bond dimension to keep.
+
+Returns:
+    Tuple: `(A_new, B_new)` with updated tensors after truncation.
+
+Raises:
+    AssertionError: If the bond dimension of `A` and `B` do not match.
 """
 function two_site_svd(A::AbstractArray{T,3}, B::AbstractArray{T,3}, threshold::Real; max_bond_dim::Union{Int, Nothing}=nothing) where T
     l_a, p_a, r_a = size(A)

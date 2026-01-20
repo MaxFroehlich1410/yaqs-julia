@@ -18,26 +18,94 @@ export DigitalGate, DigitalCircuit, RepeatedDigitalCircuit, add_gate!, process_c
        enable_timing!, set_timing_print_each_call!, reset_timing!, print_timing_summary!
 
 """
-    enable_timing!(flag::Bool=true)
+Enable or disable timing collection for DigitalTJM.
 
-Enable timing collection for DigitalTJM execution (also enables deep timings in
-TDVP / dissipation / stochastic submodules).
+This toggles timing instrumentation for DigitalTJM and propagates the setting to TDVP, dissipation,
+and stochastic submodules to capture nested timings.
+
+Args:
+    flag (Bool): Whether to enable timing collection.
+
+Returns:
+    Nothing: Timing settings are updated globally.
 """
 enable_timing!(flag::Bool=true) = Timing.enable_timing!(flag)
 
+"""
+Configure whether timing data is printed for each call.
+
+This controls automatic printing of timing results after each instrumented call in the Timing module.
+
+Args:
+    flag (Bool): Whether to print timing results after each call.
+
+Returns:
+    Nothing: Timing print behavior is updated.
+"""
 set_timing_print_each_call!(flag::Bool=true) = Timing.set_timing_print_each_call!(flag)
+"""
+Reset all collected timing statistics.
+
+This clears accumulated timing data tracked by the Timing module.
+
+Args:
+    None
+
+Returns:
+    Nothing: Timing statistics are cleared.
+"""
 reset_timing!() = Timing.reset_timing!()
+"""
+Print a summary of collected timing statistics.
+
+This prints the most expensive timing entries with a configurable header and number of rows.
+
+Args:
+    header (AbstractString): Header to display above the summary.
+    top (Int): Number of top entries to print.
+
+Returns:
+    Nothing: Timing summary is printed to stdout.
+"""
 print_timing_summary!(; header::AbstractString="DigitalTJM timing summary", top::Int=20) =
     Timing.print_timing_summary!(; header=header, top=top)
 
 # --- Data Structures ---
 
+"""
+Represent a digital gate applied to one or more sites.
+
+This stores the gate operator, the target site indices, and an optional generator for
+Hamiltonian-based evolution of two-qubit gates.
+
+Args:
+    op (AbstractOperator): Gate operator instance.
+    sites (Vector{Int}): Target qubit indices (1-based).
+    generator (Union{Vector{AbstractMatrix{ComplexF64}}, Nothing}): Optional generator matrices.
+
+Returns:
+    DigitalGate: Gate description for digital simulation.
+"""
 struct DigitalGate
     op::AbstractOperator
     sites::Vector{Int}
     generator::Union{Vector{<:AbstractMatrix{ComplexF64}}, Nothing}
 end
 
+"""
+Store a digital circuit as a sequence of gates and optional layers.
+
+This structure holds the total number of qubits, the flat gate list, and optionally
+preprocessed layers of commuting gates.
+
+Args:
+    num_qubits (Int): Total number of qubits in the circuit.
+    gates (Vector{DigitalGate}): Flat gate list in execution order.
+    layers (Vector{Vector{DigitalGate}}): Optional layered gate list.
+
+Returns:
+    DigitalCircuit: Circuit container for digital TJM execution.
+"""
 mutable struct DigitalCircuit
     num_qubits::Int
     gates::Vector{DigitalGate}
@@ -45,43 +113,106 @@ mutable struct DigitalCircuit
 end
 
 """
-    RepeatedDigitalCircuit(step::DigitalCircuit, repeats::Int)
+Represent a circuit repeated multiple times without duplication.
 
-Represents a circuit obtained by repeating the same `step` circuit `repeats` times.
+This holds a single `step` circuit and an integer repeat count, avoiding materializing
+`repeats` copies of identical gate lists for large circuits.
 
-This avoids materializing `repeats` copies of an identical gate list, which is
-important for very large systems (e.g. IBM127-style circuits).
+Args:
+    step (DigitalCircuit): Circuit to repeat.
+    repeats (Int): Number of repetitions.
+
+Returns:
+    RepeatedDigitalCircuit: Compact repeated-circuit representation.
 """
 struct RepeatedDigitalCircuit
     step::DigitalCircuit
     repeats::Int
 end
 
+"""
+Create an empty digital circuit with a given number of qubits.
+
+This initializes a `DigitalCircuit` with no gates and no processed layers.
+
+Args:
+    n (Int): Number of qubits.
+
+Returns:
+    DigitalCircuit: Empty circuit container.
+"""
 function DigitalCircuit(n::Int)
     return DigitalCircuit(n, DigitalGate[], Vector{Vector{DigitalGate}}())
 end
 
+"""
+Append a gate to a digital circuit.
+
+This constructs a `DigitalGate` from the operator and target sites, optionally attaching a
+generator, and appends it to the circuit's flat gate list.
+
+Args:
+    circ (DigitalCircuit): Circuit to append to.
+    op (AbstractOperator): Gate operator.
+    sites (Vector{Int}): Target qubit indices (1-based).
+    generator: Optional generator matrices for Hamiltonian evolution.
+
+Returns:
+    Nothing: The circuit is updated in-place.
+"""
 function add_gate!(circ::DigitalCircuit, op::AbstractOperator, sites::Vector{Int}; generator=nothing)
     push!(circ.gates, DigitalGate(op, sites, generator))
 end
 
 # --- Options ---
 
+"""
+Configure algorithm choices for DigitalTJM gate application.
+
+This selects the local and long-range update methods, typically `:TEBD` or `:TDVP`, to control how
+gates are applied during simulation.
+
+Args:
+    local_method (Symbol): Method for nearest-neighbor gates.
+    long_range_method (Symbol): Method for long-range gates.
+
+Returns:
+    TJMOptions: Options container for DigitalTJM.
+"""
 struct TJMOptions
     local_method::Symbol # :TEBD or :TDVP
     long_range_method::Symbol # :TEBD or :TDVP
 end
 
-# Default constructor
+"""
+Create TJMOptions with default methods.
+
+This provides keyword defaults for local and long-range methods, both set to `:TDVP` unless
+overridden.
+
+Args:
+    local_method (Symbol): Method for nearest-neighbor gates.
+    long_range_method (Symbol): Method for long-range gates.
+
+Returns:
+    TJMOptions: Options container with the specified methods.
+"""
 TJMOptions(;local_method=:TDVP, long_range_method=:TDVP) = TJMOptions(local_method, long_range_method)
 
 # --- Circuit Processing ---
 
 """
-    process_circuit(circuit::DigitalCircuit)
+Group circuit gates into commuting layers and barrier markers.
 
-Process the circuit gates into layers of commuting operations.
-Returns `(layers, barrier_map)`.
+This performs a greedy layering pass that collects gates into disjoint layers based on qubit
+overlap and records barriers by layer index for sampling control.
+
+Args:
+    circuit (DigitalCircuit): Circuit whose gate list is processed.
+
+Returns:
+    Tuple: `(layers, barrier_map)` where `layers` is a vector of gate layers and `barrier_map` maps
+        layer indices to barrier labels.
 """
 function process_circuit(circuit::DigitalCircuit)
     # Simple greedy layering
@@ -144,6 +275,19 @@ function process_circuit(circuit::DigitalCircuit)
     return layers, barrier_map
 end
 
+"""
+Check whether a barrier label requests sampling at a given layer.
+
+This inspects the barrier map for the provided layer index and looks for a `SAMPLE_OBSERVABLES`
+label in a case-insensitive manner.
+
+Args:
+    barrier_map (Dict{Int, Vector{String}}): Mapping from layer index to barrier labels.
+    idx (Int): Layer index to inspect.
+
+Returns:
+    Bool: `true` if a sampling barrier is present, otherwise `false`.
+"""
 @inline function _has_sample_barrier(barrier_map::Dict{Int, Vector{String}}, idx::Int)
     if !haskey(barrier_map, idx)
         return false
@@ -156,6 +300,20 @@ end
     return false
 end
 
+"""
+Create a sampling plan based on barrier positions.
+
+This determines whether to sample at the start and which layer indices should trigger sampling
+after their execution.
+
+Args:
+    barrier_map (Dict{Int, Vector{String}}): Mapping from layer index to barrier labels.
+    num_layers (Int): Total number of circuit layers.
+
+Returns:
+    Tuple: `(sample_at_start, sample_after)` where `sample_at_start` is a Bool and `sample_after`
+        is a vector of layer indices.
+"""
 @inline function _sample_plan(barrier_map::Dict{Int, Vector{String}}, num_layers::Int)
     sample_at_start = _has_sample_barrier(barrier_map, 0)
     sample_after = Int[]
@@ -169,6 +327,20 @@ end
 
 # --- Noise Helpers ---
 
+"""
+Extract a local noise model affecting a specific two-site gate.
+
+This filters the global noise processes to those that act on either of the two target sites,
+returning a new `NoiseModel` containing only the relevant processes.
+
+Args:
+    noise_model (NoiseModel): Global noise model.
+    site1 (Int): First site index.
+    site2 (Int): Second site index.
+
+Returns:
+    NoiseModel: Local noise model for the specified sites.
+"""
 function create_local_noise_model(noise_model::NoiseModel{T}, site1::Int, site2::Int) where T
     affected_sites = Set([site1, site2])
     local_procs = Vector{AbstractNoiseProcess{T}}()
@@ -189,6 +361,23 @@ end
 
 # --- Helpers ---
 
+"""
+Construct a windowed MPO for a two-site gate.
+
+This builds an MPO over the specified window that inserts the two-site gate generator on the
+targeted sites and identities elsewhere, matching the gate's generator ordering.
+
+Args:
+    gate (DigitalGate): Two-site gate defining the generator.
+    window_start (Int): Starting site index of the window.
+    window_end (Int): Ending site index of the window.
+
+Returns:
+    MPO: Windowed MPO for applying the gate via TDVP.
+
+Raises:
+    AssertionError: If the gate sites fall outside the window.
+"""
 function construct_window_mpo(gate::DigitalGate, window_start::Int, window_end::Int)
     L_window = window_end - window_start + 1
     tensors = Vector{Array{ComplexF64, 4}}(undef, L_window)
@@ -235,6 +424,19 @@ function construct_window_mpo(gate::DigitalGate, window_start::Int, window_end::
     return MPO(L_window, tensors, phys_dims, 0)
 end
 
+"""
+Apply a single-qubit gate to an MPS in-place.
+
+This contracts the 1-qubit operator with the physical index of the target site tensor, preserving
+the MPS layout `(Left, Phys, Right)`.
+
+Args:
+    mps (MPS): State to update in-place.
+    gate (DigitalGate): Single-qubit gate with target site.
+
+Returns:
+    Nothing: The MPS tensor at the target site is updated.
+"""
 function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     site = gate.sites[1]
     @t :matrix_1q begin
@@ -248,6 +450,22 @@ function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     end
 end
 
+"""
+Apply a nearest-neighbor two-qubit gate using exact TEBD.
+
+This moves the orthogonality center, contracts the two-site tensor, applies the gate, and splits
+with SVD and truncation according to the simulation configuration.
+
+Args:
+    mps (MPS): State to update in-place.
+    op (AbstractOperator): Two-qubit gate operator.
+    s1 (Int): Left site index.
+    s2 (Int): Right site index.
+    config (AbstractSimConfig): Configuration with truncation settings.
+
+Returns:
+    Nothing: The MPS tensors and orthogonality center are updated in-place.
+"""
 function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::Int, config::AbstractSimConfig)
     # Standard TEBD update for nearest neighbor gate
     # Moves orthogonality center to s1 (assumes mixed/right canonical to right of s1)
@@ -304,6 +522,21 @@ function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::In
     mps.orth_center = s2
 end
 
+"""
+Apply a gate using either local TEBD or windowed TDVP.
+
+This selects the update method based on gate range and algorithm options, using swap networks for
+long-range TEBD or a windowed TDVP evolution for more accurate updates.
+
+Args:
+    state (MPS): State to update in-place.
+    gate (DigitalGate): Gate to apply.
+    sim_params (AbstractSimConfig): Simulation configuration.
+    alg_options (TJMOptions): Algorithm selection for local and long-range gates.
+
+Returns:
+    Nothing: The MPS is updated in-place.
+"""
 function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig, alg_options::TJMOptions)
     s1, s2 = sort(gate.sites)
     is_long_range = (s2 > s1 + 1)
@@ -360,6 +593,23 @@ end
 
 # --- Main Runner ---
 
+"""
+Run DigitalTJM for a single digital circuit instance.
+
+This processes the circuit into layers, applies gates to a deep-copied state, applies noise if
+present, and records observables according to sampling barriers.
+
+Args:
+    initial_state (MPS): Initial state to copy and evolve.
+    circuit (DigitalCircuit): Circuit to execute.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to disable noise.
+    sim_params (AbstractSimConfig): Simulation parameters including observables and truncation.
+    alg_options (TJMOptions): Algorithm options for local and long-range gates.
+
+Returns:
+    Tuple: `(state, results, bond_dims)` containing the final state, observable measurements, and
+        maximum bond dimensions per sample.
+"""
 function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit, 
                             noise_model::Union{NoiseModel, Nothing}, 
                             sim_params::AbstractSimConfig;
@@ -382,6 +632,18 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     bond_dims = zeros(Int, num_steps)
     current_meas_idx = 1
     
+    """
+    Measure observables and record bond dimension at a sample index.
+
+    This evaluates all configured observables and stores them along with the current maximum bond
+    dimension into the results arrays.
+
+    Args:
+        idx (Int): Column index to write measurements into.
+
+    Returns:
+        Nothing: Results are written into `results` and `bond_dims`.
+    """
     function measure!(idx)
         @t :measure begin
             for (i, obs) in enumerate(sim_params.observables)
@@ -449,6 +711,23 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
     end
 end
 
+"""
+Run DigitalTJM for a repeated digital circuit without materializing repeats.
+
+This executes the layers of a step circuit multiple times, applying noise and collecting
+measurements based on barrier sampling rules.
+
+Args:
+    initial_state (MPS): Initial state to copy and evolve.
+    circuit (RepeatedDigitalCircuit): Repeated circuit wrapper.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to disable noise.
+    sim_params (AbstractSimConfig): Simulation parameters including observables and truncation.
+    alg_options (TJMOptions): Algorithm options for local and long-range gates.
+
+Returns:
+    Tuple: `(state, results, bond_dims)` containing the final state, observable measurements, and
+        maximum bond dimensions per sample.
+"""
 function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                          noise_model::Union{NoiseModel, Nothing},
                          sim_params::AbstractSimConfig;
@@ -472,6 +751,18 @@ function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
         bond_dims = zeros(Int, num_steps)
         current_meas_idx = 1
 
+        """
+        Measure observables and record bond dimension at a sample index.
+
+        This evaluates all configured observables and stores them along with the current maximum
+        bond dimension into the results arrays.
+
+        Args:
+            idx (Int): Column index to write measurements into.
+
+        Returns:
+            Nothing: Results are written into `results` and `bond_dims`.
+        """
         function measure!(idx)
             @t :measure begin
                 for (i, obs) in enumerate(sim_params.observables)

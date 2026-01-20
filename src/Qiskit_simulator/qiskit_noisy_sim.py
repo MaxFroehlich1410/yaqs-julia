@@ -9,11 +9,23 @@ from qiskit_aer import Aer
 import numpy as np
 
 def qiskit_noisy_simulator_stepwise(circuit, noise_model, num_qubits, method="automatic", observable_basis="Z"):
-    """
-    Helper function to get Pauli expectations using Qiskit's Aer simulator.
-    
+    """Compute per-qubit Pauli expectations using Aer with noise.
+
+    This builds Pauli observables for each qubit, runs the noisy Aer estimator on the provided
+    circuit, and returns the expectation values in reverse order.
+
     Args:
-        observable_basis: "Z", "X", or "Y" - which Pauli observable to measure
+        circuit (QuantumCircuit): Circuit to simulate.
+        noise_model (NoiseModel): Qiskit noise model to apply.
+        num_qubits (int): Number of qubits in the circuit.
+        method (str): Aer simulator method.
+        observable_basis (str): Pauli basis to measure ("Z", "X", or "Y").
+
+    Returns:
+        np.ndarray: Expectation values for each qubit.
+
+    Raises:
+        ValueError: If `observable_basis` is not one of "Z", "X", or "Y".
     """
     if observable_basis not in ["Z", "X", "Y"]:
         raise ValueError(f"observable_basis must be one of ['Z', 'X', 'Y'], got {observable_basis}")
@@ -45,6 +57,22 @@ def qiskit_noisy_simulator_stepwise(circuit, noise_model, num_qubits, method="au
     return evs[::-1]
 
 def qiskit_noisy_simulator(circuit, noise_model, num_qubits, num_layers, method="automatic", observable_basis="Z"):
+    """Compute layered Pauli expectations with a noisy Aer simulation.
+
+    This composes the circuit with itself for each layer count and evaluates per-qubit expectation
+    values using the stepwise noisy simulator.
+
+    Args:
+        circuit (QuantumCircuit): Base circuit to repeat.
+        noise_model (NoiseModel): Qiskit noise model to apply.
+        num_qubits (int): Number of qubits in the circuit.
+        num_layers (int): Number of layers to simulate.
+        method (str): Aer simulator method.
+        observable_basis (str): Pauli basis to measure ("Z", "X", or "Y").
+
+    Returns:
+        np.ndarray: Array of expectation values per layer.
+    """
     expvals_list = []
     for layer in range(num_layers):
         qc_copy = circuit.copy()

@@ -16,19 +16,20 @@ export scalar_product, norm, local_expect, local_expect_two_site, single_shot_me
 const AbstractTensor3{T} = AbstractArray{T, 3}
 
 """
-    MPS{T} <: AbstractTensorNetwork
+Represent a matrix product state with an explicit orthogonality center.
 
-Matrix Product State (MPS) with explicitly tracked orthogonality center.
-Memory Layout: Column-Major (Left, Physical, Right).
+This stores rank-3 tensors in `(Left, Physical, Right)` layout and tracks the orthogonality center
+to distinguish left- and right-canonical regions. It is the core state container used throughout
+the tensor network algorithms.
 
-Fields:
-- `tensors`: Vector of rank-3 tensors.
-- `phys_dims`: Physical dimensions (usually 2 for qubits).
-- `length`: Number of sites.
-- `orth_center`: Index of the orthogonality center (1-based). 
-                 Sites 1..oc-1 are Left-Canonical (A).
-                 Sites oc+1..L are Right-Canonical (B).
-                 Site oc is the center (C).
+Args:
+    tensors (Vector{Array{T,3}}): Site tensors in `(Dl, d, Dr)` layout.
+    phys_dims (Vector{Int}): Physical dimensions per site.
+    length (Int): Number of sites in the chain.
+    orth_center (Int): Index of the orthogonality center (1-based).
+
+Returns:
+    MPS{T}: Matrix product state container.
 """
 mutable struct MPS{T}
     tensors::Vector{Array{T, 3}}
@@ -42,13 +43,47 @@ mutable struct MPS{T}
     end
 end
 
-# Outer constructor to infer T
+"""
+Construct an MPS with type inference for the element type.
+
+This outer constructor infers `T` from the provided tensors and delegates to the inner constructor.
+
+Args:
+    length (Int): Number of sites in the chain.
+    tensors (Vector{Array{T,3}}): Site tensors in `(Dl, d, Dr)` layout.
+    phys_dims (Vector{Int}): Physical dimensions per site.
+    orth_center (Int): Index of the orthogonality center (1-based).
+
+Returns:
+    MPS{T}: Matrix product state container.
+"""
 function MPS(length::Int, tensors::Vector{Array{T, 3}}, phys_dims::Vector{Int}, orth_center::Int=1) where T
     return MPS{T}(length, tensors, phys_dims, orth_center)
 end
 
 # --- Constructors ---
 
+"""
+Construct an MPS from provided tensors or a named product state.
+
+This supports initializing from explicit tensors or from common product-state names like `zeros`,
+`ones`, or `Neel`, with optional bond-dimension padding.
+
+Args:
+    length (Int): Number of sites in the chain.
+    tensors (Union{Vector{Array{ComplexF64,3}}, Nothing}): Optional explicit tensors.
+    physical_dimensions (Union{Vector{Int}, Int, Nothing}): Physical dimensions per site or scalar.
+    state (String): Named product state selector.
+    pad (Union{Int, Nothing}): Optional bond dimension padding.
+    basis_string (Union{String, Nothing}): Bitstring for `state="basis"`.
+
+Returns:
+    MPS: Initialized matrix product state.
+
+Raises:
+    AssertionError: If tensor count or basis string length mismatches the chain length.
+    ErrorException: If an unknown `state` name is provided.
+"""
 function MPS(length::Int; 
              tensors::Union{Vector{Array{ComplexF64, 3}}, Nothing}=nothing,
              physical_dimensions::Union{Vector{Int}, Int, Nothing}=nothing,
@@ -146,9 +181,19 @@ end
 # --- Core Functionality ---
 
 """
-    check_if_valid_mps(mps)
+Check bond-dimension consistency across an MPS.
 
-Verify consistency of bond dimensions.
+This verifies that the right bond dimension of each site tensor matches the left bond dimension
+of the next tensor in the chain.
+
+Args:
+    mps (MPS): State to validate.
+
+Returns:
+    Bool: `true` if all bond dimensions are consistent.
+
+Raises:
+    AssertionError: If a bond dimension mismatch is detected.
 """
 function check_if_valid_mps(mps::MPS)
     for i in 1:(mps.length - 1)
@@ -163,7 +208,15 @@ function check_if_valid_mps(mps::MPS)
 end
 
 """
-    write_max_bond_dim(mps)
+Compute the maximum bond dimension of an MPS.
+
+This scans all site tensors and returns the maximum of their left and right bond dimensions.
+
+Args:
+    mps (MPS): State to inspect.
+
+Returns:
+    Int: Maximum bond dimension across all sites.
 """
 function write_max_bond_dim(mps::MPS)
     max_chi = 0
@@ -174,10 +227,17 @@ function write_max_bond_dim(mps::MPS)
 end
 
 """
-    shift_orthogonality_center!(mps, new_center)
+Shift the orthogonality center to a new site index.
 
-Shift the orthogonality center to `new_center` using QR (right) or LQ (left).
-No flipping. In-place updates.
+This moves the orthogonality center left or right by successive QR/LQ decompositions, updating
+site tensors in-place while maintaining canonical form.
+
+Args:
+    mps (MPS): State to update in-place.
+    new_center (Int): Target site index for the orthogonality center.
+
+Returns:
+    Nothing: The MPS tensors and `orth_center` are updated in-place.
 """
 function shift_orthogonality_center!(mps::MPS{T}, new_center::Int) where T
     oc = mps.orth_center
@@ -266,10 +326,17 @@ function shift_orthogonality_center!(mps::MPS{T}, new_center::Int) where T
 end
 
 """
-    normalize!(mps; form="B")
+Normalize an MPS and bring it to right-canonical form.
 
-Brings the MPS to right-canonical form (orth_center = 1) and normalizes the state norm to 1.
-`form` argument is ignored but kept for compatibility; strictly enforces right-canonical (B) form which is equivalent to orth_center=1.
+This performs a right-to-left sweep using LQ decompositions so that sites 2..L are right-canonical
+and the orthogonality center is at site 1. The center tensor is then normalized to unit norm.
+
+Args:
+    mps (MPS): State to normalize in-place.
+    form (String): Canonical form selector (kept for compatibility; `"B"` is enforced).
+
+Returns:
+    Nothing: The MPS is normalized and updated in-place.
 """
 function normalize!(mps::MPS{T}; form::String="B") where T
     # Sweep L -> 2. Site 1 absorbs everything.
@@ -311,11 +378,18 @@ function normalize!(mps::MPS{T}; form::String="B") where T
 end
 
 """
-    truncate!(mps; threshold, max_bond_dim)
+Truncate an MPS by sweeping and SVD truncation.
 
-Single sweep truncation (1->L-1). Updates MPS in place. 
-Returns truncation error.
-Center moves 1 -> L.
+This performs a single left-to-right sweep, merging neighboring sites and truncating via SVD using
+the provided threshold and optional maximum bond dimension.
+
+Args:
+    mps (MPS): State to truncate in-place.
+    threshold (Float64): Truncation threshold on discarded weight.
+    max_bond_dim (Union{Int, Nothing}): Optional maximum bond dimension to keep.
+
+Returns:
+    Float64: Total truncation error accumulated over the sweep.
 """
 function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{Int, Nothing}=nothing) where T
     # Ensure we start at 1
@@ -441,14 +515,23 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
 end
 
 """
-    pad_bond_dimension!(mps, target_dim; noise_scale=1e-8, rng=Random.default_rng())
+Pad internal bond dimensions to a target size.
 
-Pad every internal bond up to `target_dim` and seed freshly added virtual
-subspaces with small complex noise so that single-site TDVP can explore the
-enlarged manifold. The perturbation keeps the physical state unchanged up to
-`noise_scale` (default `1e-8`) but guarantees that all Schmidt values are
-strictly non-zero, which is required for entanglement growth in the 1-site
-algorithm.
+This expands each internal bond to `target_dim` and seeds new virtual subspaces with small complex
+noise so that one-site TDVP can explore the enlarged manifold without changing the state beyond
+`noise_scale`.
+
+Args:
+    mps (MPS): State to pad in-place.
+    target_dim (Int): Target bond dimension for internal bonds.
+    noise_scale (Real): Scale of the complex noise used to seed new subspaces.
+    rng (AbstractRNG): RNG used for noise generation.
+
+Returns:
+    Nothing: The MPS tensors are updated in-place.
+
+Raises:
+    AssertionError: If `target_dim` is not positive.
 """
 function pad_bond_dimension!(mps::MPS{T}, target_dim::Int;
                              noise_scale::Real=1e-8,
@@ -493,6 +576,20 @@ function pad_bond_dimension!(mps::MPS{T}, target_dim::Int;
     normalize!(mps)
 end
 
+"""
+Fill an array with complex Gaussian noise.
+
+This writes complex random values into the provided array using the supplied RNG and scaling
+factor, preserving the array element type.
+
+Args:
+    rng (AbstractRNG): Random number generator.
+    A (AbstractArray): Array to fill with noise.
+    scale (Real): Noise amplitude scaling factor.
+
+Returns:
+    Nothing: The array is filled in-place.
+"""
 @inline function fill_complex_noise!(rng::AbstractRNG, A::AbstractArray{T}, scale::Real) where {T}
     for idx in eachindex(A)
         real_part = randn(rng)
@@ -504,16 +601,32 @@ end
 # --- Measurements ---
 
 """
-    check_canonical_form(mps)
+Report the canonical form information for an MPS.
 
-Returns info about canonical form.
+This currently returns the orthogonality center index, which indicates the split between left-
+ and right-canonical regions.
+
+Args:
+    mps (MPS): State to inspect.
+
+Returns:
+    Vector{Int}: Vector containing the orthogonality center index.
 """
 function check_canonical_form(mps::MPS)
     return [mps.orth_center]
 end
 
 """
-    norm(mps)
+Compute the norm of an MPS using the center tensor.
+
+This returns the Frobenius norm of the tensor at the orthogonality center, which equals the MPS
+norm when the state is in canonical form.
+
+Args:
+    mps (MPS): State whose norm is computed.
+
+Returns:
+    Float64: Norm of the state.
 """
 function LinearAlgebra.norm(mps::MPS)
     c = mps.tensors[mps.orth_center]
@@ -521,9 +634,20 @@ function LinearAlgebra.norm(mps::MPS)
 end
 
 """
-    scalar_product(a, b)
+Compute the scalar product between two MPS states.
 
-Compute <a|b>.
+This contracts corresponding tensors of two MPS objects across all sites to evaluate ⟨psi|phi⟩.
+Both MPS must have the same length.
+
+Args:
+    psi (MPS): Bra state.
+    phi (MPS): Ket state.
+
+Returns:
+    Complex: Scalar product value.
+
+Raises:
+    AssertionError: If the two MPS have different lengths.
 """
 function scalar_product(psi::MPS{T}, phi::MPS{T}) where T
     @assert psi.length == phi.length
@@ -585,7 +709,20 @@ function scalar_product(psi::MPS{T}, phi::MPS{T}) where T
 end
 
 """
-    expect(mps, observable)
+Evaluate an observable on an MPS.
+
+This dispatches to the single-site or two-site expectation routines based on the observable's site
+list and returns the resulting expectation value.
+
+Args:
+    mps (MPS): State to evaluate.
+    obs: Observable object containing gate and site information.
+
+Returns:
+    Complex: Expectation value of the observable.
+
+Raises:
+    ErrorException: If the observable acts on more than two sites.
 """
 function expect(mps::MPS, obs)
     sites = obs.sites
@@ -603,7 +740,18 @@ function expect(mps::MPS, obs)
 end
 
 """
-    local_expect(mps, op, site)
+Compute a single-site expectation value.
+
+This shifts the orthogonality center to the target site and contracts the site tensor with the
+provided operator matrix.
+
+Args:
+    mps (MPS): State to evaluate.
+    op (AbstractMatrix): Single-site operator matrix.
+    site (Int): Target site index.
+
+Returns:
+    Complex: Expectation value at the specified site.
 """
 function local_expect(mps::MPS{T}, op::AbstractMatrix, site::Int) where T
     shift_orthogonality_center!(mps, site)
@@ -623,6 +771,24 @@ function local_expect(mps::MPS{T}, op::AbstractMatrix, site::Int) where T
     return dot(A_perm, OpA)
 end
 
+"""
+Compute a nearest-neighbor two-site expectation value.
+
+This shifts the orthogonality center to the left site, merges the two site tensors, and contracts
+with the provided two-site operator matrix.
+
+Args:
+    mps (MPS): State to evaluate.
+    op (AbstractMatrix): Two-site operator matrix.
+    s1 (Int): Left site index.
+    s2 (Int): Right site index (must be `s1 + 1`).
+
+Returns:
+    Complex: Two-site expectation value.
+
+Raises:
+    AssertionError: If `s2` is not `s1 + 1`.
+"""
 function local_expect_two_site(mps::MPS{T}, op::AbstractMatrix, s1::Int, s2::Int) where T
     @assert s2 == s1 + 1 "Only nearest neighbor supported efficiently"
     
@@ -651,9 +817,20 @@ function local_expect_two_site(mps::MPS{T}, op::AbstractMatrix, s1::Int, s2::Int
 end
 
 """
-    evaluate_all_local_expectations(mps, operators)
+Compute local expectation values for a list of operators.
 
-Efficiently compute expectation values of a list of local operators (one per site).
+This sweeps the orthogonality center along the chain and evaluates each local operator at its
+corresponding site, returning a vector of expectation values.
+
+Args:
+    mps (MPS): State to evaluate.
+    operators (Vector{AbstractMatrix}): One operator per site.
+
+Returns:
+    Vector{ComplexF64}: Local expectation values for each site.
+
+Raises:
+    AssertionError: If the operator list length does not match the MPS length.
 """
 function evaluate_all_local_expectations(mps::MPS{T}, operators::Vector{<:AbstractMatrix}) where T
     @assert length(operators) == mps.length
@@ -676,9 +853,16 @@ function evaluate_all_local_expectations(mps::MPS{T}, operators::Vector{<:Abstra
 end
 
 """
-    measure_single_shot(mps)
+Sample a single measurement outcome from an MPS.
 
-Return bitstring integer.
+This draws one computational-basis sample by sequentially measuring each site and collapsing
+the state, returning the sampled bitstring encoded as an integer.
+
+Args:
+    mps (MPS): State to measure.
+
+Returns:
+    Int: Sampled bitstring as an integer.
 """
 function single_shot_measure(mps::MPS{T}) where T
     psi = deepcopy(mps)
@@ -736,9 +920,33 @@ function single_shot_measure(mps::MPS{T}) where T
     return bits
 end
 
+"""
+Alias for single-shot measurement for backward compatibility.
+
+This constant preserves the previous API name while forwarding to `single_shot_measure`.
+
+Args:
+    None
+
+Returns:
+    Function: Alias of `single_shot_measure`.
+"""
 # Alias for backward compatibility
 const measure_single_shot = single_shot_measure
 
+"""
+Sample multiple measurement outcomes from an MPS.
+
+This repeatedly draws single-shot samples and accumulates counts in a dictionary keyed by the
+bitstring integer value.
+
+Args:
+    mps (MPS): State to measure.
+    shots (Int): Number of samples to draw.
+
+Returns:
+    Dict{Int, Int}: Counts of sampled bitstrings.
+"""
 function measure_shots(mps::MPS, shots::Int)
     counts = Dict{Int, Int}()
     for _ in 1:shots
@@ -748,6 +956,19 @@ function measure_shots(mps::MPS, shots::Int)
     return counts
 end
 
+"""
+Compute the probability of a computational-basis bitstring.
+
+This contracts the MPS with a fixed basis string and returns the squared magnitude of the resulting
+amplitude.
+
+Args:
+    mps (MPS): State to evaluate.
+    bitstring (String): Bitstring of length `mps.length`.
+
+Returns:
+    Float64: Probability of the specified bitstring.
+"""
 function project_onto_bitstring(mps::MPS{T}, bitstring::String) where T
     vec = ones(T, 1) # (bond_dim)
     for i in 1:mps.length
@@ -763,6 +984,17 @@ function project_onto_bitstring(mps::MPS{T}, bitstring::String) where T
     return abs2(vec[1])
 end
 
+"""
+Convert an MPS into a full state vector.
+
+This contracts all site tensors into a single vector in computational basis order.
+
+Args:
+    mps (MPS): State to convert.
+
+Returns:
+    Vector{T}: Full state vector representation of the MPS.
+"""
 function to_vec(mps::MPS{T}) where T
     v = mps.tensors[1]
     for i in 2:mps.length

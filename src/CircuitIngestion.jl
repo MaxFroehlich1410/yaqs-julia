@@ -7,10 +7,17 @@ using ..GateLibrary
 export ingest_qiskit_circuit, map_qiskit_name, convert_instruction_to_gate
 
 """
-    ingest_qiskit_circuit(qc::Py)::DigitalCircuit
+Convert a Qiskit circuit into a DigitalTJM circuit representation.
 
-Ingest a Qiskit QuantumCircuit (as a Python Object), convert it to a DAG,
-and process it into layers of commuting gates suitable for DigitalTJM.
+This ingests a `QuantumCircuit` from Python, converts it to a DAG, and groups front-layer gates into
+commuting layers for DigitalTJM execution. Measurements and barriers are filtered or mapped based
+on the ingestion logic.
+
+Args:
+    qc (Py): Qiskit `QuantumCircuit` object.
+
+Returns:
+    DigitalCircuit: Circuit with layers and flat gate list populated.
 """
 function ingest_qiskit_circuit(qc::Py)
     qiskit = pyimport("qiskit")
@@ -164,11 +171,17 @@ function ingest_qiskit_circuit(qc::Py)
 end
 
 """
-    convert_instruction_to_gate(instr::Py, circuit::Py)
+Convert a Qiskit CircuitInstruction into a DigitalGate.
 
-Convert a Qiskit CircuitInstruction (as in `circuit.data`) to a Julia `DigitalGate`.
-Also handles Barriers by returning a Barrier gate (unlike `process_layer` which might consume them).
-Returns `nothing` if the gate is not supported (e.g. not in GateLibrary and no mapping).
+This maps the Qiskit instruction name and parameters to a Julia gate, resolves qubit indices, and
+constructs a `DigitalGate` with an optional generator. Unsupported gates return `nothing`.
+
+Args:
+    instr (Py): Qiskit `CircuitInstruction` object.
+    circuit (Py): Qiskit `QuantumCircuit` owning the instruction.
+
+Returns:
+    Union{DigitalGate, Nothing}: Converted gate or `nothing` if unsupported.
 """
 function convert_instruction_to_gate(instr::Py, circuit::Py)
     op = instr.operation
@@ -181,7 +194,18 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
     qubits_py = instr.qubits
     sites = Int[]
     
-    # Helper to get index
+    """
+    Resolve a Qiskit qubit object to its integer index.
+
+    This prefers the `_index` attribute when available and falls back to `circuit.find_bit` when
+    necessary, returning a zero-based index.
+
+    Args:
+        q (Py): Qiskit qubit object.
+
+    Returns:
+        Int: Zero-based qubit index.
+    """
     function get_idx(q)
         # Try _index attribute
         if pyhasattr(q, "_index")
@@ -236,6 +260,18 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
 end
 
 
+"""
+Convert a Qiskit DAG node into a DigitalGate.
+
+This extracts the gate name, parameters, and qubit indices from a DAG node and maps them to the
+corresponding Julia gate in the `GateLibrary`.
+
+Args:
+    node (Py): Qiskit DAG node representing an operation.
+
+Returns:
+    DigitalGate: Converted gate for use in `DigitalCircuit`.
+"""
 function convert_node_to_gate(node::Py)::DigitalGate
     op = node.op
     name = pyconvert(String, op.name)
@@ -266,6 +302,22 @@ function convert_node_to_gate(node::Py)::DigitalGate
     return DigitalGate(julia_op, sites, gen)
 end
 
+"""
+Map a Qiskit gate name and parameters to a Julia gate type.
+
+This dispatches common Qiskit instruction names to the corresponding Julia gate constructors,
+including parameterized rotations and two-qubit gates.
+
+Args:
+    name (String): Qiskit gate name.
+    params (Vector{Float64}): Parameter list for the gate.
+
+Returns:
+    AbstractGate: Julia gate instance mapped from Qiskit.
+
+Raises:
+    ErrorException: If the gate name is unsupported.
+"""
 function map_qiskit_name(name::String, params::Vector{Float64})
     if name == "x" || name == "cx" && length(params) == 0 # CNOT is usually 'cx'
         if name == "cx" return CXGate() end
