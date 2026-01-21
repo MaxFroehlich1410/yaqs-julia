@@ -1,4 +1,3 @@
-
 # Publication-Ready Repository Guide (Yaqs.jl / yaqs-julia)
 
 This document is a **step-by-step** checklist to make this repository clean, reproducible, and publication-ready.
@@ -43,7 +42,7 @@ You are done when all items below are true:
 
 1. Decide what is **public API**:
 
-- The functions/types that you want users to rely on long-term.
+- 
 - Everything else is internal implementation and can change.
 
 2. Decide what constitutes **paper reproduction artifacts**:

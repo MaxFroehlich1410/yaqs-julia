@@ -40,8 +40,7 @@ function run_qutip_simulation(L, J, h, strength, times)
     for i in 0:(L-2)
         H = H - J * sz_list[i+1] * sz_list[i+2]
     end
-    # Periodic boundary? Original code implies OBC (MPOModule.init_ising defaults to OBC usually, loop 1 to L-1).
-    # MPOModule.init_ising(L, J, h) usually creates -J sum_{i=1}^{L-1} Z_i Z_{i+1} - h sum X_i.
+
     
     # Transverse field
     for i in 0:(L-1)
