@@ -4,6 +4,8 @@ using Yaqs
 @testset "Yaqs Tests" begin
     # List of test files to run
     tests = [
+        "test_Timing.jl",
+        "test_InternalCore.jl",
         "test_GateLibrary.jl",
         "test_Decompositions.jl",
         "test_MPS.jl",

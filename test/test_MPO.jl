@@ -22,6 +22,20 @@ using Yaqs.GateLibrary
         T1 = mpo_zero.tensors[1]
         @test sum(abs.(T1)) == 0.0
     end
+
+    @testset "MPO x MPS (contract_mpo_mps)" begin
+        L = 3
+        W = MPO(L; identity=true)
+        psi = MPS(L; state="random")
+
+        psi2 = contract_mpo_mps(W, psi)
+        @test psi2 isa MPS
+        @test psi2.length == L
+
+        v1 = MPSModule.to_vec(psi)
+        v2 = MPSModule.to_vec(psi2)
+        @test isapprox(v1, v2; atol=1e-10)
+    end
     
     @testset "Ising Model" begin
         L = 3

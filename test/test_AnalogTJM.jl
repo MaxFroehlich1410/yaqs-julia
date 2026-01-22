@@ -99,4 +99,35 @@ using LinearAlgebra
         @test size(results) == (L, 3)
     end
 
+    @testset "step_through (no noise)" begin
+        L = 3
+        H = MPO(L, identity=true, physical_dimensions=fill(2, L))
+        state = MPS(L, state="zeros")
+        observables = [Observable("Z_$i", ZGate(), i) for i in 1:L]
+        sim_params = TimeEvolutionConfig(observables, 0.2; dt=0.1, sample_timesteps=true)
+
+        # should preserve norm and keep <Z> ≈ 1 for identity Hamiltonian evolution
+        state2 = step_through(state, H, nothing, sim_params)
+        @test MPSModule.check_if_valid_mps(state2)
+        @test isapprox(real(scalar_product(state2, state2)), 1.0; atol=1e-8)
+        for i in 1:L
+            @test isapprox(real(expect(state2, observables[i])), 1.0; atol=1e-8)
+        end
+    end
+
+    @testset "sample (no noise)" begin
+        L = 3
+        H = MPO(L, identity=true, physical_dimensions=fill(2, L))
+        phi = MPS(L, state="zeros")
+        observables = [Observable("Z_$i", ZGate(), i) for i in 1:L]
+        sim_params = TimeEvolutionConfig(observables, 0.2; dt=0.1, sample_timesteps=true)
+
+        results = zeros(Float64, length(observables), length(sim_params.times))
+        sample(phi, H, nothing, sim_params, results, 2)
+
+        # After sampling, column 2 should be written.
+        @test all(isfinite, results[:, 2])
+        @test all(x -> isapprox(x, 1.0; atol=1e-8), results[:, 2])
+    end
+
 end

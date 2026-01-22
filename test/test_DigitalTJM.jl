@@ -114,4 +114,22 @@ using Yaqs.NoiseModule
         @test isapprox(z1, -1.0; atol=1e-10) # Z on |1> is -1
     end
 
+    @testset "RepeatedDigitalCircuit" begin
+        L = 2
+        step = DigitalCircuit(L)
+        add_gate!(step, XGate(), [1])
+        rep = RepeatedDigitalCircuit(step, 2) # X twice -> identity on qubit 1
+
+        sim_params = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
+        psi = MPS(L; state="zeros")
+        psi_out, _ = run_digital_tjm(psi, rep, nothing, sim_params)
+
+        # Back to |00>
+        z1 = real(MPSModule.local_expect(psi_out, matrix(ZGate()), 1))
+        z2 = real(MPSModule.local_expect(psi_out, matrix(ZGate()), 2))
+        @test isapprox(z1, 1.0; atol=1e-10)
+        @test isapprox(z2, 1.0; atol=1e-10)
+        @test check_if_valid_mps(psi_out)
+    end
+
 end

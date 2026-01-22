@@ -92,5 +92,53 @@ using .Yaqs.Algorithms
         @test isapprox(ov, expected, atol=1e-2)
     end
 
+    @testset "Krylov Mode Controls & Stats" begin
+        # Exercise exported control surface
+        reset_krylov_ishermitian_stats!()
+        reset_krylov_ishermitian_cache!()
+
+        set_krylov_ishermitian_mode!(:lanczos)
+        Z = [1.0 0.0; 0.0 -1.0]
+        v0 = ComplexF64[1.0, 0.0]
+        func_Z(x) = Z * x
+        _ = Algorithms.expm_krylov(func_Z, v0, 0.1, 5)
+
+        set_krylov_ishermitian_mode!(:arnoldi)
+        X = [0.0 1.0; 1.0 0.0]
+        func_X(x) = X * x
+        _ = Algorithms.expm_krylov(func_X, v0, 0.1, 5)
+
+        # Print function should run and produce output
+        io = IOBuffer()
+        redirect_stdout(io) do
+            print_krylov_ishermitian_stats(header="stats")
+        end
+        out = String(take!(io))
+        @test occursin("stats", out)
+        @test occursin("expm_krylov calls", out)
+
+        # Also check Bool overload
+        set_krylov_ishermitian_mode!(true)
+        set_krylov_ishermitian_mode!(false)
+        set_krylov_ishermitian_mode!(:auto)
+    end
+
+    @testset "Internal helpers" begin
+        # _ishermitian_check should accept a linear map and prototype vector
+        Z = [1.0 0.0; 0.0 -1.0]
+        func_Z(x) = Z * x
+        @test Algorithms._ishermitian_check(func_Z, ComplexF64[1.0, 0.0]) == true
+
+        X = [0.0 1.0; 1.0 0.0]
+        func_X(x) = X * x
+        @test Algorithms._ishermitian_check(func_X, ComplexF64[1.0, 0.0]) == true
+
+        # _ensure_size! grows and preserves element type
+        A = Array{ComplexF64,3}(undef, 2, 2, 2)
+        Algorithms._ensure_size!(A, (3, 1, 4))
+        @test size(A) == (3, 1, 4)
+        @test eltype(A) == ComplexF64
+    end
+
 end
 

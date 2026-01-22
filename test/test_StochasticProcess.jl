@@ -13,6 +13,17 @@ using Yaqs.DissipationModule
 
 @testset "Stochastic Process Refactored" begin
 
+    @testset "StochasticProcess wrapper type" begin
+        L = 2
+        H = MPO(L; identity=true)
+        proc_list = [Dict("name" => "lowering", "sites" => [1], "strength" => 0.1)]
+        noise = NoiseModel(proc_list, L)
+
+        sp = StochasticProcess(H, noise)
+        @test sp isa StochasticProcessModule.StochasticProcess
+        @test sp.noise_model === noise
+    end
+
     @testset "Stochastic Factor" begin
         L = 2
         psi = MPS(L; state="ones")

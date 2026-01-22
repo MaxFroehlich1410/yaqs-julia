@@ -138,10 +138,15 @@ end
         # Use exported alias
         res = measure_single_shot(mps)
         @test res == 0
+
+        # Direct exported name
+        @test single_shot_measure(mps) == 0
         
         mps = MPS(3; state="ones")
         res = measure_single_shot(mps)
         @test res == 7 
+
+        @test single_shot_measure(mps) == 7
         
         shots = 100
         results = measure_shots(mps, shots)
@@ -151,6 +156,37 @@ end
         mps_x = MPS(4; state="x+")
         counts = measure_shots(mps_x, 100)
         @test sum(values(counts)) == 100
+    end
+
+    @testset "Project onto Bitstring" begin
+        mps0 = MPS(4; state="zeros")
+        @test project_onto_bitstring(mps0, "0000") ≈ 1.0
+        @test project_onto_bitstring(mps0, "1000") ≈ 0.0
+
+        mps1 = MPS(4; state="ones")
+        @test project_onto_bitstring(mps1, "1111") ≈ 1.0
+        @test project_onto_bitstring(mps1, "0111") ≈ 0.0
+
+        # Uniform superposition: all bitstrings equally likely.
+        mpsx = MPS(3; state="x+")
+        @test project_onto_bitstring(mpsx, "000") ≈ 1/8
+        @test project_onto_bitstring(mpsx, "101") ≈ 1/8
+        @test project_onto_bitstring(mpsx, "111") ≈ 1/8
+    end
+
+    @testset "to_vec" begin
+        # Basis ordering: site 1 is least-significant bit (matches single_shot_measure encoding).
+        L = 3
+        mps0 = MPS(L; state="zeros")
+        v0 = to_vec(mps0)
+        @test length(v0) == 2^L
+        @test v0[1] ≈ 1.0 + 0.0im
+        @test sum(abs2, v0) ≈ 1.0
+
+        mpsb = MPS(L; state="basis", basis_string="100") # site1=1, others 0 => integer 1 => index 2
+        vb = to_vec(mpsb)
+        @test vb[2] ≈ 1.0 + 0.0im
+        @test sum(abs2, vb) ≈ 1.0
     end
 
     @testset "Initialization States" begin

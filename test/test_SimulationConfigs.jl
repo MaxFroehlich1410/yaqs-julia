@@ -13,6 +13,13 @@ using .Yaqs.SimulationConfigs
 
 @testset "SimulationConfigs Tests" begin
 
+    @testset "AbstractSimConfig hierarchy" begin
+        @test SimulationConfigs.AbstractSimConfig isa DataType
+        @test TimeEvolutionConfig <: SimulationConfigs.AbstractSimConfig
+        @test MeasurementConfig <: SimulationConfigs.AbstractSimConfig
+        @test StrongMeasurementConfig <: SimulationConfigs.AbstractSimConfig
+    end
+
     @testset "Observable Creation" begin
         gate = XGate()
         site = 1

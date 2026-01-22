@@ -129,4 +129,49 @@ using Yaqs.GateLibrary
         end
         @test has_h && has_sdg && has_cz
     end
+
+    @testset "2D Heisenberg Circuit" begin
+        rows, cols = 2, 2
+        circ = create_2d_heisenberg_circuit(rows, cols, 1.0, 1.0, 1.0, 0.2, 0.1, 1)
+        @test circ.num_qubits == rows * cols
+        # Should contain some two-qubit couplings
+        found_2q = any(g -> (g.op isa RxxGate || g.op isa RyyGate || g.op isa RzzGate), circ.gates)
+        @test found_2q
+    end
+
+    @testset "Random Nearest-Neighbour Circuit" begin
+        n = 5
+        layers = 3
+        c1 = nearest_neighbour_random_circuit(n, layers, 123)
+        c2 = nearest_neighbour_random_circuit(n, layers, 123)
+        @test c1.num_qubits == n
+        @test c2.num_qubits == n
+        # Determinism with fixed seed (gate types and sites should match)
+        @test length(c1.gates) == length(c2.gates)
+        for (g1, g2) in zip(c1.gates, c2.gates)
+            @test typeof(g1.op) == typeof(g2.op)
+            @test g1.sites == g2.sites
+        end
+    end
+
+    @testset "XY Trotter Longrange Layer" begin
+        circ = xy_trotter_layer_longrange(6, 0.1)
+        @test circ.num_qubits == 6
+        # Should contain at least one two-qubit gate
+        @test any(g -> length(g.sites) == 2, circ.gates)
+    end
+
+    @testset "Clifford / Echo / Brickwork constructors" begin
+        circ1 = create_clifford_cz_frame_circuit(4, 1)
+        @test circ1.num_qubits == 4
+        @test any(g -> g.op isa CZGate, circ1.gates)
+
+        circ2 = create_echoed_xx_pi_over_2(4, 1)
+        @test circ2.num_qubits == 4
+        @test any(g -> g.op isa RxxGate, circ2.gates)
+
+        circ3 = create_rzz_pi_over_2_brickwork(4, 1)
+        @test circ3.num_qubits == 4
+        @test any(g -> g.op isa RzzGate, circ3.gates)
+    end
 end
