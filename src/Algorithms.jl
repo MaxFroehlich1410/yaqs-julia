@@ -56,23 +56,24 @@ function __init__()
     return nothing
 end
 
-"""
-Configure how KrylovKit decides the Hermitian mode for expm_krylov.
 
-This controls whether the Krylov exponentiation uses a Lanczos (Hermitian) or Arnoldi (general)
-subspace. The `:auto` mode performs a lightweight self-adjointness check once per thread and caches
-the decision to avoid repeated overhead in tight loops.
-
-Args:
-    mode (Symbol): Mode selector, one of `:auto`, `:lanczos`, or `:arnoldi`.
-
-Returns:
-    Nothing: The global mode and cache are updated in-place.
-
-Raises:
-    AssertionError: If `mode` is not one of `:auto`, `:lanczos`, or `:arnoldi`.
-"""
 function set_krylov_ishermitian_mode!(mode::Symbol)
+    """
+    Configure how KrylovKit decides the Hermitian mode for expm_krylov.
+
+    This controls whether the Krylov exponentiation uses a Lanczos (Hermitian) or Arnoldi (general)
+    subspace. The `:auto` mode performs a lightweight self-adjointness check once per thread and caches
+    the decision to avoid repeated overhead in tight loops.
+
+    Args:
+        mode (Symbol): Mode selector, one of `:auto`, `:lanczos`, or `:arnoldi`.
+
+    Returns:
+        Nothing: The global mode and cache are updated in-place.
+
+    Raises:
+        AssertionError: If `mode` is not one of `:auto`, `:lanczos`, or `:arnoldi`.
+    """
     @assert mode === :auto || mode === :lanczos || mode === :arnoldi
     _KRYLOV_ISHERMITIAN_MODE[] = mode
     reset_krylov_ishermitian_cache!()
