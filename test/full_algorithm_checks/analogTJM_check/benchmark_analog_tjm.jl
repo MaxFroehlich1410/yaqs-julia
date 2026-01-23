@@ -17,6 +17,25 @@ const qt = pyimport("qutip")
 const plt = pyimport("matplotlib.pyplot")
 const np = pyimport("numpy")
 
+function _progress_bar_string(done::Int, total::Int; width::Int=30)
+    total <= 0 && return "[ ] (0/0)"
+    frac = clamp(done / total, 0.0, 1.0)
+    filled = Int(floor(frac * width))
+    filled = clamp(filled, 0, width)
+    bar = string("[", repeat("=", filled), repeat(".", width - filled), "]")
+    return string(bar, " (", done, "/", total, ")")
+end
+
+function _print_progress(done::Int, total::Int; extra::AbstractString="", width::Int=30)
+    msg = _progress_bar_string(done, total; width=width)
+    if !isempty(extra)
+        msg = string(msg, "  ", extra)
+    end
+    print("\r", msg, "    ")
+    flush(stdout)
+    return nothing
+end
+
 function run_qutip_simulation(L, J, h, strength, times)
     println("Running Exact QuTiP Simulation...")
     
@@ -135,6 +154,7 @@ function run_benchmark()
     
     all_results = zeros(Float64, num_obs, num_steps, num_traj)
     progress = Threads.Atomic{Int}(0)
+    progress_lock = ReentrantLock()
     
     Threads.@threads for i in 1:num_traj
         # Note: We pass fresh objects or handle deepcopies inside. 
@@ -142,9 +162,13 @@ function run_benchmark()
         traj_res = analog_tjm_2((i, state, noise_model, sim_params, H))
         all_results[:, :, i] = traj_res
         
-        c = Threads.atomic_add!(progress, 1)
-        if c % 50 == 0
-            println("Completed $c / $num_traj")
+        c = Threads.atomic_add!(progress, 1) + 1
+        lock(progress_lock) do
+            # Analog TJM doesn't currently expose per-trajectory bond growth; report cap for context.
+            _print_progress(c, num_traj; extra="Max Bond cap: $max_bond")
+            if c == num_traj
+                println()
+            end
         end
     end
     

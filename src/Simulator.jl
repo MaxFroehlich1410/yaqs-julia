@@ -17,14 +17,13 @@ function _progress_bar_string(done::Int, total::Int; width::Int=30)
     filled = Int(floor(frac * width))
     filled = clamp(filled, 0, width)
     bar = string("[", repeat("=", filled), repeat(".", width - filled), "]")
-    pct = Int(round(100 * frac))
-    return string(bar, " ", done, "/", total, " (", pct, "%)")
+    return string(bar, " (", done, "/", total, ")")
 end
 
 function _print_traj_progress(done::Int, total::Int; maxbond_sofar::Int=0, width::Int=30)
     msg = _progress_bar_string(done, total; width=width)
     if maxbond_sofar > 0
-        msg = string(msg, " | Max Bond: ", maxbond_sofar)
+        msg = string(msg, "  Max Bond: ", maxbond_sofar)
     end
     # \r overwrites the current line; trailing spaces clear leftovers from longer previous prints
     print("\r", msg, "    ")
@@ -87,8 +86,8 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
         progress_lock = ReentrantLock()
-        # Aim for at most ~200 UI updates to keep contention low
-        stride = max(1, total ÷ 200)
+        # Update once per finished trajectory (user-facing progress bar).
+        stride = 1
         
         Threads.@threads for i in 1:sim_params.num_traj
             args = (i, initial_state, noise_model, sim_params, operator)
@@ -160,8 +159,8 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
         total = sim_params.num_traj
         progress_lock = ReentrantLock()
         maxbond_sofar = Ref{Int}(0)
-        # Aim for at most ~200 UI updates to keep contention low
-        stride = max(1, total ÷ 200)
+        # Update once per finished trajectory (user-facing progress bar).
+        stride = 1
         
         Threads.@threads for i in 1:sim_params.num_traj
             # run_circuit_tjm returns (state, results, bond_dims)
