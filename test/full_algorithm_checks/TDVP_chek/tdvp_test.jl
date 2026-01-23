@@ -124,10 +124,10 @@ println("\nRunning Julia TDVP...")
 # 1. Initialize MPS |00...0>
 mps_1 = MPS(L; state="zeros")
 pad_bond_dimension!(mps_1, max_bond_dim, noise_scale=1e-12) # Helper to expand bond dim slightly for 1-site
-println("max bond dim MPS1: ", write_max_bond_dim(mps_1))
+# println("max bond dim MPS1: ", write_max_bond_dim(mps_1))
 
 mps_2 = MPS(L; state="zeros")
-println("max bond dim MPS2: ", write_max_bond_dim(mps_2))
+# println("max bond dim MPS2: ", write_max_bond_dim(mps_2))
 # 2. Construct MPO
 H_mpo = init_general_hamiltonian(L, Jxx, Jyy, Jzz, hx, hy, hz)
 

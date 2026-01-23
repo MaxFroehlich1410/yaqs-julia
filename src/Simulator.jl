@@ -11,6 +11,27 @@ using ..CircuitTJM
 
 export run, available_cpus
 
+function _progress_bar_string(done::Int, total::Int; width::Int=30)
+    total <= 0 && return "[ ] 0/0"
+    frac = clamp(done / total, 0.0, 1.0)
+    filled = Int(floor(frac * width))
+    filled = clamp(filled, 0, width)
+    bar = string("[", repeat("=", filled), repeat(".", width - filled), "]")
+    pct = Int(round(100 * frac))
+    return string(bar, " ", done, "/", total, " (", pct, "%)")
+end
+
+function _print_traj_progress(done::Int, total::Int; maxbond_sofar::Int=0, width::Int=30)
+    msg = _progress_bar_string(done, total; width=width)
+    if maxbond_sofar > 0
+        msg = string(msg, " | Max Bond: ", maxbond_sofar)
+    end
+    # \r overwrites the current line; trailing spaces clear leftovers from longer previous prints
+    print("\r", msg, "    ")
+    flush(stdout)
+    return nothing
+end
+
 """
 Return the number of available CPU threads.
 
@@ -65,6 +86,9 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
     if parallel && sim_params.num_traj > 1
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
+        progress_lock = ReentrantLock()
+        # Aim for at most ~200 UI updates to keep contention low
+        stride = max(1, total ÷ 200)
         
         Threads.@threads for i in 1:sim_params.num_traj
             args = (i, initial_state, noise_model, sim_params, operator)
@@ -75,10 +99,12 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
             end
             
             c = atomic_add!(counter, 1) + 1
-            if c % 10 == 0 || c == total
-                print("\rProgress: $c / $total trajectories finished.")
-                if c == total
-                    println()
+            if c % stride == 0 || c == total
+                lock(progress_lock) do
+                    _print_traj_progress(c, total)
+                    if c == total
+                        println()
+                    end
                 end
             end
         end
@@ -89,7 +115,9 @@ function _run_analog(initial_state::MPS, operator::MPO, sim_params::TimeEvolutio
             for (obs_idx, obs) in enumerate(sim_params.observables)
                 obs.trajectories[i, :] = result[obs_idx, :]
             end
+            _print_traj_progress(i, sim_params.num_traj)
         end
+        println()
     end
 
     # Aggregate
@@ -130,8 +158,12 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
     if parallel && sim_params.num_traj > 1
         counter = Atomic{Int}(0)
         total = sim_params.num_traj
+        progress_lock = ReentrantLock()
+        maxbond_sofar = Ref{Int}(0)
+        # Aim for at most ~200 UI updates to keep contention low
+        stride = max(1, total ÷ 200)
         
-        Threads.@threads         for i in 1:sim_params.num_traj
+        Threads.@threads for i in 1:sim_params.num_traj
             # run_circuit_tjm returns (state, results, bond_dims)
             _, result, bond_dims = run_circuit_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             
@@ -149,12 +181,22 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
             end
             
             c = atomic_add!(counter, 1) + 1
-            if c % 10 == 0 || c == total
-                print("\rProgress: $c / $total trajectories finished.")
-                if c == total; println(); end
+            # Update progress occasionally to reduce contention
+            if c % stride == 0 || c == total
+                local_maxbond = isempty(bond_dims) ? 0 : maximum(bond_dims)
+                lock(progress_lock) do
+                    if local_maxbond > maxbond_sofar[]
+                        maxbond_sofar[] = local_maxbond
+                    end
+                    _print_traj_progress(c, total; maxbond_sofar=maxbond_sofar[])
+                    if c == total
+                        println()
+                    end
+                end
             end
         end
     else
+        maxbond_sofar = 0
         for i in 1:sim_params.num_traj
             _, result, bond_dims = run_circuit_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             all_bond_dims[i] = bond_dims
@@ -162,7 +204,11 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
                 n_copy = min(size(result, 2), size(obs.trajectories, 2))
                 obs.trajectories[i, 1:n_copy] = result[obs_idx, 1:n_copy]
             end
+            local_maxbond = isempty(bond_dims) ? 0 : maximum(bond_dims)
+            maxbond_sofar = max(maxbond_sofar, local_maxbond)
+            _print_traj_progress(i, sim_params.num_traj; maxbond_sofar=maxbond_sofar)
         end
+        println()
     end
     
     SimulationConfigs.aggregate_trajectories!(sim_params)

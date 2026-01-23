@@ -682,17 +682,11 @@ function run_circuit_tjm(initial_state::MPS, circuit::DigitalCircuit,
             end
         end
 
-        # Progress logging (overwrite line with \r)
-        current_bond = @t :write_max_bond_dim MPSModule.write_max_bond_dim(state)
-        print("\r\tLayer $l_idx/$num_layers | Max Bond: $current_bond")
-        flush(stdout)
-
         if l_idx in sample_after
             measure!(current_meas_idx)
             current_meas_idx += 1
         end
     end
-    print("\n") # Newline after finishing all layers of this trajectory
     
     # If the circuit did not request sampling (no SAMPLE_OBSERVABLES barriers),
     # still produce at least one measurement for compatibility.
@@ -804,9 +798,6 @@ function run_circuit_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                 end
 
                 global_layer = (rep - 1) * step_layers + l_idx
-                current_bond = @t :write_max_bond_dim MPSModule.write_max_bond_dim(state)
-                print("\r\tLayer $global_layer/$total_layers | Max Bond: $current_bond")
-                flush(stdout)
 
                 if l_idx in sample_after
                     measure!(current_meas_idx)
@@ -814,7 +805,6 @@ function run_circuit_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                 end
             end
         end
-        print("\n")
 
         if num_steps == 1 && num_obs > 0 && !sample_at_start && isempty(sample_after)
             measure!(1)

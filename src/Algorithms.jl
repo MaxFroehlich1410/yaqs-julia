@@ -56,24 +56,23 @@ function __init__()
     return nothing
 end
 
+"""
+Configure how KrylovKit decides the Hermitian mode for expm_krylov.
 
+This controls whether the Krylov exponentiation uses a Lanczos (Hermitian) or Arnoldi (general)
+subspace. The `:auto` mode performs a lightweight self-adjointness check once per thread and caches
+the decision to avoid repeated overhead in tight loops.
+
+Args:
+    mode (Symbol): Mode selector, one of `:auto`, `:lanczos`, or `:arnoldi`.
+
+Returns:
+    Nothing: The global mode and cache are updated in-place.
+
+Raises:
+    AssertionError: If `mode` is not one of `:auto`, `:lanczos`, or `:arnoldi`.
+"""
 function set_krylov_ishermitian_mode!(mode::Symbol)
-    """
-    Configure how KrylovKit decides the Hermitian mode for expm_krylov.
-
-    This controls whether the Krylov exponentiation uses a Lanczos (Hermitian) or Arnoldi (general)
-    subspace. The `:auto` mode performs a lightweight self-adjointness check once per thread and caches
-    the decision to avoid repeated overhead in tight loops.
-
-    Args:
-        mode (Symbol): Mode selector, one of `:auto`, `:lanczos`, or `:arnoldi`.
-
-    Returns:
-        Nothing: The global mode and cache are updated in-place.
-
-    Raises:
-        AssertionError: If `mode` is not one of `:auto`, `:lanczos`, or `:arnoldi`.
-    """
     @assert mode === :auto || mode === :lanczos || mode === :arnoldi
     _KRYLOV_ISHERMITIAN_MODE[] = mode
     reset_krylov_ishermitian_cache!()
@@ -263,7 +262,7 @@ end
 """
 Construct an identity environment tensor for MPO contractions.
 
-This builds a 3-tensor with identity structure on the physical legs and a single active MPO index.
+This builds a order-3-tensor with identity structure on the physical legs and a single active MPO index.
 It is used to initialize left/right environments at the chain boundaries.
 
 Args:
@@ -990,7 +989,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
             state.tensors[i-1] = Prev
         end
     end
-    println("max bond dim: ", write_max_bond_dim(state))
+    # println("max bond dim: ", write_max_bond_dim(state))
 end
 
 # 2. Circuit 1-Site (Forward Only, dt=2 logic)
