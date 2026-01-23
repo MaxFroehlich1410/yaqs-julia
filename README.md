@@ -74,12 +74,11 @@ julia --project run_tests.jl
 ## Repository Layout
 
 - `src/`: core MPS/MPO algorithms, TDVP, noise, and circuit simulation
-- `test/`: unit tests
 - `01_PaperExps/`: paper and experiment scripts
 - `02_server_exp/`: large-scale and server runs
 
 ## Notes
 
 - Most public APIs live under the `Yaqs` module; submodules are re-exported.
-- For large circuits, see `CircuitTJM.RepeatedDigitalCircuit` to avoid
+- For large digital circuits, see `CircuitTJM.RepeatedDigitalCircuit` to avoid
   materializing repeated gate lists.

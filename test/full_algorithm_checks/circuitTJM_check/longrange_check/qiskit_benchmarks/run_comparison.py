@@ -240,7 +240,7 @@ def run_benchmarks(
     script_dir = os.path.dirname(os.path.abspath(__file__))
     
     py_script = os.path.join(script_dir, "run_benchmark.py")
-    jl_script = os.path.join(script_dir, "../benchmark_longrange_digitaltjm.jl")
+    jl_script = os.path.join(script_dir, "../benchmark_longrange_circuittjm.jl")
 
     update_python_script(
         py_script,

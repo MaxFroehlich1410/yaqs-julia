@@ -21,7 +21,7 @@ using Yaqs.SimulationConfigs
 using Yaqs.CircuitTJM
 
 # Access internal functions for testing
-const create_local_noise_model = Yaqs.DigitalTJM.create_local_noise_model
+const create_local_noise_model = Yaqs.CircuitTJM.create_local_noise_model
 
 @testset "CircuitTJM Noise Tests" begin
 
