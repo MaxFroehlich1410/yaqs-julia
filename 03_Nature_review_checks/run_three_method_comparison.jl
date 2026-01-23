@@ -2,17 +2,95 @@ using Printf
 using DelimitedFiles
 
 """
-Driver script: run 4 noise-free methods on the same circuit and plot
+Driver script: run 3 tensor-network methods + 1 exact reference on the same circuit and plot
 (1) bond dimension growth and (2) <Z> expectation values at selected sites.
 
 Methods:
-- CircuitTDVP (Julia): `heisenberg_circuitTDVP.jl`
-- TenPy MPO zip-up (Python): `heisenberg16_mpo_zipup.py`
-- TenPy MPO variational (Python): `heisenberg16_mpo_variational.py`
-- Qiskit exact (Python): `qiskit_exact_heisenberg.py`
+- CircuitTDVP (Julia): DigitalTJM on a `CircuitLibrary.jl` circuit
+- TenPy MPO zip-up / variational (Python): driven by gate-list exported from Julia circuit
+- Qiskit exact (Python): driven by the same gate-list
 
 All parameters can be adjusted below (or via ARGS using --key=value).
+
+--------------------------------------------------------------------------------
+COPY/PASTE COMMANDS (each run writes into results/experimentX/)
+--------------------------------------------------------------------------------
+
+Base (Heisenberg):
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
+    --circuit=Heisenberg --L=8 --steps=20 --dt=0.05 --periodic=true \\
+    --Jx=1.0 --Jy=1.0 --Jz=1.0 --h=0.0 \\
+    --sites=1,4,8 --state_jl=Neel --state_py=neel \\
+    --chi_max=256 --trunc=1e-12 --trunc_mode=relative \\
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --warmup=true \\
+    --min_sweeps=2 --max_sweeps=10 \\
+    --tag_jl=circuitTDVP --tag_zipup=tenpy_zipup --tag_var=tenpy_variational --tag_exact=qiskit_exact \\
+    --outdir=03_Nature_review_checks/results
+
+Legacy Julia truncation mode (NOTE: TenPy stays relative; use only for Julia-side comparisons):
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
+    --circuit=Heisenberg --L=6 --steps=1 --dt=0.05 --sites=1,3,6 \\
+    --chi_max=256 --trunc=1e-12 --trunc_mode=absolute
+
+Ising:
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
+    --circuit=Ising --L=8 --steps=20 --dt=0.05 --periodic=true \\
+    --J=1.0 --g=0.5 \\
+    --sites=1,4,8 --chi_max=256 --trunc=1e-12
+
+Brickwork examples:
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl --circuit=CZBrickwork --L=12 --steps=30 --sites=1,6,12 --chi_max=256 --trunc=1e-12
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl --circuit=RZZPiOver2Brickwork --L=12 --steps=30 --sites=1,6,12 --chi_max=256 --trunc=1e-12
+
+Tips:
+- `--trunc=0` disables discarded-weight truncation (still capped by `--chi_max`).
+- `--warmup=false` includes compilation cost in CircuitTDVP wallclock (usually not desired).
+- `--min_sweeps/--max_sweeps` affect TenPy variational MPO application convergence.
 """
+
+# Minimal Yaqs subset without PythonCall/CircuitIngestion (avoids CondaPkg init)
+module YaqsLite
+module Timing
+export enable_timing!, set_timing_print_each_call!, reset_timing!, print_timing_summary!, begin_scope!, end_scope!, @t
+enable_timing!(::Bool=true) = nothing
+set_timing_print_each_call!(::Bool=true) = nothing
+reset_timing!() = nothing
+print_timing_summary!(; header::AbstractString="Timing summary", top::Int=20) = nothing
+begin_scope!() = nothing
+end_scope!(::Any; header::AbstractString="Timing scope") = nothing
+macro t(_key, ex)
+    return esc(ex)
+end
+end # Timing
+
+include("../src/GateLibrary.jl")
+include("../src/Decompositions.jl")
+include("../src/MPS.jl")
+include("../src/MPO.jl")
+include("../src/SimulationConfigs.jl")
+include("../src/Algorithms.jl")
+include("../src/Noise.jl")
+include("../src/StochasticProcess.jl")
+include("../src/Dissipation.jl")
+include("../src/AnalogTJM.jl")
+include("../src/DigitalTJM.jl")
+include("../src/CircuitLibrary.jl")
+
+using .GateLibrary
+using .MPSModule
+using .SimulationConfigs
+using .DigitalTJM
+using .CircuitLibrary
+end # YaqsLite
+
+using .YaqsLite.GateLibrary
+using .YaqsLite.MPSModule
+using .YaqsLite.SimulationConfigs
+using .YaqsLite.DigitalTJM: DigitalCircuit, TJMOptions, run_digital_tjm
+using .YaqsLite.CircuitLibrary
+
+include("gatelist_io.jl")
+using .GateListIO: write_gatelist_csv
 
 function _parse_kv_args(args::Vector{String})
     d = Dict{String,String}()
@@ -64,6 +142,142 @@ function _read_chi(path::AbstractString)
     return steps, header[2:end], chi
 end
 
+function _next_experiment_outdir(base_outdir::AbstractString)
+    mkpath(base_outdir)
+    max_id = 0
+    for name in readdir(base_outdir)
+        full = joinpath(base_outdir, name)
+        isdir(full) || continue
+        m = match(r"^experiment(\d+)$", name)
+        m === nothing && continue
+        n = parse(Int, m.captures[1])
+        max_id = max(max_id, n)
+    end
+    new_dir = joinpath(base_outdir, "experiment$(max_id + 1)")
+    mkpath(new_dir)
+    return new_dir
+end
+
+function _has_sample_barrier(circ::DigitalCircuit)
+    for g in circ.gates
+        if g.op isa GateLibrary.Barrier && uppercase(g.op.label) == "SAMPLE_OBSERVABLES"
+            return true
+        end
+    end
+    return false
+end
+
+function _ensure_sample_barriers!(circ::DigitalCircuit)
+    has = _has_sample_barrier(circ)
+    if has
+        return circ
+    end
+    # Minimal fallback: add a barrier at start and end so the pipeline still produces outputs.
+    # For meaningful time-series, circuits should insert SAMPLE_OBSERVABLES markers at desired points.
+    pushfirst!(circ.gates, YaqsLite.DigitalTJM.DigitalGate(GateLibrary.Barrier("SAMPLE_OBSERVABLES"), Int[], nothing))
+    push!(circ.gates, YaqsLite.DigitalTJM.DigitalGate(GateLibrary.Barrier("SAMPLE_OBSERVABLES"), Int[], nothing))
+    return circ
+end
+
+function _build_circuit_from_library(kv::Dict{String,String})
+    name = get(kv, "circuit", "Heisenberg")
+
+    if name == "Heisenberg"
+        L = parse(Int, get(kv, "L", "8"))
+        steps = parse(Int, get(kv, "steps", "20"))
+        dt = parse(Float64, get(kv, "dt", "0.05"))
+        periodic = lowercase(get(kv, "periodic", "true")) in ("1", "true", "yes", "y")
+        Jx = parse(Float64, get(kv, "Jx", "1.0"))
+        Jy = parse(Float64, get(kv, "Jy", "1.0"))
+        Jz = parse(Float64, get(kv, "Jz", "1.0"))
+        h = parse(Float64, get(kv, "h", "0.0"))
+        circ = create_heisenberg_circuit(L, Jx, Jy, Jz, h, dt, steps; periodic=periodic)
+        return circ
+    elseif name == "Ising"
+        L = parse(Int, get(kv, "L", "8"))
+        steps = parse(Int, get(kv, "steps", "20"))
+        dt = parse(Float64, get(kv, "dt", "0.05"))
+        periodic = lowercase(get(kv, "periodic", "true")) in ("1", "true", "yes", "y")
+        J = parse(Float64, get(kv, "J", "1.0"))
+        g = parse(Float64, get(kv, "g", "0.5"))
+        circ = create_ising_circuit(L, J, g, dt, steps; periodic=periodic)
+        return circ
+    elseif name == "CZBrickwork"
+        L = parse(Int, get(kv, "L", "8"))
+        steps = parse(Int, get(kv, "steps", "20"))
+        periodic = lowercase(get(kv, "periodic", "false")) in ("1", "true", "yes", "y")
+        circ = create_cz_brickwork_circuit(L, steps; periodic=periodic)
+        return circ
+    elseif name == "RZZPiOver2Brickwork"
+        L = parse(Int, get(kv, "L", "8"))
+        steps = parse(Int, get(kv, "steps", "20"))
+        periodic = lowercase(get(kv, "periodic", "false")) in ("1", "true", "yes", "y")
+        circ = create_rzz_pi_over_2_brickwork(L, steps; periodic=periodic)
+        return circ
+    else
+        error("Unsupported --circuit=$name. Supported: Heisenberg, Ising, CZBrickwork, RZZPiOver2Brickwork")
+    end
+end
+
+function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max::Int, trunc::Float64, outdir::String, tag::String,
+                            state_jl::String, local_mode::Symbol, longrange_mode::Symbol, warmup::Bool=true)
+    mkpath(outdir)
+
+    circ = _ensure_sample_barriers!(circ)
+    L = circ.num_qubits
+    obs_list = [Observable("Z_$s", ZGate(), s) for s in sites]
+
+    sim_params = TimeEvolutionConfig(obs_list, 1.0; dt=1.0, num_traj=1, sample_timesteps=true, max_bond_dim=chi_max, truncation_threshold=trunc)
+    alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode)
+
+    # Warm-up run to exclude compilation from timing.
+    if warmup
+        psi_w = MPS(L; state=state_jl)
+        pad_bond_dimension!(psi_w, 2; noise_scale=0.0)
+        run_digital_tjm(psi_w, circ, nothing, sim_params; alg_options=alg_options)
+    end
+
+    psi = MPS(L; state=state_jl)
+    pad_bond_dimension!(psi, 2; noise_scale=0.0)
+
+    t0 = time()
+    _, results, bond_dims = run_digital_tjm(psi, circ, nothing, sim_params; alg_options=alg_options)
+    wall_s_sim = time() - t0
+
+    num_meas = size(results, 2)
+    obs_path = joinpath(outdir, "$(tag)_obs.csv")
+    chi_path = joinpath(outdir, "$(tag)_chi.csv")
+    timing_path = joinpath(outdir, "$(tag)_timing.csv")
+
+    open(obs_path, "w") do io
+        header = ["step"; ["Z_site$(s)" for s in sites]...]
+        println(io, join(header, ","))
+        for t in 1:num_meas
+            step = t - 1
+            vals = [real(results[i, t]) for i in 1:length(sites)]
+            println(io, join([string(step); string.(vals)...], ","))
+        end
+    end
+    open(chi_path, "w") do io
+        println(io, "step,chi_max")
+        for t in 1:length(bond_dims)
+            step = t - 1
+            println(io, string(step), ",", string(bond_dims[t]))
+        end
+    end
+    open(timing_path, "w") do io
+        println(io, "wall_s_sim")
+        println(io, wall_s_sim)
+    end
+
+    @printf("[circuitTDVP] wrote: %s\n", obs_path)
+    @printf("[circuitTDVP] wrote: %s\n", chi_path)
+    @printf("[circuitTDVP] wrote: %s\n", timing_path)
+    @printf("[circuitTDVP] wall_s_sim=%.3f\n", wall_s_sim)
+
+    return obs_path, chi_path, timing_path
+end
+
 function _python_plot!(; outdir::String, jl_tag::String, zip_tag::String, var_tag::String, exact_tag::String)
     # Plot with system python to avoid PythonCall/CondaPkg initialization issues.
     code = """
@@ -79,6 +293,15 @@ def read_csv(path):
         rows = [[float(x) for x in row] for row in r]
     return header, rows
 
+def read_timing(tag):
+    path = os.path.join(outdir, f"{tag}_timing.csv")
+    if not os.path.exists(path):
+        return None
+    h, rows = read_csv(path)
+    if len(rows) < 1 or len(rows[0]) < 1:
+        return None
+    return float(rows[0][0])
+
 def read_obs(tag):
     h, rows = read_csv(os.path.join(outdir, f"{tag}_obs.csv"))
     step = [int(r[0]) for r in rows]
@@ -91,6 +314,13 @@ def read_chi(tag):
     vals = [r[1:] for r in rows]
     return step, h[1:], vals
 
+def fmt_s(x):
+    if x is None:
+        return "n/a"
+    if x >= 60.0:
+        return f"{x/60.0:.2f} min"
+    return f"{x:.2f} s"
+
 step_jl, obs_cols, obs_jl = read_obs(jl_tag)
 step_zip, _, obs_zip = read_obs(zip_tag)
 step_var, _, obs_var = read_obs(var_tag)
@@ -100,6 +330,11 @@ _, chi_cols_jl, chi_jl = read_chi(jl_tag)
 _, chi_cols_zip, chi_zip = read_chi(zip_tag)
 _, chi_cols_var, chi_var = read_chi(var_tag)
 _, chi_cols_ex, chi_ex = read_chi(exact_tag)
+
+t_jl = read_timing(jl_tag)
+t_zip = read_timing(zip_tag)
+t_var = read_timing(var_tag)
+t_ex = read_timing(exact_tag)
 
 def col_index(cols, name):
     try:
@@ -130,10 +365,10 @@ except Exception as e:
 
 # Bond dims
 plt.figure(figsize=(10,4))
-plt.plot(x, chi_max_jl, label="CircuitTDVP (Julia)", linewidth=2)
-plt.plot(x, chi_max_zip, label="TenPy MPO zip-up", linewidth=2, linestyle="--")
-plt.plot(x, chi_max_var, label="TenPy MPO variational", linewidth=2, linestyle=":")
-plt.plot(x, chi_max_ex, label="Qiskit exact (chi N/A)", linewidth=2, linestyle="-.", color="k", alpha=0.6)
+plt.plot(x, chi_max_jl, label=f"CircuitTDVP (Julia) [{fmt_s(t_jl)}]", linewidth=2)
+plt.plot(x, chi_max_zip, label=f"TenPy MPO zip-up [{fmt_s(t_zip)}]", linewidth=2, linestyle="--")
+plt.plot(x, chi_max_var, label=f"TenPy MPO variational [{fmt_s(t_var)}]", linewidth=2, linestyle=":")
+plt.plot(x, chi_max_ex, label=f"Qiskit exact (chi N/A) [{fmt_s(t_ex)}]", linewidth=2, linestyle="-.", color="k", alpha=0.6)
 plt.xlabel("Layer / step")
 plt.ylabel("chi_max")
 plt.title("Bond dimension growth")
@@ -149,15 +384,50 @@ nsites = len(obs_cols)
 fig, axes = plt.subplots(nsites, 1, figsize=(10, 3*nsites), sharex=True)
 if nsites == 1:
     axes = [axes]
+
+def running_mse(err_sq):
+    out = []
+    s = 0.0
+    for k, v in enumerate(err_sq, start=1):
+        s += float(v)
+        out.append(s / k)
+    return out
+
 for i in range(nsites):
     ax = axes[i]
-    ax.plot(x, [r[i] for r in obs_jl], label="CircuitTDVP (Julia)", linewidth=2)
-    ax.plot(x, [r[i] for r in obs_zip], label="TenPy zip-up", linewidth=2, linestyle="--")
-    ax.plot(x, [r[i] for r in obs_var], label="TenPy variational", linewidth=2, linestyle=":")
-    ax.plot(x, [r[i] for r in obs_ex], label="Qiskit exact", linewidth=2, linestyle="-.", color="k", alpha=0.6)
+    y_jl = [r[i] for r in obs_jl]
+    y_zip = [r[i] for r in obs_zip]
+    y_var = [r[i] for r in obs_var]
+    y_ex = [r[i] for r in obs_ex]
+
+    ax.plot(x, y_jl, label="CircuitTDVP (Julia)", linewidth=2)
+    ax.plot(x, y_zip, label="TenPy zip-up", linewidth=2, linestyle="--")
+    ax.plot(x, y_var, label="TenPy variational", linewidth=2, linestyle=":")
+    ax.plot(x, y_ex, label="Qiskit exact", linewidth=2, linestyle="-.", color="k", alpha=0.6)
+
+    # Right y-axis: running MSE vs exact
+    ax2 = ax.twinx()
+    mse_jl = running_mse([(a - b) ** 2 for a, b in zip(y_jl, y_ex)])
+    mse_zip = running_mse([(a - b) ** 2 for a, b in zip(y_zip, y_ex)])
+    mse_var = running_mse([(a - b) ** 2 for a, b in zip(y_var, y_ex)])
+    ax2.plot(x, mse_jl, label="MSE: CircuitTDVP", linewidth=1.5, linestyle="--", alpha=0.8)
+    ax2.plot(x, mse_zip, label="MSE: TenPy zip-up", linewidth=1.5, linestyle="--", alpha=0.8)
+    ax2.plot(x, mse_var, label="MSE: TenPy variational", linewidth=1.5, linestyle="--", alpha=0.8)
+    ax2.set_ylabel("MSE vs exact")
+
+    # If MSE spans many orders of magnitude, use log-scale.
+    all_mse = [v for v in (mse_jl + mse_zip + mse_var) if v > 0.0]
+    if all_mse:
+        mn, mx = min(all_mse), max(all_mse)
+        if mx / mn > 1.0e6:
+            ax2.set_yscale("log")
+
     ax.set_ylabel(obs_cols[i])
     ax.grid(True)
-    ax.legend(loc="upper right", fontsize="small")
+    # Combined legend (left + right axes)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper right", fontsize="small")
 axes[-1].set_xlabel("Layer / step")
 fig.suptitle("Observable comparison")
 fig.tight_layout()
@@ -177,53 +447,72 @@ function main()
     kv = _parse_kv_args(ARGS)
 
     # --- Adjustable parameters ---
-    circuit = get(kv, "circuit", "Heisenberg")  # currently implemented: Heisenberg
-    L = parse(Int, get(kv, "L", "16"))
-    steps = parse(Int, get(kv, "steps", "20"))
-    dt = parse(Float64, get(kv, "dt", "0.05"))
+    circuit = get(kv, "circuit", "Heisenberg")
+    L = parse(Int, get(kv, "L", "8"))  # some circuit constructors infer L from kv; keep for sites parsing
     chi_max = parse(Int, get(kv, "chi_max", "256"))
-    sites = _parse_sites(get(kv, "sites", "1,8,16"), L)
+    trunc = parse(Float64, get(kv, "trunc", "1e-12"))
+    trunc_mode = lowercase(get(kv, "trunc_mode", "relative"))  # relative (default) | absolute (legacy Julia)
+    sites = _parse_sites(get(kv, "sites", "1,4,8"), L)
     state_py = get(kv, "state_py", "neel")  # TenPy choices: up|neel
     state_jl = get(kv, "state_jl", "Neel")  # Julia choices: zeros|Neel|...
-    periodic = lowercase(get(kv, "periodic", "true")) in ("1", "true", "yes", "y")
+    jl_local_mode = Symbol(get(kv, "jl_local_mode", "TDVP"))
+    jl_longrange_mode = Symbol(get(kv, "jl_longrange_mode", "TDVP"))
+    warmup = lowercase(get(kv, "warmup", "true")) in ("1", "true", "yes", "y")
 
-    outdir = get(kv, "outdir", "03_Nature_review_checks/results")
-    mkpath(outdir)
+    base_outdir = get(kv, "outdir", "03_Nature_review_checks/results")
+    outdir = _next_experiment_outdir(base_outdir)
 
-    @printf("Running 3-way comparison: circuit=%s L=%d steps=%d dt=%g chi_max=%d sites=%s\n",
-            circuit, L, steps, dt, chi_max, join(string.(sites), ","))
-
-    if circuit != "Heisenberg"
-        error("Only circuit=Heisenberg is implemented in this driver right now.")
+    @printf("Running 4-way comparison (CircuitLibrary → gatelist): circuit=%s L=%d chi_max=%d sites=%s\n",
+            circuit, L, chi_max, join(string.(sites), ","))
+    @printf("CircuitTDVP modes: local=%s longrange=%s (warmup=%s)\n",
+            String(jl_local_mode), String(jl_longrange_mode), string(warmup))
+    if trunc_mode in ("absolute", "abs")
+        @printf("Truncation (Julia): absolute_discarded_weight=%.3g  [legacy]\n", trunc)
+        @printf("Note: TenPy uses relative discarded weight; for strict matching use --trunc_mode=relative.\n")
+        trunc_jl = -abs(trunc)  # negative => legacy absolute mode in Julia internals
+    elseif trunc_mode in ("relative", "rel")
+        @printf("Truncation: relative_discarded_weight=%.3g\n", trunc)
+        trunc_jl = abs(trunc)
+    else
+        error("Unknown --trunc_mode=$trunc_mode. Use relative|absolute.")
     end
+    @printf("Writing outputs to: %s\n", outdir)
 
-    # --- Run CircuitTDVP (Julia) ---
-    jl_script = joinpath(@__DIR__, "heisenberg_circuitTDVP.jl")
+    # --- Build circuit in Julia (CircuitLibrary) ---
+    circ = _build_circuit_from_library(kv)
+    # update L for downstream consistency
+    L = circ.num_qubits
+
+    # --- Export gate-list (shared by TenPy + Qiskit exact) ---
+    gatelist_path = joinpath(outdir, "circuit_gatelist.csv")
+    write_gatelist_csv(_ensure_sample_barriers!(circ), gatelist_path)
+    @printf("Wrote gate-list: %s\n", gatelist_path)
+
+    # --- Run CircuitTDVP (Julia) in-process ---
     jl_tag = get(kv, "tag_jl", "circuitTDVP")
-    cmd_jl = `julia --project=$(abspath(joinpath(@__DIR__, ".."))) $jl_script --L=$L --steps=$steps --dt=$dt --chi_max=$chi_max --sites=$(join(sites, ",")) --state=$state_jl --periodic=$(periodic) --outdir=$outdir --tag=$jl_tag`
-    @printf("-> %s\n", string(cmd_jl))
-    run(cmd_jl)
+    _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag,
+                       state_jl=state_jl, local_mode=jl_local_mode, longrange_mode=jl_longrange_mode, warmup=warmup)
 
-    # --- Run TenPy zip-up ---
-    py_zip = joinpath(@__DIR__, "heisenberg16_mpo_zipup.py")
+    # --- Run TenPy zip-up from gate-list ---
+    py_tenpy = joinpath(@__DIR__, "tenpy_mpo_from_gatelist.py")
     py_zip_tag = get(kv, "tag_zipup", "tenpy_zipup")
-    cmd_zip = `python3 $py_zip --L=$L --steps=$steps --dt=$dt --chi-max=$chi_max --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_zip_tag`
+    cmd_zip = `python3 $py_tenpy --gatelist=$gatelist_path --method=zip_up --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_zip_tag`
     @printf("-> %s\n", string(cmd_zip))
     run(cmd_zip)
 
-    # --- Run TenPy variational ---
-    py_var = joinpath(@__DIR__, "heisenberg16_mpo_variational.py")
+    # --- Run TenPy variational from gate-list ---
     py_var_tag = get(kv, "tag_var", "tenpy_variational")
-    min_sweeps = parse(Int, get(kv, "min_sweeps", "1"))
-    max_sweeps = parse(Int, get(kv, "max_sweeps", "2"))
-    cmd_var = `python3 $py_var --L=$L --steps=$steps --dt=$dt --chi-max=$chi_max --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps`
+    # Variational MPO application needs enough sweeps to converge when truncation is effectively off.
+    min_sweeps = parse(Int, get(kv, "min_sweeps", "2"))
+    max_sweeps = parse(Int, get(kv, "max_sweeps", "10"))
+    cmd_var = `python3 $py_tenpy --gatelist=$gatelist_path --method=variational --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps --max-trunc-err=none`
     @printf("-> %s\n", string(cmd_var))
     run(cmd_var)
 
-    # --- Run Qiskit exact (statevector) ---
-    py_ex = joinpath(@__DIR__, "qiskit_exact_heisenberg.py")
+    # --- Run Qiskit exact (statevector) from gate-list ---
+    py_ex = joinpath(@__DIR__, "qiskit_exact_from_gatelist.py")
     py_ex_tag = get(kv, "tag_exact", "qiskit_exact")
-    cmd_ex = `python3 $py_ex --L=$L --steps=$steps --dt=$dt --sites=$(join(sites, ",")) --state=$state_py --periodic=$(periodic) --outdir=$outdir --tag=$py_ex_tag`
+    cmd_ex = `python3 $py_ex --gatelist=$gatelist_path --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_ex_tag`
     @printf("-> %s\n", string(cmd_ex))
     run(cmd_ex)
 

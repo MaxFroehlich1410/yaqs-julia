@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import time
 from pathlib import Path
 
 
@@ -77,7 +78,7 @@ def _build_one_trotter_layer(qc, txx, tyy, tzz, tz, periodic: bool) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--L", type=int, default=16)
+    p.add_argument("--L", type=int, default=8)
     p.add_argument("--dt", type=float, default=0.05)
     p.add_argument("--steps", type=int, default=20)
     p.add_argument("--Jx", type=float, default=1.0)
@@ -86,7 +87,7 @@ def main() -> None:
     p.add_argument("--h", type=float, default=0.0)
     p.add_argument("--periodic", type=str, default="true")
     p.add_argument("--state", type=str, default="neel", choices=["up", "neel"])
-    p.add_argument("--sites", type=str, default="1,8,16")
+    p.add_argument("--sites", type=str, default="1,4,8")
     p.add_argument("--outdir", type=str, default="03_Nature_review_checks/results")
     p.add_argument("--tag", type=str, default="qiskit_exact")
     args = p.parse_args()
@@ -118,30 +119,43 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     obs_path = outdir / f"{args.tag}_obs.csv"
     chi_path = outdir / f"{args.tag}_chi.csv"
+    timing_path = outdir / f"{args.tag}_timing.csv"
 
-    with obs_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["step", *[f"Z_site{s}" for s in sites_1based]])
-        w.writerow([0, *_z_expectations_from_statevector(sv, qubits)])
+    # Buffer results; write CSVs after timing to avoid I/O in the timed section.
+    obs_rows: list[list[float]] = [[0.0, *_z_expectations_from_statevector(sv, qubits)]]
+    chi_rows: list[list[float]] = [[0.0, math.nan]]
 
-    with chi_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["step", "chi_max"])
-        w.writerow([0, math.nan])
-
+    t0 = time.time()
     for n in range(int(args.steps)):
         layer = QuantumCircuit(L)
         _build_one_trotter_layer(layer, txx, tyy, tzz, tz, periodic=periodic)
         sv = sv.evolve(layer)
 
         step = n + 1
-        with obs_path.open("a", newline="") as f:
-            csv.writer(f).writerow([step, *_z_expectations_from_statevector(sv, qubits)])
-        with chi_path.open("a", newline="") as f:
-            csv.writer(f).writerow([step, math.nan])
+        obs_rows.append([float(step), *_z_expectations_from_statevector(sv, qubits)])
+        chi_rows.append([float(step), math.nan])
+    wall = time.time() - t0
+
+    # Write outputs (not timed)
+    with obs_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", *[f"Z_site{s}" for s in sites_1based]])
+        w.writerows(obs_rows)
+
+    with chi_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "chi_max"])
+        w.writerows(chi_rows)
+
+    with timing_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["wall_s_sim"])
+        w.writerow([wall])
 
     print(f"[qiskit_exact] wrote: {obs_path}")
     print(f"[qiskit_exact] wrote: {chi_path}")
+    print(f"[qiskit_exact] wall_s_sim={wall:.3f}")
+    print(f"[qiskit_exact] wrote: {timing_path}")
 
 
 if __name__ == "__main__":

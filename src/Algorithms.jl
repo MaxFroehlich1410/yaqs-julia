@@ -422,15 +422,30 @@ function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     # Truncation
     discarded_sq = 0.0
     keep_rank = length(F.S)
+    # Truncation mode:
+    # - if `threshold >= 0`: interpret as **relative discarded weight**
+    #   sum(discarded S^2) / sum(all S^2) >= threshold
+    #   (matches TenPy's `trunc_cut` convention on normalized Schmidt values)
+    # - if `threshold < 0`: interpret as **absolute discarded weight** (legacy)
+    #   sum(discarded S^2) >= -threshold
     threshold = config.truncation_threshold
+    total_sq = sum(abs2, F.S)
     min_keep = 2
     
     @t :tdvp_truncation_loop begin
         for k in length(F.S):-1:1
             discarded_sq += F.S[k]^2
-            if discarded_sq >= threshold
-                keep_rank = max(k, min_keep)
-                break
+            if threshold < 0
+                if discarded_sq >= -threshold
+                    keep_rank = max(k, min_keep)
+                    break
+                end
+            else
+                frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+                if frac >= threshold
+                    keep_rank = max(k, min_keep)
+                    break
+                end
             end
         end
     end

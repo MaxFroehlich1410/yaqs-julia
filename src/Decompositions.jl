@@ -106,7 +106,12 @@ function two_site_svd(A::AbstractArray{T,3}, B::AbstractArray{T,3}, threshold::R
     U, S, Vt = F.U, F.S, F.Vt
     
     # Truncation Logic
-    # Sum of squared discarded singular values <= threshold
+    # Truncation mode:
+    # - if `threshold >= 0`: interpret as **relative discarded weight**
+    #   sum(discarded S^2) / sum(all S^2) >= threshold
+    #   (matches TenPy's `trunc_cut` convention on normalized Schmidt values)
+    # - if `threshold < 0`: interpret as **absolute discarded weight** (legacy)
+    #   sum(discarded S^2) >= -threshold
     
     # Python logic:
     # discard = 0.0
@@ -121,6 +126,7 @@ function two_site_svd(A::AbstractArray{T,3}, B::AbstractArray{T,3}, threshold::R
     discarded_sq = 0.0
     keep_dim = length(S)
     min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
+    total_sq = sum(abs2, S)
     
     # Calculate truncation
     # Note: svd returns sorted singular values (descending)
@@ -132,12 +138,20 @@ function two_site_svd(A::AbstractArray{T,3}, B::AbstractArray{T,3}, threshold::R
     # Check from end (smallest to largest)
     for k in length(S):-1:1
         discarded_sq += S[k]^2
-        if discarded_sq >= threshold
+        if threshold < 0
+            if discarded_sq >= -threshold
+                keep_dim = max(k, min_keep)
+                break
+            end
+        else
+            frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+            if frac >= threshold
+                keep_dim = max(k, min_keep)
+                break
+            end
+        end
             # Python: keep = max(len(s_vec) - idx, min_keep)
             # Julia: keep_dim = max(k, min_keep) where k = len(S) - idx
-            keep_dim = max(k, min_keep)
-            break
-        end
     end
     
     # Enforce max_bond_dim

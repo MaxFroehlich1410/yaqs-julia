@@ -378,7 +378,12 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         end
         
         # Truncate
-        # Match Python YAQS exactly: absolute threshold, not relative
+        # Truncation mode:
+        # - if `threshold >= 0`: interpret as **relative discarded weight**
+        #   sum(discarded S^2) / sum(all S^2) >= threshold
+        #   (matches TenPy's `trunc_cut` convention on normalized Schmidt values)
+        # - if `threshold < 0`: interpret as **absolute discarded weight** (legacy)
+        #   sum(discarded S^2) >= -threshold
         # Python logic (from two_site_svd):
         # discard = 0.0
         # keep = len(s_vec)
@@ -397,6 +402,7 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         discarded_sq = 0.0
         keep_rank = length(S)
         min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
+        total_sq = sum(abs2, S)
         
         # Accumulate discarded weight from smallest singular values
         # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
@@ -405,12 +411,20 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         for k in length(S):-1:1
             discarded_sq += S[k]^2
-            if discarded_sq >= threshold
+            if threshold < 0
+                if discarded_sq >= -threshold
+                    keep_rank = max(k, min_keep)
+                    break
+                end
+            else
+                frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+                if frac >= threshold
+                    keep_rank = max(k, min_keep)
+                    break
+                end
+            end
                 # Python: keep = max(len(s_vec) - idx, min_keep)
                 # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
-                keep_rank = max(k, min_keep)
-                break
-            end
         end
         
         # 2. Max Bond

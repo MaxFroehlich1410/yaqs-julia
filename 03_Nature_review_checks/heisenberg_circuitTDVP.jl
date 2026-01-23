@@ -84,7 +84,7 @@ function _parse_sites(s::AbstractString, L::Int)
 end
 
 function run_heisenberg_circuitTDVP!(;
-    L::Int=16,
+    L::Int=8,
     steps::Int=20,
     dt::Float64=0.05,
     Jx::Float64=1.0,
@@ -94,11 +94,12 @@ function run_heisenberg_circuitTDVP!(;
     periodic::Bool=true,
     max_bond_dim::Int=256,
     initial_state::String="Neel",
-    sites::Vector{Int}=[1, 8, 16],
+    sites::Vector{Int}=[1, 4, 8],
     outdir::String="03_Nature_review_checks/results",
     tag::String="circuitTDVP",
     local_mode::Symbol=:TDVP,
     longrange_mode::Symbol=:TDVP,
+    warmup::Bool=true,
 )
     mkpath(outdir)
 
@@ -115,12 +116,24 @@ function run_heisenberg_circuitTDVP!(;
 
     @printf("[circuitTDVP] L=%d steps=%d dt=%g periodic=%s init=%s max_bond=%d\n", L, steps, dt, string(periodic), initial_state, max_bond_dim)
 
+    # Warm-up run to exclude compilation from the timed measurement.
+    if warmup
+        steps_w = min(1, steps)
+        circ_w = create_heisenberg_circuit(L, Jx, Jy, Jz, h_field, dt, steps_w; periodic=periodic)
+        psi_w = MPS(L; state=initial_state)
+        pad_bond_dimension!(psi_w, 2; noise_scale=0.0)
+        run_digital_tjm(psi_w, circ_w, nothing, sim_params; alg_options=alg_options)
+    end
+
+    t0 = time()
     _, results, bond_dims = run_digital_tjm(psi, circ, nothing, sim_params; alg_options=alg_options)
+    wall_s_sim = time() - t0
 
     # results: (num_obs, num_meas), bond_dims: (num_meas,)
     num_meas = size(results, 2)
     obs_path = joinpath(outdir, "$(tag)_obs.csv")
     chi_path = joinpath(outdir, "$(tag)_chi.csv")
+    timing_path = joinpath(outdir, "$(tag)_timing.csv")
 
     open(obs_path, "w") do io
         header = ["step"; ["Z_site$(s)" for s in sites]...]
@@ -140,14 +153,21 @@ function run_heisenberg_circuitTDVP!(;
         end
     end
 
+    open(timing_path, "w") do io
+        println(io, "wall_s_sim")
+        println(io, wall_s_sim)
+    end
+
     @printf("[circuitTDVP] wrote: %s\n", obs_path)
     @printf("[circuitTDVP] wrote: %s\n", chi_path)
+    @printf("[circuitTDVP] wall_s_sim=%.3f\n", wall_s_sim)
+    @printf("[circuitTDVP] wrote: %s\n", timing_path)
     return obs_path, chi_path
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
     kv = _parse_kv_args(ARGS)
-    L = parse(Int, get(kv, "L", "16"))
+    L = parse(Int, get(kv, "L", "8"))
     steps = parse(Int, get(kv, "steps", "20"))
     dt = parse(Float64, get(kv, "dt", "0.05"))
     max_bond_dim = parse(Int, get(kv, "chi_max", get(kv, "max_bond_dim", "256")))
@@ -155,9 +175,10 @@ if abspath(PROGRAM_FILE) == @__FILE__
     tag = get(kv, "tag", "circuitTDVP")
     state = get(kv, "state", "Neel")
     periodic = lowercase(get(kv, "periodic", "true")) in ("1", "true", "yes", "y")
-    sites = _parse_sites(get(kv, "sites", "1,8,16"), L)
+    sites = _parse_sites(get(kv, "sites", "1,4,8"), L)
     local_mode = Symbol(get(kv, "local_mode", "TDVP"))
     longrange_mode = Symbol(get(kv, "longrange_mode", "TDVP"))
+    warmup = lowercase(get(kv, "warmup", "true")) in ("1", "true", "yes", "y")
 
     run_heisenberg_circuitTDVP!(;
         L=L,
@@ -171,6 +192,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
         tag=tag,
         local_mode=local_mode,
         longrange_mode=longrange_mode,
+        warmup=warmup,
     )
 end
 

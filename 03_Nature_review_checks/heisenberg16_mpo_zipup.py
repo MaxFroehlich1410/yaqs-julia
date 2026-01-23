@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Noise-free 16-qubit periodic Heisenberg "circuit" simulated with TenPy:
-apply an MPO approximation of U = exp(-i dt H) repeatedly, compressing with the MPO zip-up method.
+Noise-free (default: 8-qubit) periodic Heisenberg "circuit" simulated with TenPy:
+apply the same Trotter gate circuit as `create_heisenberg_circuit` (Julia), but by
+representing each gate as an MPO and applying it with the MPO zip-up method.
 
 This uses TenPy's MPO application with:
   compression_method = "zip_up"
@@ -26,17 +27,135 @@ def _add_tenpy_to_syspath() -> None:
     sys.path.insert(0, str(tenpy_repo))
 
 
+def _rxx(theta: float):
+    import numpy as np
+
+    c = np.cos(theta / 2.0)
+    s = -1j * np.sin(theta / 2.0)
+    return np.array(
+        [
+            [c, 0, 0, s],
+            [0, c, s, 0],
+            [0, s, c, 0],
+            [s, 0, 0, c],
+        ],
+        dtype=np.complex128,
+    )
+
+
+def _ryy(theta: float):
+    import numpy as np
+
+    c = np.cos(theta / 2.0)
+    s = -1j * np.sin(theta / 2.0)
+    return np.array(
+        [
+            [c, 0, 0, -s],
+            [0, c, s, 0],
+            [0, s, c, 0],
+            [-s, 0, 0, c],
+        ],
+        dtype=np.complex128,
+    )
+
+
+def _rzz(theta: float):
+    import numpy as np
+
+    e_m = np.exp(-1j * theta / 2.0)
+    e_p = np.exp(1j * theta / 2.0)
+    return np.diag([e_m, e_p, e_p, e_m]).astype(np.complex128)
+
+
+def _rz(theta: float):
+    import numpy as np
+
+    return np.diag([np.exp(-1j * theta / 2.0), np.exp(1j * theta / 2.0)]).astype(np.complex128)
+
+
+def _two_site_mpo_from_gate(sites, i: int, j: int, U4):
+    """
+    Build an MPO for a two-site operator U acting on sites i and j (0-based), identity elsewhere.
+    Works also for long-range (i < j) by propagating bond index with identities.
+    """
+    import numpy as np
+    from tenpy.linalg import np_conserved as npc
+    from tenpy.networks.mpo import MPO
+
+    if i == j:
+        raise ValueError("two-site gate requires i != j")
+    if i > j:
+        i, j = j, i
+
+    d = 2
+    U = np.asarray(U4, dtype=np.complex128).reshape(d * d, d * d)
+
+    # Operator Schmidt decomposition: U = sum_k A_k ⊗ B_k, with k<=d^2=4
+    M = U.reshape(d, d, d, d)  # (p_i, p_j, p_i*, p_j*)
+    X = np.transpose(M, (0, 2, 1, 3)).reshape(d * d, d * d)  # (p_i,p_i*) x (p_j,p_j*)
+    u, s, vh = np.linalg.svd(X, full_matrices=False)
+    r = int(np.sum(s > 1e-14))
+    u = u[:, :r]
+    s = s[:r]
+    vh = vh[:r, :]
+
+    A_ops = (u * np.sqrt(s)[None, :]).T.reshape(r, d, d)  # r x (p_i,p_i*)
+    B_ops = (np.sqrt(s)[:, None] * vh).reshape(r, d, d)   # r x (p_j,p_j*)
+
+    L = len(sites)
+    Ws = []
+    for n in range(L):
+        if n < i or n > j:
+            W = np.zeros((1, 1, d, d), dtype=np.complex128)
+            W[0, 0, :, :] = np.eye(d, dtype=np.complex128)
+        elif n == i:
+            W = np.zeros((1, r, d, d), dtype=np.complex128)
+            for k in range(r):
+                W[0, k, :, :] = A_ops[k]
+        elif n == j:
+            W = np.zeros((r, 1, d, d), dtype=np.complex128)
+            for k in range(r):
+                W[k, 0, :, :] = B_ops[k]
+        else:
+            W = np.zeros((r, r, d, d), dtype=np.complex128)
+            for k in range(r):
+                W[k, k, :, :] = np.eye(d, dtype=np.complex128)
+        Ws.append(npc.Array.from_ndarray_trivial(W, labels=["wL", "wR", "p", "p*"]))
+
+    L = len(sites)
+    return MPO(sites, Ws, bc="finite", IdL=[0] * (L + 1), IdR=[0] * (L + 1), mps_unit_cell_width=L)
+
+
+def _one_site_mpo_from_gate(sites, i: int, U2):
+    import numpy as np
+    from tenpy.linalg import np_conserved as npc
+    from tenpy.networks.mpo import MPO
+
+    d = 2
+    L = len(sites)
+    Ws = []
+    for n in range(L):
+        W = np.zeros((1, 1, d, d), dtype=np.complex128)
+        if n == i:
+            W[0, 0, :, :] = np.asarray(U2, dtype=np.complex128).reshape(d, d)
+        else:
+            W[0, 0, :, :] = np.eye(d, dtype=np.complex128)
+        Ws.append(npc.Array.from_ndarray_trivial(W, labels=["wL", "wR", "p", "p*"]))
+    L = len(sites)
+    return MPO(sites, Ws, bc="finite", IdL=[0] * (L + 1), IdR=[0] * (L + 1), mps_unit_cell_width=L)
+
+
 def main() -> None:
     _add_tenpy_to_syspath()
 
     import numpy as np
-    from tenpy.models.spins import SpinModel
+    from tenpy.networks.site import SpinHalfSite
     from tenpy.networks.mps import MPS
 
     p = argparse.ArgumentParser()
-    p.add_argument("--L", type=int, default=16)
-    p.add_argument("--dt", type=float, default=0.05, help="Real time step Δt (U = exp(-i Δt H)).")
-    p.add_argument("--steps", type=int, default=20, help="Number of circuit layers (applications of U).")
+    p.add_argument("--L", type=int, default=8)
+    p.add_argument("--dt", type=float, default=0.05, help="Trotter step size (matches Julia circuit).")
+    p.add_argument("--steps", type=int, default=20, help="Number of Trotter steps (matches Julia circuit).")
     p.add_argument("--chi-max", type=int, default=256, help="Max MPS bond dimension.")
     p.add_argument("--svd-min", type=float, default=1.0e-10, help="Discard singular values below this.")
     p.add_argument("--m-temp", type=int, default=2, help="Zip-up temporary factor: trunc to m_temp*chi_max.")
@@ -47,49 +166,29 @@ def main() -> None:
         help="Zip-up: relax svd_min to trunc_weight*svd_min during intermediate SVDs.",
     )
     p.add_argument("--state", type=str, default="neel", choices=["up", "neel"])
+    p.add_argument("--periodic", type=str, default="true")
     p.add_argument(
         "--sites",
         type=str,
-        default="1,8,16",
-        help="Comma-separated 1-based sites for <Z> expectation values (e.g. '1,8,16').",
+        default="1,4,8",
+        help="Comma-separated 1-based sites for <Z> expectation values (e.g. '1,4,8').",
     )
     p.add_argument("--outdir", type=str, default="03_Nature_review_checks/results")
     p.add_argument("--tag", type=str, default="tenpy_zipup")
     args = p.parse_args()
 
     L = args.L
-    dt_real = float(args.dt)
-    dt = -1j * dt_real  # TenPy expects imaginary dt for real-time evolution
-
-    model_params = dict(
-        lattice="Chain",
-        L=L,
-        S=0.5,
-        Jx=1.0,
-        Jy=1.0,
-        Jz=1.0,
-        hx=0.0,
-        hy=0.0,
-        hz=0.0,
-        bc_MPS="finite",
-        bc_x="periodic",  # periodic couplings (finite MPS => long-range edge coupling)
-        conserve="Sz",
-        sort_charge=True,
-    )
-    M = SpinModel(model_params)
-
-    sites = M.lat.mps_sites()
+    dt = float(args.dt)
+    # Match Yaqs: no symmetry constraints; use trivial charges.
+    site = SpinHalfSite(conserve=None, sort_charge=False)
+    sites = [site] * L
     if args.state == "up":
         state = ["up"] * L
     else:
         state = (["up", "down"] * (L // 2))[:L]
-    psi = MPS.from_product_state(sites, state, bc="finite", unit_cell_width=M.lat.mps_unit_cell_width)
+    psi = MPS.from_product_state(sites, state, bc="finite", unit_cell_width=L)
 
-    E0 = float(np.real_if_close(M.H_MPO.expectation_value(psi)))
-    print(f"[zip_up] L={L} periodic Heisenberg, init state={args.state}, E0={E0:.12g}")
-
-    # Build the MPO for one layer of the "circuit".
-    U_MPO = M.H_MPO.make_U_II(dt=dt)
+    print(f"[zip_up] L={L} Heisenberg trotter-circuit, init state={args.state}, dt={dt}, steps={args.steps}")
 
     apply_opts = dict(
         compression_method="zip_up",
@@ -107,6 +206,7 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     obs_path = outdir / f"{args.tag}_obs.csv"
     chi_path = outdir / f"{args.tag}_chi.csv"
+    timing_path = outdir / f"{args.tag}_timing.csv"
 
     def measure_Z() -> list[float]:
         # TenPy SpinModel uses Sz; map to qubit-Z via Z = 2*Sz for spin-1/2
@@ -120,39 +220,101 @@ def main() -> None:
         chi_max_now = int(np.max(chi))
         return [step, chi_max_now, *[int(x) for x in chi_internal.tolist()]]
 
-    # write CSV headers + initial measurement (step 0)
-    with obs_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["step", *[f"Z_site{s}" for s in site_list]])
-        w.writerow([0, *measure_Z()])
-    with chi_path.open("w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["step", "chi_max", *[f"chi_bond{i}" for i in range(1, L)]])
-        w.writerow(measure_chi_row(0))
+    # Buffer results; write CSVs after timing to avoid I/O in the timed section.
+    obs_rows: list[list[float]] = [[0.0, *measure_Z()]]
+    chi_rows: list[list[float]] = [[float(x) for x in measure_chi_row(0)]]
+
+    # Build the same gate angles as `create_heisenberg_circuit`.
+    txx = -2.0 * dt * 1.0
+    tyy = -2.0 * dt * 1.0
+    tzz = -2.0 * dt * 1.0
+    tz = -2.0 * dt * 0.0
+    periodic = str(args.periodic).lower() in ("1", "true", "yes", "y")
 
     t0 = time.time()
     trunc_total = 0.0
     for n in range(args.steps):
-        trunc_err = U_MPO.apply(psi, apply_opts)
-        trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        # Rz on all
+        if tz != 0.0:
+            U2 = _rz(tz)
+            for q in range(L):
+                mpo1 = _one_site_mpo_from_gate(sites, q, U2)
+                trunc_err = mpo1.apply(psi, apply_opts)
+                trunc_total += float(getattr(trunc_err, "eps", 0.0))
+
+        # RZZ
+        U4 = _rzz(tzz)
+        for i in range(0, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        for i in range(1, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        if periodic and L > 1:
+            mpo2 = _two_site_mpo_from_gate(sites, 0, L - 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+
+        # RXX
+        U4 = _rxx(txx)
+        for i in range(0, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        for i in range(1, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        if periodic and L > 1:
+            mpo2 = _two_site_mpo_from_gate(sites, 0, L - 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+
+        # RYY
+        U4 = _ryy(tyy)
+        for i in range(0, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        for i in range(1, L - 1, 2):
+            mpo2 = _two_site_mpo_from_gate(sites, i, i + 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+        if periodic and L > 1:
+            mpo2 = _two_site_mpo_from_gate(sites, 0, L - 1, U4)
+            trunc_err = mpo2.apply(psi, apply_opts)
+            trunc_total += float(getattr(trunc_err, "eps", 0.0))
+
         step = n + 1
-        with obs_path.open("a", newline="") as f:
-            csv.writer(f).writerow([step, *measure_Z()])
-        with chi_path.open("a", newline="") as f:
-            csv.writer(f).writerow(measure_chi_row(step))
+        obs_rows.append([float(step), *measure_Z()])
+        chi_rows.append([float(x) for x in measure_chi_row(step)])
         if (n + 1) % max(1, args.steps // 5) == 0 or (n + 1) == args.steps:
             chi_max_now = int(np.max(psi.chi))
-            E = float(np.real_if_close(M.H_MPO.expectation_value(psi)))
-            print(f"[zip_up] step {n+1:4d}/{args.steps}: chi_max={chi_max_now:4d}  E={E:.12g}")
+            print(f"[zip_up] step {n+1:4d}/{args.steps}: chi_max={chi_max_now:4d}")
     wall = time.time() - t0
 
-    E1 = float(np.real_if_close(M.H_MPO.expectation_value(psi)))
+    # Write outputs (not timed)
+    with obs_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", *[f"Z_site{s}" for s in site_list]])
+        w.writerows(obs_rows)
+    with chi_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["step", "chi_max", *[f"chi_bond{i}" for i in range(1, L)]])
+        w.writerows(chi_rows)
+    with timing_path.open("w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["wall_s_sim"])
+        w.writerow([wall])
+
     chi_max_final = int(np.max(psi.chi))
-    norm = float(np.real_if_close(psi.norm))
-    print(f"[zip_up] done: E={E1:.12g}  norm={norm:.12g}  chi_max={chi_max_final}  wall_s={wall:.3f}")
+    print(f"[zip_up] done: chi_max={chi_max_final}  wall_s_sim={wall:.3f}")
     print(f"[zip_up] trunc_err_total(eps)≈{trunc_total:.6g}")
     print(f"[zip_up] wrote: {obs_path}")
     print(f"[zip_up] wrote: {chi_path}")
+    print(f"[zip_up] wrote: {timing_path}")
 
 
 if __name__ == "__main__":
