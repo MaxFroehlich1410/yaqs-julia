@@ -1,3 +1,16 @@
+# Unit tests for `Yaqs.SimulationConfigs`.
+#
+# These tests cover:
+# - abstract configuration type hierarchy and concrete config constructors
+# - observable container initialization (`Observable`) and integration with expectation evaluation
+# - allocation/shape of trajectory storage (`initialize!`) with and without sampled timesteps
+# - aggregation logic for trajectories and measurement shot dictionaries
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating simulation configuration and aggregation behavior.
 using Test
 using LinearAlgebra
 

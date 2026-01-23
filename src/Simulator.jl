@@ -6,7 +6,7 @@ using ..MPOModule
 using ..SimulationConfigs
 using ..NoiseModule
 using ..AnalogTJM
-using ..DigitalTJM
+using ..CircuitTJM
 
 
 export run, available_cpus
@@ -132,8 +132,8 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
         total = sim_params.num_traj
         
         Threads.@threads         for i in 1:sim_params.num_traj
-            # run_digital_tjm returns (state, results, bond_dims)
-            _, result, bond_dims = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            # run_circuit_tjm returns (state, results, bond_dims)
+            _, result, bond_dims = run_circuit_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             
             all_bond_dims[i] = bond_dims
             
@@ -156,7 +156,7 @@ function _run_digital(initial_state::MPS, circuit, sim_params::TimeEvolutionConf
         end
     else
         for i in 1:sim_params.num_traj
-            _, result, bond_dims = run_digital_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
+            _, result, bond_dims = run_circuit_tjm(initial_state, circuit, noise_model, sim_params; kwargs...)
             all_bond_dims[i] = bond_dims
             for (obs_idx, obs) in enumerate(sim_params.observables)
                 n_copy = min(size(result, 2), size(obs.trajectories, 2))
@@ -195,7 +195,7 @@ function run(initial_state::MPS, operator_or_circuit, sim_params, noise_model=no
     if isa(sim_params, TimeEvolutionConfig)
         if isa(operator_or_circuit, MPO)
             return _run_analog(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
-        elseif isa(operator_or_circuit, DigitalCircuit) || isa(operator_or_circuit, DigitalTJM.RepeatedDigitalCircuit)
+        elseif isa(operator_or_circuit, DigitalCircuit) || isa(operator_or_circuit, CircuitTJM.RepeatedDigitalCircuit)
             return _run_digital(initial_state, operator_or_circuit, sim_params, noise_model; parallel=parallel, kwargs...)
         else
              error("Simulation requires MPO (Analog) or DigitalCircuit (Digital).")

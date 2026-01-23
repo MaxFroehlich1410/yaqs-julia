@@ -1,3 +1,14 @@
+# Unit tests for tensor decompositions in `Yaqs.Decompositions`.
+#
+# These tests check algebraic correctness (reconstruction) and isometry properties for:
+# - `right_qr` and `left_qr` on rank-3 MPS tensors with layout `(Dl, d, Dr)`
+# - `two_site_svd` reconstruction and truncation behavior (threshold and `max_bond_dim`)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating decomposition correctness and truncation controls.
 using Test
 using LinearAlgebra
 using TensorOperations

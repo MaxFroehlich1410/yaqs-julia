@@ -1,3 +1,18 @@
+# Internal/core helper tests that exercise non-public APIs.
+#
+# This file focuses on “plumbing” and regression coverage for helpers that are not directly exposed
+# as stable public API, including:
+# - type hierarchy sanity checks for core tensor-network types
+# - timing internals formatting helpers
+# - CircuitTJM sampling-plan helpers
+# - TDVP projector workspace toggles and cached operator wrappers
+# - a minimal CircuitIngestion conversion path via PythonCall stubs (no Qiskit required)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s for internal utilities across multiple submodules.
 using Test
 using LinearAlgebra
 using PythonCall
@@ -15,19 +30,21 @@ using Yaqs
     @testset "Timing internals" begin
         ts = Yaqs.Timing.TimingStats()
         Yaqs.Timing._timing_add!(ts, :k, UInt64(1))
-        io = IOBuffer()
-        redirect_stdout(io) do
-            Yaqs.Timing._print_timing_summary(ts; header="hdr", top=5)
+        out = mktemp() do path, io
+            redirect_stdout(io) do
+                Yaqs.Timing._print_timing_summary(ts; header="hdr", top=5)
+            end
+            close(io)
+            return read(path, String)
         end
-        out = String(take!(io))
         @test occursin("hdr", out)
     end
 
-    @testset "DigitalTJM sampling plan helpers" begin
+    @testset "CircuitTJM sampling plan helpers" begin
         bm = Dict{Int, Vector{String}}(0 => ["SAMPLE_OBSERVABLES"], 2 => ["SAMPLE_OBSERVABLES"])
-        @test Yaqs.DigitalTJM._has_sample_barrier(bm, 0) == true
-        @test Yaqs.DigitalTJM._has_sample_barrier(bm, 1) == false
-        sample_at_start, sample_after = Yaqs.DigitalTJM._sample_plan(bm, 3)
+        @test Yaqs.CircuitTJM._has_sample_barrier(bm, 0) == true
+        @test Yaqs.CircuitTJM._has_sample_barrier(bm, 1) == false
+        sample_at_start, sample_after = Yaqs.CircuitTJM._sample_plan(bm, 3)
         @test sample_at_start == true
         @test sample_after == [2]
     end
@@ -66,21 +83,22 @@ using Yaqs
         @test allocb(C) ≈ wsopb(C)
     end
 
-    @testset "DigitalTJM internal gate application helpers" begin
+    @testset "CircuitTJM internal gate application helpers" begin
         psi = Yaqs.MPSModule.MPS(2; state="zeros")
-        gate = Yaqs.DigitalTJM.DigitalGate(Yaqs.GateLibrary.XGate(), [1], Yaqs.GateLibrary.generator(Yaqs.GateLibrary.XGate()))
-        Yaqs.DigitalTJM.apply_single_qubit_gate!(psi, gate)
+        gate = Yaqs.CircuitTJM.DigitalGate(Yaqs.GateLibrary.XGate(), [1], Yaqs.GateLibrary.generator(Yaqs.GateLibrary.XGate()))
+        Yaqs.CircuitTJM.apply_single_qubit_gate!(psi, gate)
         z1 = real(Yaqs.MPSModule.local_expect(psi, Yaqs.GateLibrary.matrix(Yaqs.GateLibrary.ZGate()), 1))
         @test isapprox(z1, -1.0; atol=1e-10)
 
         psi2 = Yaqs.MPSModule.MPS(2; state="zeros")
         cfg = Yaqs.SimulationConfigs.TimeEvolutionConfig(Yaqs.SimulationConfigs.Observable[], 1.0; dt=1.0)
-        Yaqs.DigitalTJM.apply_local_gate_exact!(psi2, Yaqs.GateLibrary.RzzGate(0.3), 1, 2, cfg)
+        Yaqs.CircuitTJM.apply_local_gate_exact!(psi2, Yaqs.GateLibrary.RzzGate(0.3), 1, 2, cfg)
         @test Yaqs.MPSModule.check_if_valid_mps(psi2)
     end
 
     @testset "CircuitIngestion internal convert_node_to_gate (python stubs)" begin
-        py"""
+        main = pyimport("__main__")
+        PythonCall.pyexec("""
 class _Op:
     def __init__(self, name, params):
         self.name = name
@@ -94,10 +112,10 @@ class _Node:
     def __init__(self, op, qargs):
         self.op = op
         self.qargs = qargs
-"""
-        Op = py"_Op"
-        Qubit = py"_Qubit"
-        Node = py"_Node"
+""", pygetattr(main, "__dict__"))
+        Op = pygetattr(main, "_Op")
+        Qubit = pygetattr(main, "_Qubit")
+        Node = pygetattr(main, "_Node")
         node = Node(Op("ry", [0.25]), [Qubit(0)])
         dg = Yaqs.CircuitIngestion.convert_node_to_gate(node)
         @test dg.op isa Yaqs.GateLibrary.RyGate

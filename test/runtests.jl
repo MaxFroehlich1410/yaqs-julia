@@ -1,3 +1,13 @@
+# Entry-point for the Julia test suite.
+#
+# This file defines the top-level `@testset` and includes individual test files in a fixed order.
+# It is the primary driver invoked by `Pkg.test()` for the `Yaqs` package.
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Executes all included test files under a single root testset.
 using Test
 using Yaqs
 
@@ -16,8 +26,8 @@ using Yaqs
         "test_StochasticProcess.jl",
         "test_Dissipation.jl",
         "test_AnalogTJM.jl",
-        "test_DigitalTJM.jl",
-        "test_DigitalTJM_Noise.jl",
+        "test_CircuitTJM.jl",
+        "test_CircuitTJM_Noise.jl",
         "test_Simulator.jl",
         "test_CircuitIngestion.jl",
         "test_CircuitLibrary.jl"

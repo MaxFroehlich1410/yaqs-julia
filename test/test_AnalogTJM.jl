@@ -5,6 +5,19 @@
 #
 # Licensed under the MIT License
 
+# Unit tests for analog trajectory-jump methods (`Yaqs.AnalogTJM`).
+#
+# These tests cover:
+# - initialization of analog trajectories and normalization invariants
+# - first- and second-order AnalogTJM backends (`analog_tjm_1`, `analog_tjm_2`) with/without sampling
+# - stepping and sampling helpers (`step_through`, `sample`) in the noise-free setting
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating AnalogTJM execution and result shapes.
+
 if !isdefined(Main, :Yaqs)
     include("../src/Yaqs.jl")
 end

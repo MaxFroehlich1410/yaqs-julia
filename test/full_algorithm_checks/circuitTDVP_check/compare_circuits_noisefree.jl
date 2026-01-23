@@ -9,7 +9,7 @@ using .Yaqs.GateLibrary
 using .Yaqs.MPSModule
 using .Yaqs.SimulationConfigs
 using .Yaqs.Simulator
-using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
+using .Yaqs.CircuitTJM: DigitalCircuit, add_gate!, run_circuit_tjm
 
 # ==============================================================================
 # CONFIGURATION
@@ -159,7 +159,7 @@ if RUN_JULIA
     warmup_config = TimeEvolutionConfig(obs_list, 100.0; dt=1.0, max_bond_dim=4)
     
     # Run!
-    run_digital_tjm(warmup_psi, circ_jl, nothing, warmup_config)
+    run_circuit_tjm(warmup_psi, circ_jl, nothing, warmup_config)
     println("Warmup complete.")
     
     println("Executing...")
@@ -173,9 +173,9 @@ if RUN_JULIA
         sim_params = TimeEvolutionConfig(obs, 100.0; dt=1.0, num_traj=num_traj, sample_timesteps=true, max_bond_dim=MAX_BOND_DIM)
         
 
-        options = Yaqs.DigitalTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
+        options = Yaqs.CircuitTJM.TJMOptions(local_method=Symbol(local_mode), long_range_method=Symbol(longrange_mode))
         
-        _, res_matrix = run_digital_tjm(psi, circ_jl, nothing, sim_params; alg_options=options)
+        _, res_matrix = run_circuit_tjm(psi, circ_jl, nothing, sim_params; alg_options=options)
     end
     println("Julia Time: $(round(time_jl, digits=4)) s")
     

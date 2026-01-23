@@ -5,6 +5,20 @@
 #
 # Licensed under the MIT License
 
+# Integration tests for the high-level simulation runner (`Yaqs.Simulator`).
+#
+# These tests validate:
+# - `available_cpus()` behavior with and without SLURM environment variables
+# - end-to-end analog simulation orchestration and observable aggregation
+# - disabling trajectory parallelism via `parallel=false`
+# - error handling for unsupported operator/circuit inputs
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s that exercise the top-level simulator dispatch and plumbing.
+
 if !isdefined(Main, :Yaqs)
     include("../src/Yaqs.jl")
 end

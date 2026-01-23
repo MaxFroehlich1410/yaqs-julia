@@ -1,3 +1,15 @@
+# Unit tests for numerical algorithms in `Yaqs.Algorithms`.
+#
+# These tests cover:
+# - Krylov exponential application (`expm_krylov`) on small reference problems
+# - single-site and two-site TDVP evolution on an Ising eigenstate (phase + norm preservation)
+# - Krylov Hermitian-mode controls, cache/stats helpers, and basic internal utilities
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s that validate algorithmic correctness on small systems.
 using Test
 using LinearAlgebra
 
@@ -109,11 +121,13 @@ using .Yaqs.Algorithms
         _ = Algorithms.expm_krylov(func_X, v0, 0.1, 5)
 
         # Print function should run and produce output
-        io = IOBuffer()
-        redirect_stdout(io) do
-            print_krylov_ishermitian_stats(header="stats")
+        out = mktemp() do path, io
+            redirect_stdout(io) do
+                print_krylov_ishermitian_stats(header="stats")
+            end
+            close(io)
+            return read(path, String)
         end
-        out = String(take!(io))
         @test occursin("stats", out)
         @test occursin("expm_krylov calls", out)
 
@@ -135,7 +149,7 @@ using .Yaqs.Algorithms
 
         # _ensure_size! grows and preserves element type
         A = Array{ComplexF64,3}(undef, 2, 2, 2)
-        Algorithms._ensure_size!(A, (3, 1, 4))
+        A = Algorithms._ensure_size!(A, (3, 1, 4))
         @test size(A) == (3, 1, 4)
         @test eltype(A) == ComplexF64
     end

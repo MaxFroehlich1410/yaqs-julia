@@ -81,5 +81,5 @@ julia --project run_tests.jl
 ## Notes
 
 - Most public APIs live under the `Yaqs` module; submodules are re-exported.
-- For large digital circuits, see `DigitalTJM.RepeatedDigitalCircuit` to avoid
+- For large circuits, see `CircuitTJM.RepeatedDigitalCircuit` to avoid
   materializing repeated gate lists.

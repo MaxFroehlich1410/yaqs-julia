@@ -1,9 +1,21 @@
+# Unit tests for circuit ingestion utilities (`Yaqs.CircuitIngestion`).
+#
+# These tests validate:
+# - mapping of Qiskit gate names/parameters to `Yaqs.GateLibrary` operator types (`map_qiskit_name`)
+# - conversion of Python instruction objects into `DigitalGate`s via PythonCall stubs (no Qiskit required)
+# - optional end-to-end ingestion of a real Qiskit circuit when Qiskit is available (skips otherwise)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s for name mapping, instruction conversion, and optional Qiskit IO.
 using Test
 using LinearAlgebra
 using PythonCall
 using Yaqs
 using Yaqs.CircuitIngestion
-using Yaqs.DigitalTJM
+using Yaqs.CircuitTJM
 using Yaqs.GateLibrary
 using Yaqs.MPSModule
 using Yaqs.SimulationConfigs
@@ -34,7 +46,8 @@ using Yaqs.MPOModule
     end
 
     @testset "convert_instruction_to_gate (python stubs, no qiskit required)" begin
-        py"""
+        main = pyimport("__main__")
+        PythonCall.pyexec("""
 class _Op:
     def __init__(self, name, params, label=None):
         self.name = name
@@ -49,14 +62,14 @@ class _Instr:
     def __init__(self, op, qubits):
         self.operation = op
         self.qubits = qubits
-"""
-        Op = py"_Op"
-        Qubit = py"_Qubit"
-        Instr = py"_Instr"
+""", pygetattr(main, "__dict__"))
+        Op = pygetattr(main, "_Op")
+        Qubit = pygetattr(main, "_Qubit")
+        Instr = pygetattr(main, "_Instr")
 
         # Rx on qubit 0 -> sites=[1]
         instr = Instr(Op("rx", [0.5]), [Qubit(0)])
-        gate = convert_instruction_to_gate(instr, py"None")
+        gate = convert_instruction_to_gate(instr, PythonCall.pybuiltins.None)
         @test gate isa DigitalGate
         @test gate.op isa RxGate
         @test gate.op.theta ≈ 0.5
@@ -65,25 +78,33 @@ class _Instr:
 
         # Barrier with label defaults/propagation
         binstr = Instr(Op("barrier", [], label="SAMPLE_OBSERVABLES"), [Qubit(0), Qubit(1)])
-        bgate = convert_instruction_to_gate(binstr, py"None")
+        bgate = convert_instruction_to_gate(binstr, PythonCall.pybuiltins.None)
         @test bgate.op isa Barrier
         @test bgate.sites == [1, 2]
 
         # Unsupported gate -> nothing
         bad = Instr(Op("not_a_gate", []), [Qubit(0)])
-        @test convert_instruction_to_gate(bad, py"None") === nothing
+        @test convert_instruction_to_gate(bad, PythonCall.pybuiltins.None) === nothing
     end
 
-    # Check if Qiskit is available
-    qiskit_available = false
-    try
-        pyimport("qiskit")
-        qiskit_available = true
-    catch e
-        println("Qiskit not found. Skipping Circuit Ingestion tests.")
-    end
+    # Qiskit integration tests are expensive (large Python env + slow import on first run).
+    # Keep them opt-in so `run_tests.jl` stays fast by default.
+    run_qiskit_tests = get(ENV, "YAQS_RUN_QISKIT_TESTS", "0") == "1"
+    if !run_qiskit_tests
+        println("Skipping Qiskit integration tests (set YAQS_RUN_QISKIT_TESTS=1 to enable).")
+    else
+        # Check if Qiskit is available
+        qiskit_available = false
+        try
+            pyimport("qiskit")
+            qiskit_available = true
+        catch e
+            println("Qiskit not found. Skipping Qiskit integration tests.")
+        end
+        if !qiskit_available
+            return
+        end
 
-    if qiskit_available
         # 1. Create a Qiskit circuit via PythonCall
         qiskit = pyimport("qiskit")
         QuantumCircuit = qiskit.QuantumCircuit
@@ -162,7 +183,7 @@ class _Instr:
             psi = MPS(2; state="zeros")
             sim_params = TimeEvolutionConfig(Observable[], 1.0; dt=1.0)
             
-            psi_out, _ = run_digital_tjm(psi, circ2, nothing, sim_params)
+            psi_out, _ = run_circuit_tjm(psi, circ2, nothing, sim_params)
             
             # Check that the state is valid and normalized after circuit application
             @test MPSModule.check_if_valid_mps(psi_out)

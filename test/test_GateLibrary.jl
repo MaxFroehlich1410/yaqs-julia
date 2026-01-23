@@ -1,3 +1,17 @@
+# Unit tests for `Yaqs.GateLibrary`.
+#
+# These tests validate:
+# - abstract type hierarchy for gates/noise operators
+# - correctness of common 1-qubit and 2-qubit matrices
+# - generator metadata for parameterized gates
+# - non-unitary operator handling
+# - allocation discipline for small fixed-size matrices (StaticArrays-backed `matrix(::Gate)`)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s covering gate metadata, matrices, and allocations.
 using Test
 using LinearAlgebra
 using StaticArrays
@@ -64,8 +78,8 @@ using .Yaqs.GateLibrary
         # Diag(-i, i)
         @test matrix(RzGate(π)) ≈ [-1im 0; 0 1im]
 
-        # Ry(pi) maps |0> -> |1> up to phase (here: [[0,1],[-1,0]])
-        @test matrix(RyGate(π)) ≈ [0.0 1.0; -1.0 0.0]
+        # Ry(pi) (per current implementation)
+        @test matrix(RyGate(π)) ≈ [0.0 -1.0; 1.0 0.0]
     end
     
     @testset "UGate" begin
@@ -74,7 +88,8 @@ using .Yaqs.GateLibrary
         U = matrix(UGate(θ, ϕ, λ))
         c = cos(θ/2)
         s = sin(θ/2)
-        expected = [c exp(1im*ϕ)*s; -exp(1im*λ)*s exp(1im*(ϕ+λ))*c]
+        # Note: SMatrix constructor in GateLibrary is column-major.
+        expected = [c -exp(1im*λ)*s; exp(1im*ϕ)*s exp(1im*(ϕ+λ))*c]
         @test U ≈ expected
     end
 

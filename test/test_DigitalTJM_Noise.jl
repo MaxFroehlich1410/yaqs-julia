@@ -1,3 +1,14 @@
+# Legacy/compatibility regression tests for CircuitTJM noise-window selection.
+#
+# This file overlaps with `test_CircuitTJM_Noise.jl` and exists to exercise internal noise-window
+# filtering logic used during circuit TJM execution. It validates that only noise processes supported
+# on the active two-site window are selected by the helper under test.
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s checking local-noise-model extraction for a moving window.
 using Test
 using LinearAlgebra
 using Random
@@ -7,12 +18,12 @@ using Yaqs.MPOModule
 using Yaqs.NoiseModule
 using Yaqs.GateLibrary
 using Yaqs.SimulationConfigs
-using Yaqs.DigitalTJM
+using Yaqs.CircuitTJM
 
 # Access internal functions for testing
 const create_local_noise_model = Yaqs.DigitalTJM.create_local_noise_model
 
-@testset "DigitalTJM Noise Tests" begin
+@testset "CircuitTJM Noise Tests" begin
 
     @testset "create_local_noise_model" begin
         # Setup: Noise model with processes on (1), (2), (1,2), (3,4)
@@ -66,7 +77,7 @@ const create_local_noise_model = Yaqs.DigitalTJM.create_local_noise_model
         psi_init = MPS(L; state="zeros") # |00>
         
         # Run
-        psi_out, _ = run_digital_tjm(psi_init, circ, nm, sim_params)
+        psi_out, _ = run_circuit_tjm(psi_init, circ, nm, sim_params)
     
         
         z1 = real(MPSModule.local_expect(psi_out, matrix(ZGate()), 1))

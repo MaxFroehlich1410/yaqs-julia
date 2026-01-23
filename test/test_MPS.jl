@@ -1,3 +1,18 @@
+# Unit tests for the Matrix Product State implementation (`Yaqs.MPSModule`).
+#
+# These tests cover:
+# - MPS initialization from named states (`"zeros"`, `"ones"`, `"x+"`, `"y+"`, `"basis"`, `"random"`)
+# - custom tensor construction and basic invariants (length, physical dims)
+# - scalar products, local expectations (single-site and all-site helpers), and measurement utilities
+# - projection onto bitstrings and vectorization via `to_vec` (basis ordering regression)
+# - canonical form shifting and normalization
+# - truncation via `truncate!` / `max_bond_dim` constraints
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating MPS correctness and basic algorithms.
 using Test
 using LinearAlgebra
 using Random

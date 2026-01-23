@@ -5,6 +5,19 @@
 #
 # Licensed under the MIT License
 
+# Unit tests for dissipation application (`Yaqs.DissipationModule`).
+#
+# These tests validate:
+# - applying one-site and two-site dissipative channels updates the MPS while preserving a valid
+#   canonical form (regression check via `check_canonical_form`)
+# - basic adjacency/long-range classification helpers used for dispatch and algorithm selection
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s that exercise dissipation application paths on small systems.
+
 if !isdefined(Main, :Yaqs)
     include("../src/Yaqs.jl")
 end

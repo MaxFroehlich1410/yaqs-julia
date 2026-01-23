@@ -1,16 +1,16 @@
 module CircuitIngestion
 
 using PythonCall
-using ..DigitalTJM
+using ..CircuitTJM
 using ..GateLibrary
 
 export ingest_qiskit_circuit, map_qiskit_name, convert_instruction_to_gate
 
 """
-Convert a Qiskit circuit into a DigitalTJM circuit representation.
+Convert a Qiskit circuit into a CircuitTJM circuit representation.
 
 This ingests a `QuantumCircuit` from Python, converts it to a DAG, and groups front-layer gates into
-commuting layers for DigitalTJM execution. Measurements and barriers are filtered or mapped based
+commuting layers for CircuitTJM execution. Measurements and barriers are filtered or mapped based
 on the ingestion logic.
 
 Args:
@@ -66,10 +66,10 @@ function ingest_qiskit_circuit(qc::Py)
             if name == "barrier"
                 # Check label
                 label = pygetattr(op, "label", nothing)
-                if !pyis(label, nothing) && uppercase(pyconvert(String, str(label))) == "SAMPLE_OBSERVABLES"
+                if !pyis(label, nothing) && uppercase(pyconvert(String, pybuiltins.str(label))) == "SAMPLE_OBSERVABLES"
                     # Keep barrier? Python code returns it to trigger measurement.
                     # In this ingestion phase, we might want to store it as a "MeasurementGate" or split layers?
-                    # The current DigitalTJM structure assumes standard time evolution.
+                    # The current CircuitTJM structure assumes standard time evolution.
                     # If we want mid-circuit measurements, we'd need to support them.
                     # For now, let's just drop barriers or treat them as layer separators if needed.
                     # The Python code removes them in the measurement phase.
@@ -94,8 +94,8 @@ function ingest_qiskit_circuit(qc::Py)
                 # In Julia (1-based): Bond 1 is (1,2). min(1,2)=1 (Odd).
                 # So Python Even (0) -> Julia Odd min-index.
                 
-                # However, DigitalTJM.jl expects a flat list of gates for the layer,
-                # and it does the even/odd splitting internally in `run_digital_tjm`.
+    # However, CircuitTJM.jl expects a flat list of gates for the layer,
+                # and it does the even/odd splitting internally in `run_circuit_tjm`.
                 # BUT `process_layer` in Python returns separate lists (single, even, odd) 
                 # and processes them sequentially (single then even/odd).
                 # It removes them from the DAG.
@@ -114,7 +114,7 @@ function ingest_qiskit_circuit(qc::Py)
                 # If (0,1) and (2,3) are there, they commute.
                 # So we can just take EVERYTHING from `front_layer()` (excluding measures/barriers)
                 # and put them into one "Layer" in `DigitalCircuit`.
-                # `DigitalTJM.run_digital_tjm` will then split them into parallelizable groups if needed.
+                # `CircuitTJM.run_circuit_tjm` will then split them into parallelizable groups if needed.
                 
                 # So here we just categorize to differentiate 2-qubit vs 1-qubit for our internal logic if needed,
                 # but mostly we just convert everything.
@@ -226,7 +226,7 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
     # Handle Barrier specifically
     if name == "barrier"
         label = pygetattr(op, "label", nothing)
-        label_str = pyis(label, nothing) ? "" : pyconvert(String, str(label))
+        label_str = pyis(label, nothing) ? "" : pyconvert(String, pybuiltins.str(label))
         # Use SAMPLE_OBSERVABLES as default if empty?
         if isempty(label_str)
             label_str = "SAMPLE_OBSERVABLES" 

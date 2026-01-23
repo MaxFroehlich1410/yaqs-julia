@@ -70,9 +70,9 @@ You are done when all items below are true:
 
 1. Create `README.md` including:
 
-- What the package does (1–2 paragraphs).
-- Installation steps (Julia + optional Python).
-- Minimal example (small system run).
+- ✅ What the package does (1–2 paragraphs).
+- ✅ Installation steps (Julia + optional Python).
+- ✅ Minimal example (small system run).
 - “Reproduce paper results” section pointing to scripts/notebooks.
 - Support statement: what is stable / what is experimental.
 
@@ -94,7 +94,7 @@ You are done when all items below are true:
 
 ### Julia environment (package)
 
-This repo already contains `Project.toml` and `Manifest.toml`. Treat them as the **canonical** environment.
+✅ This repo already contains `Project.toml` and `Manifest.toml`. Treat them as the **canonical** environment.
 
 Recommended commands for users:
 
@@ -153,17 +153,20 @@ If you **must** provide result files:
 
 Add patterns for:
 
--`.DS_Store`
+- ✅ `.DS_Store`
 
--`__pycache__/`, `*.pyc`
+- ✅ `__pycache__/`, `*.pyc`
 
--`.ipynb_checkpoints/`
+- ✅ `.ipynb_checkpoints/`
 
--`results/`, `output/` folders
+- ✅ `results/`, `output/` folders
 
--`*.pkl`, large plots, and generated CSVs (unless they are curated fixtures)
+- ✅ `*.pkl`, large plots, and generated CSVs (unless they are curated fixtures)
 
-### 3.3 Purge already-tracked artifacts
+Notes:
+- ✅ Keep required wheel file `01_PaperExps/qiskit_ibm_runtime-0.43.1-py3-none-any.whl` tracked (exception to general `*.whl` ignore).
+
+### 3.3 Purge already-tracked artifacts ✅
 
 If artifacts were committed earlier, `.gitignore` alone is not enough. Remove them from git history tracking (keeping local copies if needed):
 

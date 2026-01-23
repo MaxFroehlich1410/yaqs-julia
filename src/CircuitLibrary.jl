@@ -1,6 +1,6 @@
 module CircuitLibrary
 
-using ..DigitalTJM
+using ..CircuitTJM
 using ..GateLibrary
 
 export create_ising_circuit, create_2d_ising_circuit, create_heisenberg_circuit, create_2d_heisenberg_circuit

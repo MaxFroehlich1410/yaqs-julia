@@ -1,2 +1,37 @@
-# Pluto notebook backup files
+## OS / editor junk
+.DS_Store
+.AppleDouble
+.LSOverride
+
+*.code-workspace
+.vscode/
+.idea/
+
+## Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+## Jupyter / Pluto artifacts
+.ipynb_checkpoints/
 *pluto backup*.jl
+
+## Generated outputs (never track)
+results/
+output/
+outputs/
+
+## Common result / data artifacts (usually generated)
+*.pkl
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.jld2
+*.mat
+*.csv
+*.tsv
+*.log
+
+## Large binary artifacts
+*.whl
+!01_PaperExps/qiskit_ibm_runtime-0.43.1-py3-none-any.whl
