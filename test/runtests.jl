@@ -10,6 +10,7 @@ using Yaqs
         "test_MPO.jl",
         "test_SimulationConfigs.jl",
         "test_Algorithms.jl",
+        "test_BUG.jl",
         "test_Noise.jl",
         "test_StochasticProcess.jl",
         "test_Dissipation.jl",

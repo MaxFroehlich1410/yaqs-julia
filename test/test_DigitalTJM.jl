@@ -114,4 +114,30 @@ using Yaqs.NoiseModule
         @test isapprox(z1, -1.0; atol=1e-10) # Z on |1> is -1
     end
 
+    @testset "TDVP truncation timing (during vs after_window)" begin
+        # Long-range 2-qubit gate triggers the TDVP window path.
+        L = 3
+        circ = DigitalCircuit(L)
+        add_gate!(circ, HGate(), [1])
+        add_gate!(circ, RzzGate(π/3), [1, 3])  # long-range
+
+        # Disable threshold-based truncation so both modes should match up to gauge/global phase.
+        sim_params = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=64, truncation_threshold=0.0)
+        psi0 = MPS(L; state="zeros")
+        pad_bond_dimension!(psi0, 2; noise_scale=0.0)
+
+        opts_during = TJMOptions(local_method=:TDVP, long_range_method=:TDVP, tdvp_truncation_timing=:during)
+        opts_after  = TJMOptions(local_method=:TDVP, long_range_method=:TDVP, tdvp_truncation_timing=:after_window)
+
+        psi_during, _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_during)
+        psi_after,  _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_after)
+
+        @test check_if_valid_mps(psi_during)
+        @test check_if_valid_mps(psi_after)
+
+        # Fidelity should be ~1 (allow global phase).
+        ov = abs(MPSModule.scalar_product(psi_during, psi_after))
+        @test isapprox(ov, 1.0; atol=1e-10)
+    end
+
 end

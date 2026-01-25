@@ -253,7 +253,9 @@ function _build_circuit_from_library(kv::Dict{String,String})
 end
 
 function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max::Int, trunc::Float64, outdir::String, tag::String,
-                            state_jl::String, local_mode::Symbol, longrange_mode::Symbol, warmup::Bool=true)
+                            state_jl::String, local_mode::Symbol, longrange_mode::Symbol,
+                            tdvp_truncation_timing::Symbol=:during,
+                            warmup::Bool=true)
     mkpath(outdir)
 
     circ = _ensure_sample_barriers!(circ)
@@ -261,7 +263,7 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
     obs_list = [Observable("Z_$s", ZGate(), s) for s in sites]
 
     sim_params = TimeEvolutionConfig(obs_list, 1.0; dt=1.0, num_traj=1, sample_timesteps=true, max_bond_dim=chi_max, truncation_threshold=trunc)
-    alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode)
+    alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode, tdvp_truncation_timing=tdvp_truncation_timing)
 
     # Warm-up run to exclude compilation from timing.
     if warmup
@@ -430,14 +432,6 @@ fig, axes = plt.subplots(nsites, 1, figsize=(10, 3*nsites), sharex=True)
 if nsites == 1:
     axes = [axes]
 
-def running_mse(err_sq):
-    out = []
-    s = 0.0
-    for k, v in enumerate(err_sq, start=1):
-        s += float(v)
-        out.append(s / k)
-    return out
-
 for i in range(nsites):
     ax = axes[i]
     y_jl = [r[i] for r in obs_jl]
@@ -450,20 +444,21 @@ for i in range(nsites):
     ax.plot(x, y_var, label="TenPy variational", linewidth=2, linestyle=":")
     ax.plot(x, y_ex, label="Qiskit exact", linewidth=2, linestyle="-.", color="k", alpha=0.6)
 
-    # Right y-axis: running MSE vs exact
+    # Right y-axis: per-timepoint squared error vs exact
     ax2 = ax.twinx()
-    mse_jl = running_mse([(a - b) ** 2 for a, b in zip(y_jl, y_ex)])
-    mse_zip = running_mse([(a - b) ** 2 for a, b in zip(y_zip, y_ex)])
-    mse_var = running_mse([(a - b) ** 2 for a, b in zip(y_var, y_ex)])
-    ax2.plot(x, mse_jl, label="MSE: CircuitTDVP", linewidth=1.5, linestyle="--", alpha=0.8)
-    ax2.plot(x, mse_zip, label="MSE: TenPy zip-up", linewidth=1.5, linestyle="--", alpha=0.8)
-    ax2.plot(x, mse_var, label="MSE: TenPy variational", linewidth=1.5, linestyle="--", alpha=0.8)
-    ax2.set_ylabel("MSE vs exact")
+    se_jl = [(abs(a - b)) ** 2 for a, b in zip(y_jl, y_ex)]
+    se_zip = [(abs(a - b)) ** 2 for a, b in zip(y_zip, y_ex)]
+    se_var = [(abs(a - b)) ** 2 for a, b in zip(y_var, y_ex)]
+    # Plot SE curves with distinct styles and keep CircuitTDVP on top (in case curves overlap).
+    ax2.plot(x, se_zip, label="SE: TenPy zip-up", linewidth=1.3, linestyle="--", alpha=0.8, color="C1", zorder=2)
+    ax2.plot(x, se_var, label="SE: TenPy variational", linewidth=1.3, linestyle=":", alpha=0.8, color="C2", zorder=3)
+    ax2.plot(x, se_jl, label="SE: CircuitTDVP", linewidth=1.6, linestyle="-.", alpha=0.9, color="C0", zorder=4)
+    ax2.set_ylabel("Squared error vs exact")
 
-    # If MSE spans many orders of magnitude, use log-scale.
-    all_mse = [v for v in (mse_jl + mse_zip + mse_var) if v > 0.0]
-    if all_mse:
-        mn, mx = min(all_mse), max(all_mse)
+    # If SE spans many orders of magnitude, use log-scale.
+    all_se = [v for v in (se_jl + se_zip + se_var) if v > 0.0]
+    if all_se:
+        mn, mx = min(all_se), max(all_se)
         if mx / mn > 1.0e6:
             ax2.set_yscale("log")
 
@@ -502,6 +497,14 @@ function main()
     state_jl = get(kv, "state_jl", "Neel")  # Julia choices: zeros|Neel|...
     jl_local_mode = Symbol(get(kv, "jl_local_mode", "TDVP"))
     jl_longrange_mode = Symbol(get(kv, "jl_longrange_mode", "TDVP"))
+    jl_tdvp_truncation_raw = lowercase(get(kv, "jl_tdvp_truncation", "during"))  # during|after_window
+    jl_tdvp_truncation = if jl_tdvp_truncation_raw in ("during", "in", "insweep", "in_sweep")
+        :during
+    elseif jl_tdvp_truncation_raw in ("after", "post", "after_window", "post_window")
+        :after_window
+    else
+        error("Unknown --jl_tdvp_truncation=$jl_tdvp_truncation_raw. Use during|after_window.")
+    end
     warmup = lowercase(get(kv, "warmup", "true")) in ("1", "true", "yes", "y")
 
     base_outdir = get(kv, "outdir", "03_Nature_review_checks/results")
@@ -511,6 +514,7 @@ function main()
             circuit, L, chi_max, join(string.(sites), ","))
     @printf("CircuitTDVP modes: local=%s longrange=%s (warmup=%s)\n",
             String(jl_local_mode), String(jl_longrange_mode), string(warmup))
+    @printf("CircuitTDVP truncation timing (2-site TDVP): %s\n", String(jl_tdvp_truncation))
     if trunc_mode in ("absolute", "abs")
         @printf("Truncation (Julia): absolute_discarded_weight=%.3g  [legacy]\n", trunc)
         @printf("Note: TenPy uses relative discarded weight; for strict matching use --trunc_mode=relative.\n")
@@ -536,7 +540,8 @@ function main()
     # --- Run CircuitTDVP (Julia) in-process ---
     jl_tag = get(kv, "tag_jl", "circuitTDVP")
     _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag,
-                       state_jl=state_jl, local_mode=jl_local_mode, longrange_mode=jl_longrange_mode, warmup=warmup)
+                       state_jl=state_jl, local_mode=jl_local_mode, longrange_mode=jl_longrange_mode,
+                       tdvp_truncation_timing=jl_tdvp_truncation, warmup=warmup)
 
     # --- Run TenPy zip-up from gate-list ---
     py_tenpy = joinpath(@__DIR__, "tenpy_mpo_from_gatelist.py")

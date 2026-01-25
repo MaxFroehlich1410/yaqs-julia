@@ -420,8 +420,6 @@ function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     F = @t :tdvp_svd svd(Mat)
     
     # Truncation
-    discarded_sq = 0.0
-    keep_rank = length(F.S)
     # Truncation mode:
     # - if `threshold >= 0`: interpret as **relative discarded weight**
     #   sum(discarded S^2) / sum(all S^2) >= threshold
@@ -433,6 +431,8 @@ function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
     min_keep = 2
     
     @t :tdvp_truncation_loop begin
+        discarded_sq = 0.0
+        keep_rank = length(F.S)
         for k in length(F.S):-1:1
             discarded_sq += F.S[k]^2
             if threshold < 0

@@ -70,10 +70,13 @@ end
 struct TJMOptions
     local_method::Symbol # :TEBD or :TDVP
     long_range_method::Symbol # :TEBD or :TDVP
+    tdvp_truncation_timing::Symbol # :during (default) | :after_window
 end
 
 # Default constructor
-TJMOptions(;local_method=:TDVP, long_range_method=:TDVP) = TJMOptions(local_method, long_range_method)
+TJMOptions(; local_method::Symbol=:TDVP,
+             long_range_method::Symbol=:TDVP,
+             tdvp_truncation_timing::Symbol=:during) = TJMOptions(local_method, long_range_method, tdvp_truncation_timing)
 
 # --- Circuit Processing ---
 
@@ -347,11 +350,37 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
         
         # Use StrongMeasurementConfig to trigger the efficient Directed Circuit Sweep
         # instead of the Symmetric Hamiltonian Sweep triggered by TimeEvolutionConfig.
-        gate_config = StrongMeasurementConfig(Observable[]; 
-                                            max_bond_dim=sim_params.max_bond_dim, 
-                                            truncation_threshold=sim_params.truncation_threshold)
+        trunc_timing = alg_options.tdvp_truncation_timing
+        @assert trunc_timing === :during || trunc_timing === :after_window
+
+        # Optional: defer threshold-based truncation until after the whole window evolution.
+        # We still cap intermediate bond dimensions by `max_bond_dim` to avoid blow-ups.
+        #
+        # Implementation detail: `Algorithms.split_mps_tensor_svd` interprets
+        #   threshold >= 0 as relative discarded weight and truncates when frac >= threshold.
+        # Setting threshold = ±Inf disables that truncation (but keeps the hard chi cap).
+        th = sim_params.truncation_threshold
+        th_tdvp = if trunc_timing === :after_window
+            (th >= 0) ? Inf : -Inf
+        else
+            th
+        end
+
+        gate_config = StrongMeasurementConfig(Observable[];
+                                             max_bond_dim=sim_params.max_bond_dim,
+                                             truncation_threshold=th_tdvp)
         
         @t :two_site_tdvp two_site_tdvp!(short_state, short_mpo, gate_config)
+
+        if trunc_timing === :after_window
+            # Single post-pass compression of the *short* MPS using the same threshold semantics
+            # as the usual in-sweep truncation (relative if th>=0, absolute if th<0).
+            @t :post_truncate MPSModule.truncate!(short_state; threshold=th, max_bond_dim=sim_params.max_bond_dim)
+        end
+
+        # Ensure a well-defined canonical gauge for writeback: make the window left-canonical
+        # with the orthogonality center at the right boundary of the window.
+        @t :window_canonicalize MPSModule.shift_orthogonality_center!(short_state, win_len)
     
         @t :window_writeback state.tensors[win_start:win_end] .= short_state.tensors
         state.orth_center = win_end

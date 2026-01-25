@@ -193,6 +193,10 @@ def main() -> None:
     trunc = float(args.trunc)
     if trunc < 0.0:
         raise ValueError("--trunc must be >= 0.")
+    # TenPy's `trunc_cut` is defined (on normalized Schmidt values) by
+    #   sum_{discarded} S[i]**2 <= trunc_cut**2
+    # so mapping a *relative discarded-weight tolerance* `trunc` to TenPy is:
+    #   trunc_cut = sqrt(trunc)
     trunc_cut = None if trunc == 0.0 else math.sqrt(trunc)
     # TenPy needs a *finite* svd_min to drop exact zeros (it replaces log(0) with log(1e-100) internally).
     # Using a very small svd_min (<1e-100) can accidentally KEEP exact zeros and lead to NaNs during S^{-1}.

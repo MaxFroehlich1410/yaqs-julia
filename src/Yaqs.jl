@@ -167,6 +167,7 @@ include("MPS.jl")
 include("MPO.jl")
 include("SimulationConfigs.jl")
 include("Algorithms.jl")
+include("BUG.jl")
 include("Noise.jl")
 include("StochasticProcess.jl")
 include("Dissipation.jl")
@@ -182,6 +183,7 @@ using .MPSModule
 using .MPOModule
 using .SimulationConfigs
 using .Algorithms
+using .BUGModule
 using .NoiseModule
 using .StochasticProcessModule
 using .DissipationModule
@@ -191,6 +193,6 @@ using .Simulator
 using .CircuitIngestion
 using .CircuitLibrary
 
-export GateLibrary, Decompositions, MPSModule, MPOModule, SimulationConfigs, Algorithms, NoiseModule, StochasticProcessModule, DissipationModule, AnalogTJM, Simulator, DigitalTJM, CircuitIngestion, CircuitLibrary
+export GateLibrary, Decompositions, MPSModule, MPOModule, SimulationConfigs, Algorithms, BUGModule, NoiseModule, StochasticProcessModule, DissipationModule, AnalogTJM, Simulator, DigitalTJM, CircuitIngestion, CircuitLibrary
 
 end

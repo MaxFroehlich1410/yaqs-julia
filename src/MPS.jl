@@ -399,16 +399,12 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
         # Python idx corresponds to Julia k = length(S) - idx
         # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
         
-        discarded_sq = 0.0
-        keep_rank = length(S)
         min_keep = 2  # Python uses 2 to prevent pathological dimension-1 truncation
         total_sq = sum(abs2, S)
         
         # Accumulate discarded weight from smallest singular values
-        # Python: enumerate(reversed(s_vec)) gives idx=0 for smallest, idx=1 for second-smallest, etc.
-        # Julia: k=length(S) for smallest, k=length(S)-1 for second-smallest, etc.
-        # Mapping: Python idx corresponds to Julia k = length(S) - idx
-        # When Python sets keep = len(s_vec) - idx, Julia sets keep_rank = k
+        discarded_sq = 0.0
+        keep_rank = length(S)
         for k in length(S):-1:1
             discarded_sq += S[k]^2
             if threshold < 0
@@ -423,8 +419,6 @@ function truncate!(mps::MPS{T}; threshold::Float64=1e-12, max_bond_dim::Union{In
                     break
                 end
             end
-                # Python: keep = max(len(s_vec) - idx, min_keep)
-                # Julia: keep_rank = max(k, min_keep) where k = len(S) - idx
         end
         
         # 2. Max Bond
