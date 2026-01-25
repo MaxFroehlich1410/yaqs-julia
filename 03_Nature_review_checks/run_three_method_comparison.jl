@@ -16,26 +16,29 @@ All parameters can be adjusted below (or via ARGS using --key=value).
 COPY/PASTE COMMANDS (each run writes into results/experimentX/)
 --------------------------------------------------------------------------------
 
+Shell note (zsh/bash): use a single backslash `\` for line continuation and make sure it is the
+last character on the line (no trailing spaces). Using `\\` will *not* continue the command.
+
 Base (Heisenberg):
-  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
-    --circuit=Heisenberg --L=8 --steps=20 --dt=0.05 --periodic=true \\
-    --Jx=1.0 --Jy=1.0 --Jz=1.0 --h=0.0 \\
-    --sites=1,4,8 --state_jl=Neel --state_py=neel \\
-    --chi_max=256 --trunc=1e-12 --trunc_mode=relative \\
-    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --warmup=true \\
-    --min_sweeps=2 --max_sweeps=10 \\
-    --tag_jl=circuitTDVP --tag_zipup=tenpy_zipup --tag_var=tenpy_variational --tag_exact=qiskit_exact \\
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=Heisenberg --L=8 --steps=20 --dt=0.05 --periodic=true \
+    --Jx=1.0 --Jy=1.0 --Jz=1.0 --h=0.0 \
+    --sites=1,4,8 --state_jl=Neel --state_py=neel \
+    --chi_max=256 --trunc=1e-12 --trunc_mode=relative \
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --warmup=true \
+    --min_sweeps=2 --max_sweeps=10 \
+    --tag_jl=circuitTDVP --tag_zipup=tenpy_zipup --tag_var=tenpy_variational --tag_exact=qiskit_exact \
     --outdir=03_Nature_review_checks/results
 
 Legacy Julia truncation mode (NOTE: TenPy stays relative; use only for Julia-side comparisons):
-  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
-    --circuit=Heisenberg --L=6 --steps=1 --dt=0.05 --sites=1,3,6 \\
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=Heisenberg --L=6 --steps=1 --dt=0.05 --sites=1,3,6 \
     --chi_max=256 --trunc=1e-12 --trunc_mode=absolute
 
 Ising:
-  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \\
-    --circuit=Ising --L=8 --steps=20 --dt=0.05 --periodic=true \\
-    --J=1.0 --g=0.5 \\
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=Ising --L=8 --steps=20 --dt=0.05 --periodic=true \
+    --J=1.0 --g=0.5 \
     --sites=1,4,8 --chi_max=256 --trunc=1e-12
 
 Brickwork examples:
@@ -86,7 +89,7 @@ end # YaqsLite
 using .YaqsLite.GateLibrary
 using .YaqsLite.MPSModule
 using .YaqsLite.SimulationConfigs
-using .YaqsLite.DigitalTJM: DigitalCircuit, TJMOptions, run_digital_tjm
+using .YaqsLite.DigitalTJM: DigitalCircuit, TJMOptions, run_digital_tjm, add_gate!
 using .YaqsLite.CircuitLibrary
 
 include("gatelist_io.jl")
@@ -214,8 +217,38 @@ function _build_circuit_from_library(kv::Dict{String,String})
         periodic = lowercase(get(kv, "periodic", "false")) in ("1", "true", "yes", "y")
         circ = create_rzz_pi_over_2_brickwork(L, steps; periodic=periodic)
         return circ
+    elseif name == "SingleLongRangeGate"
+        # Debug circuit: a single long-range 2-qubit gate (no other gates).
+        L = parse(Int, get(kv, "L", "16"))
+        gate = lowercase(get(kv, "gate", "rzz"))  # rzz|rxx|ryy|cx|cz|swap|cp
+        theta = parse(Float64, get(kv, "theta", string(π / 4)))
+        i = parse(Int, get(kv, "i", "1"))
+        j = parse(Int, get(kv, "j", string(L)))
+        (1 <= i <= L && 1 <= j <= L && i != j) || error("SingleLongRangeGate requires distinct i,j in 1..L")
+
+        circ = DigitalCircuit(L)
+        add_gate!(circ, Barrier("SAMPLE_OBSERVABLES"), Int[])
+        if gate == "rzz"
+            add_gate!(circ, RzzGate(theta), [i, j])
+        elseif gate == "rxx"
+            add_gate!(circ, RxxGate(theta), [i, j])
+        elseif gate == "ryy"
+            add_gate!(circ, RyyGate(theta), [i, j])
+        elseif gate == "cx"
+            add_gate!(circ, CXGate(), [i, j])
+        elseif gate == "cz"
+            add_gate!(circ, CZGate(), [i, j])
+        elseif gate == "swap"
+            add_gate!(circ, SWAPGate(), [i, j])
+        elseif gate == "cp"
+            add_gate!(circ, CPhaseGate(theta), [i, j])
+        else
+            error("Unsupported gate=$gate for SingleLongRangeGate. Use rzz|rxx|ryy|cx|cz|swap|cp.")
+        end
+        add_gate!(circ, Barrier("SAMPLE_OBSERVABLES"), Int[])
+        return circ
     else
-        error("Unsupported --circuit=$name. Supported: Heisenberg, Ising, CZBrickwork, RZZPiOver2Brickwork")
+        error("Unsupported --circuit=$name. Supported: Heisenberg, Ising, CZBrickwork, RZZPiOver2Brickwork, SingleLongRangeGate")
     end
 end
 
@@ -232,9 +265,21 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
 
     # Warm-up run to exclude compilation from timing.
     if warmup
+        @printf("[circuitTDVP] warmup enabled: running short prefix to compile\n")
+        # Use a short prefix of the circuit to avoid a full duplicate run being printed.
+        # This still compiles the hot paths (gate application + measurement).
+        n_pref = min(length(circ.gates), 50)
+        circ_w = DigitalCircuit(L)
+        circ_w.gates = circ.gates[1:n_pref]
+        circ_w = _ensure_sample_barriers!(circ_w)
+
+        # Use a smaller bond cap for warmup to keep it fast.
+        warmup_chi = min(chi_max, 8)
+        sim_params_w = TimeEvolutionConfig(obs_list, 1.0; dt=1.0, num_traj=1, sample_timesteps=true,
+                                           max_bond_dim=warmup_chi, truncation_threshold=trunc)
         psi_w = MPS(L; state=state_jl)
         pad_bond_dimension!(psi_w, 2; noise_scale=0.0)
-        run_digital_tjm(psi_w, circ, nothing, sim_params; alg_options=alg_options)
+        run_digital_tjm(psi_w, circ_w, nothing, sim_params_w; alg_options=alg_options)
     end
 
     psi = MPS(L; state=state_jl)

@@ -1,4 +1,18 @@
 using LinearAlgebra
+
+# ------------------------------------------------------------------------------
+# PythonCall configuration
+#
+# This script uses PythonCall for Qiskit/YAQS comparisons. By default, PythonCall
+# tries to provision a Conda environment via CondaPkg/Pixi, which can fail on some
+# systems (e.g. file locking / unlink errors).
+#
+# We force PythonCall to use the system `python3` unless the user already set a
+# different executable via `JULIA_PYTHONCALL_EXE`.
+# ------------------------------------------------------------------------------
+if !haskey(ENV, "JULIA_PYTHONCALL_EXE")
+    ENV["JULIA_PYTHONCALL_EXE"] = "python3"
+end
 using PythonCall
 
 # Include Yaqs source
@@ -23,16 +37,16 @@ longrange_mode = "TDVP" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
 
 # System Parameters
-L = 6
-timesteps = 80
+L = 10
+timesteps = 50
 dt = 0.1
 num_traj = 1 # Deterministic
 
 # Flags for Execution
 RUN_JULIA = true # New Default
-RUN_PYTHON_YAQS = true
+RUN_PYTHON_YAQS = false
 RUN_QISKIT_EXACT = true
-SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6]
+SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6, 10]
 
 MAX_BOND_DIM = 56
 
@@ -241,9 +255,13 @@ end
 # ==============================================================================
 if RUN_QISKIT_EXACT
     println("\n--- Running Qiskit Exact Density Matrix ---")
+    # NOTE: Aer `density_matrix` scales as O(4^L) memory; becomes infeasible quickly (e.g. L=16 → ~64 GB).
+    # For noise-free "exact" reference, we switch to `statevector` for larger L.
+    qiskit_method = (L <= 12) ? "density_matrix" : "statevector"
+    println("Qiskit method: $qiskit_method")
     reference_py = mqt_simulators.run_qiskit_exact(
         L, timesteps, init_circuit, trotter_step, nothing,
-        method="density_matrix", observable_basis="Z"
+        method=qiskit_method, observable_basis="Z"
     )
     reference = pyconvert(Array{Float64,2}, reference_py)
     

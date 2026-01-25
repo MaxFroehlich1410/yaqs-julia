@@ -48,6 +48,20 @@ def _two_site_mpo_from_gate(sites, i: int, j: int, U4):
     if i == j:
         raise ValueError("two-site gate requires i != j")
     if i > j:
+        # If we swap site indices, we must also swap qubit order in the 4x4 matrix.
+        # Swapping qubits corresponds to conjugation with SWAP: U' = SWAP * U * SWAP.
+        import numpy as np
+
+        swap = np.array(
+            [
+                [1, 0, 0, 0],
+                [0, 0, 1, 0],
+                [0, 1, 0, 0],
+                [0, 0, 0, 1],
+            ],
+            dtype=np.complex128,
+        )
+        U4 = swap @ np.asarray(U4, dtype=np.complex128).reshape(4, 4) @ swap
         i, j = j, i
 
     d = 2
@@ -85,7 +99,12 @@ def _two_site_mpo_from_gate(sites, i: int, j: int, U4):
                 W[k, k, :, :] = np.eye(d, dtype=np.complex128)
         Ws.append(npc.Array.from_ndarray_trivial(W, labels=["wL", "wR", "p", "p*"]))
 
-    return MPO(sites, Ws, bc="finite", IdL=[0] * (L + 1), IdR=[0] * (L + 1), mps_unit_cell_width=L)
+    # TenPy expects IdL/IdR only at the *boundaries* for finite MPOs.
+    # Setting IdL/IdR on every bond (as all zeros) can confuse internal bookkeeping
+    # and leads to failures in variational MPO application for long-range operators.
+    IdL = [0] + [None] * L
+    IdR = [None] * L + [0]
+    return MPO(sites, Ws, bc="finite", IdL=IdL, IdR=IdR, mps_unit_cell_width=L)
 
 
 def _apply_one_site_unitary_mps(psi, i: int, U2) -> None:
@@ -175,9 +194,11 @@ def main() -> None:
     if trunc < 0.0:
         raise ValueError("--trunc must be >= 0.")
     trunc_cut = None if trunc == 0.0 else math.sqrt(trunc)
-    # zip_up internally relaxes `svd_min *= trunc_weight`, so it must be numeric.
-    # Use an extremely small positive value to effectively disable the constraint without log(0).
-    trunc_params = dict(chi_max=int(args.chi_max), svd_min=1.0e-300, trunc_cut=trunc_cut)
+    # TenPy needs a *finite* svd_min to drop exact zeros (it replaces log(0) with log(1e-100) internally).
+    # Using a very small svd_min (<1e-100) can accidentally KEEP exact zeros and lead to NaNs during S^{-1}.
+    # Setting svd_min≈machine-eps effectively disables truncation while remaining numerically safe.
+    svd_min_safe = 2.220446049250313e-16  # np.finfo(np.float64).eps
+    trunc_params = dict(chi_max=int(args.chi_max), svd_min=svd_min_safe, trunc_cut=trunc_cut)
 
     if args.method == "zip_up":
         apply_opts = dict(
@@ -193,6 +214,8 @@ def main() -> None:
             min_sweeps=int(args.min_sweeps),
             max_sweeps=int(args.max_sweeps),
             tol_theta_diff=float(args.tol_theta_diff),
+            # `combine=True` can break for long-range MPOs with this TenPy version (LegCharge mismatch).
+            # Keep it off for robustness.
             combine=False,
             max_trunc_err=max_trunc_err_val,
         )
