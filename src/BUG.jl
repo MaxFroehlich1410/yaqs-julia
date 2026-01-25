@@ -215,6 +215,72 @@ function fixed_local_update!(state::MPS{ComplexF64},
     return new_right_env, basis_change_m
 end
 
+@inline function _trunc_keep_dim(S::AbstractVector{<:Real}, threshold::Real, max_bond_dim::Int)
+    discarded_sq = 0.0
+    keep_rank = length(S)
+    min_keep = 2
+    total_sq = sum(abs2, S)
+    for k in length(S):-1:1
+        discarded_sq += S[k]^2
+        if threshold < 0
+            if discarded_sq >= -threshold
+                keep_rank = max(k, min_keep)
+                break
+            end
+        else
+            frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+            if frac >= threshold
+                keep_rank = max(k, min_keep)
+                break
+            end
+        end
+    end
+    return clamp(keep_rank, 1, max_bond_dim)
+end
+
+"""
+    _truncate_bond_keep_left(A_center, B_right, threshold, max_bond_dim)
+
+Truncate the bond between `A_center` (Dl,d,D) and `B_right` (D,d,Dr), keeping the
+singular values on the *left* so that the orthogonality center stays at the left site.
+
+Returns `(A_new_center, B_new_right, P)` where `P` maps the old bond basis (size D)
+to the new truncated basis (size χ), such that `B_new ≈ P * B_old` in matrix form.
+"""
+function _truncate_bond_keep_left(A_center::Array{ComplexF64,3},
+                                  B_right::Array{ComplexF64,3},
+                                  threshold::Float64,
+                                  max_bond_dim::Int)
+    Dl, d1, D = size(A_center)
+    D2, d2, Dr = size(B_right)
+    @assert D == D2
+
+    @tensor Θ[dl, p1, p2, dr] := A_center[dl, p1, k] * B_right[k, p2, dr]
+    Θmat = reshape(Θ, Dl * d1, d2 * Dr)
+
+    F = svd(Θmat)
+    keep = _trunc_keep_dim(F.S, threshold, max_bond_dim)
+
+    U = F.U[:, 1:keep]
+    S = F.S[1:keep]
+    Vt = F.Vt[1:keep, :]
+
+    # Keep S on the left: U * Diagonal(S)
+    US = copy(U)
+    @inbounds for j in 1:keep
+        @views US[:, j] .*= S[j]
+    end
+
+    A_new = reshape(US, Dl, d1, keep)
+    B_new = reshape(Vt, keep, d2, Dr)
+
+    # Basis change on the bond: B_new_mat = P * B_old_mat
+    Bold = reshape(B_right, D, d2 * Dr)
+    P = Vt * adjoint(Bold)  # (keep x D)
+
+    return A_new, B_new, P
+end
+
 """
     bug!(state, mpo, config; numiter_lanczos=25)
 
@@ -223,7 +289,9 @@ First-order BUG sweep (right-to-left). Updates `state` in-place and truncates at
 function bug!(state::MPS{ComplexF64},
               mpo::MPO{ComplexF64},
               config::AbstractSimConfig;
-              numiter_lanczos::Int=25)
+              numiter_lanczos::Int=25,
+              do_truncate::Bool=true,
+              truncation_granularity::Symbol=:after_sweep)
     L = state.length
     @assert mpo.length == L "State and Hamiltonian must have the same number of sites"
     check_if_valid_mps(state)
@@ -238,20 +306,36 @@ function bug!(state::MPS{ComplexF64},
     right_env = Algorithms.make_identity_env(r_bond, mpo_r)
     right_m_block = _identity_matrix(ComplexF64, r_bond)
 
+    threshold = _bug_trunc_threshold(config)
+    max_bond_dim = _bug_max_bond_dim(config)
+    @assert truncation_granularity === :after_sweep || truncation_granularity === :after_site
+
     for site in L:-1:2
+        right_env_in = right_env
         right_m_block, right_env = local_update!(
             state, mpo, left_envs, right_env, canon_center_tensors, site, right_m_block, dt, numiter_lanczos
         )
+
+        if do_truncate && truncation_granularity === :after_site
+            A_new, B_new, P = _truncate_bond_keep_left(canon_center_tensors[site - 1], state.tensors[site],
+                                                       threshold, max_bond_dim)
+            canon_center_tensors[site - 1] = A_new
+            state.tensors[site] = B_new
+            right_m_block = right_m_block * adjoint(P)  # (old -> D) * (D -> χ)
+            right_env = Algorithms.update_right_environment(B_new, mpo.tensors[site], right_env_in)
+        end
     end
 
     # Update first site.
     updated = _update_site(left_envs[1], right_env, mpo.tensors[1], canon_center_tensors[1], dt, numiter_lanczos)
     state.tensors[1] = updated
 
-    # Truncation (matches Python behavior for STANDARD).
-    threshold = _bug_trunc_threshold(config)
-    max_bond_dim = _bug_max_bond_dim(config)
-    truncate!(state; threshold=threshold, max_bond_dim=max_bond_dim)
+    # Truncation:
+    # - :after_sweep => single sweep-level truncation at the end
+    # - :after_site  => already truncated each bond during the sweep
+    if do_truncate && truncation_granularity === :after_sweep
+        truncate!(state; threshold=threshold, max_bond_dim=max_bond_dim)
+    end
     return nothing
 end
 
@@ -263,7 +347,8 @@ First-order BUG sweep without basis enlargement. Updates `state` in-place (no tr
 function fixed_bug!(state::MPS{ComplexF64},
                     mpo::MPO{ComplexF64},
                     config::AbstractSimConfig;
-                    numiter_lanczos::Int=25)
+                    numiter_lanczos::Int=25,
+                    truncation_granularity::Symbol=:after_sweep)
     L = state.length
     @assert mpo.length == L "State and Hamiltonian must have the same number of sites"
     check_if_valid_mps(state)
@@ -277,10 +362,23 @@ function fixed_bug!(state::MPS{ComplexF64},
     right_env = Algorithms.make_identity_env(r_bond, mpo_r)
     right_m_block = _identity_matrix(ComplexF64, r_bond)
 
+    threshold = _bug_trunc_threshold(config)
+    max_bond_dim = _bug_max_bond_dim(config)
+    @assert truncation_granularity === :after_sweep || truncation_granularity === :after_site
+
     for site in L:-1:2
+        right_env_in = right_env
         right_env, right_m_block = fixed_local_update!(
             state, mpo, left_envs, right_env, canon_center_tensors, site, right_m_block, dt, numiter_lanczos
         )
+        if truncation_granularity === :after_site
+            A_new, B_new, P = _truncate_bond_keep_left(canon_center_tensors[site - 1], state.tensors[site],
+                                                       threshold, max_bond_dim)
+            canon_center_tensors[site - 1] = A_new
+            state.tensors[site] = B_new
+            right_m_block = right_m_block * adjoint(P)
+            right_env = Algorithms.update_right_environment(B_new, mpo.tensors[site], right_env_in)
+        end
     end
 
     updated = _update_site(left_envs[1], right_env, mpo.tensors[1], canon_center_tensors[1], dt, numiter_lanczos)
@@ -289,14 +387,8 @@ function fixed_bug!(state::MPS{ComplexF64},
     return nothing
 end
 
-@inline function _strategy_fn(strategy::FirstOrderBUGStrategy)
-    if strategy == STANDARD
-        return bug!
-    elseif strategy == FIXED
-        return fixed_bug!
-    else
-        error("Invalid FirstOrderBUGStrategy")
-    end
+@inline function _do_truncate_after_second_order(truncation_timing::Symbol)
+    return truncation_timing === :after_window
 end
 
 function _flip_mps!(state::MPS{ComplexF64})
@@ -325,30 +417,54 @@ function _abstract_bug_second_order!(state::MPS{ComplexF64},
                                     mpo::MPO{ComplexF64},
                                     strategies::Tuple{FirstOrderBUGStrategy, FirstOrderBUGStrategy},
                                     config::AbstractSimConfig;
-                                    numiter_lanczos::Int=25)
+                                    numiter_lanczos::Int=25,
+                                    truncation_timing::Symbol=:during,
+                                    truncation_granularity::Symbol=:after_sweep)
     L = state.length
     @assert mpo.length == L "State and Hamiltonian must have the same number of sites"
+    @assert truncation_timing === :during || truncation_timing === :after_window
 
     dt_orig = _bug_dt(config)
     dt_half = (config isa TimeEvolutionConfig) ? (0.5 * dt_orig) : 1.0
+    do_trunc_half = !_do_truncate_after_second_order(truncation_timing)
 
     # First half-step (right-to-left).
     if config isa TimeEvolutionConfig
         (config::TimeEvolutionConfig).dt = dt_half
     end
-    _strategy_fn(strategies[1])(state, mpo, config; numiter_lanczos=numiter_lanczos)
+    if strategies[1] == STANDARD
+        bug!(state, mpo, config; numiter_lanczos=numiter_lanczos,
+             do_truncate=do_trunc_half, truncation_granularity=truncation_granularity)
+    else
+        fixed_bug!(state, mpo, config; numiter_lanczos=numiter_lanczos,
+                   truncation_granularity=truncation_granularity)
+    end
 
     # Second half-step in opposite direction by flipping the network (matches Python implementation).
     _flip_mps!(state)
     _flip_mpo!(mpo)
     shift_orthogonality_center!(state, state.length)
-    _strategy_fn(strategies[2])(state, mpo, config; numiter_lanczos=numiter_lanczos)
+    if strategies[2] == STANDARD
+        bug!(state, mpo, config; numiter_lanczos=numiter_lanczos,
+             do_truncate=do_trunc_half, truncation_granularity=truncation_granularity)
+    else
+        fixed_bug!(state, mpo, config; numiter_lanczos=numiter_lanczos,
+                   truncation_granularity=truncation_granularity)
+    end
     _flip_mps!(state)
     _flip_mpo!(mpo)
 
     # Restore dt.
     if config isa TimeEvolutionConfig
         (config::TimeEvolutionConfig).dt = dt_orig
+    end
+
+    # Optional: truncate only once after the full second-order step.
+    if _do_truncate_after_second_order(truncation_timing) &&
+       (strategies[1] == STANDARD || strategies[2] == STANDARD)
+        threshold = _bug_trunc_threshold(config)
+        max_bond_dim = _bug_max_bond_dim(config)
+        truncate!(state; threshold=threshold, max_bond_dim=max_bond_dim)
     end
 
     return nothing
@@ -362,22 +478,37 @@ Second-order BUG via Strang splitting: two half-steps with opposite sweep direct
 function bug_second_order!(state::MPS{ComplexF64},
                            mpo::MPO{ComplexF64},
                            config::AbstractSimConfig;
-                           numiter_lanczos::Int=25)
-    return _abstract_bug_second_order!(state, mpo, (STANDARD, STANDARD), config; numiter_lanczos=numiter_lanczos)
+                           numiter_lanczos::Int=25,
+                           truncation_timing::Symbol=:during,
+                           truncation_granularity::Symbol=:after_sweep)
+    return _abstract_bug_second_order!(state, mpo, (STANDARD, STANDARD), config;
+                                      numiter_lanczos=numiter_lanczos,
+                                      truncation_timing=truncation_timing,
+                                      truncation_granularity=truncation_granularity)
 end
 
 function fixed_bug_second_order!(state::MPS{ComplexF64},
                                  mpo::MPO{ComplexF64},
                                  config::AbstractSimConfig;
-                                 numiter_lanczos::Int=25)
-    return _abstract_bug_second_order!(state, mpo, (FIXED, FIXED), config; numiter_lanczos=numiter_lanczos)
+                                 numiter_lanczos::Int=25,
+                                 truncation_timing::Symbol=:during,
+                                 truncation_granularity::Symbol=:after_sweep)
+    return _abstract_bug_second_order!(state, mpo, (FIXED, FIXED), config;
+                                      numiter_lanczos=numiter_lanczos,
+                                      truncation_timing=truncation_timing,
+                                      truncation_granularity=truncation_granularity)
 end
 
 function hybrid_bug_second_order!(state::MPS{ComplexF64},
                                   mpo::MPO{ComplexF64},
                                   config::AbstractSimConfig;
-                                  numiter_lanczos::Int=25)
-    return _abstract_bug_second_order!(state, mpo, (STANDARD, FIXED), config; numiter_lanczos=numiter_lanczos)
+                                  numiter_lanczos::Int=25,
+                                  truncation_timing::Symbol=:during,
+                                  truncation_granularity::Symbol=:after_sweep)
+    return _abstract_bug_second_order!(state, mpo, (STANDARD, FIXED), config;
+                                      numiter_lanczos=numiter_lanczos,
+                                      truncation_timing=truncation_timing,
+                                      truncation_granularity=truncation_granularity)
 end
 
 end # module BUGModule

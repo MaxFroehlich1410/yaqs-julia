@@ -13,6 +13,65 @@ Methods:
 All parameters can be adjusted below (or via ARGS using --key=value).
 
 --------------------------------------------------------------------------------
+ALL SUPPORTED FLAGS (with defaults)
+--------------------------------------------------------------------------------
+
+Core / output:
+  --outdir=03_Nature_review_checks/results
+  --tag_jl=circuitTDVP
+  --tag_zipup=tenpy_zipup
+  --tag_var=tenpy_variational
+  --tag_exact=qiskit_exact
+
+Circuit selection:
+  --circuit=Heisenberg
+    Supported: Heisenberg | Ising | CZBrickwork | RZZPiOver2Brickwork | SingleLongRangeGate
+  --L=8
+  --steps=20
+  --dt=0.05
+  --periodic=true
+
+Initial states:
+  --state_jl=Neel       (Julia: zeros | ones | x+ | x- | y+ | y- | Neel | wall | basis)
+  --state_py=neel       (TenPy/Qiskit: up | neel)
+
+Measurement:
+  --sites=1,4,8         (1-based site indices)
+
+Truncation / bond cap:
+  --chi_max=256
+  --trunc=1e-12
+  --trunc_mode=relative (relative | absolute)
+    Note: TenPy uses relative discarded weight. Use `absolute` only for Julia-side legacy comparisons.
+
+Julia circuit evolution backend:
+  --jl_local_mode=TDVP       (TDVP | TEBD | BUG)
+  --jl_longrange_mode=TDVP   (TDVP | TEBD | BUG)
+  --jl_tdvp_truncation=during (during | after_window)
+    Applies to TDVP window evolution; BUG reuses the same setting.
+  --jl_bug_truncation=after_sweep (after_sweep | after_site)
+    BUG-only: controls truncation granularity when truncating "during" evolution.
+    - after_sweep: truncate once per BUG half-step sweep (default, cheaper)
+    - after_site : truncate after each local BUG site update (tighter bond control)
+  --warmup=true              (true | false)
+
+Optional: run BOTH Julia methods (TDVP + BUG) and plot both:
+  --jl_compare_bug=false     (true | false)
+  --tag_jl_bug=circuitBUG
+
+TenPy variational options:
+  --min_sweeps=2
+  --max_sweeps=10
+
+Model parameters (depend on --circuit):
+  Heisenberg:
+    --Jx=1.0 --Jy=1.0 --Jz=1.0 --h=0.0
+  Ising:
+    --J=1.0 --g=0.5
+  SingleLongRangeGate:
+    (see implementation below for exact parameters)
+
+--------------------------------------------------------------------------------
 COPY/PASTE COMMANDS (each run writes into results/experimentX/)
 --------------------------------------------------------------------------------
 
@@ -26,8 +85,19 @@ Base (Heisenberg):
     --sites=1,4,8 --state_jl=Neel --state_py=neel \
     --chi_max=256 --trunc=1e-12 --trunc_mode=relative \
     --jl_local_mode=TDVP --jl_longrange_mode=TDVP --warmup=true \
+    --jl_tdvp_truncation=during \
     --min_sweeps=2 --max_sweeps=10 \
     --tag_jl=circuitTDVP --tag_zipup=tenpy_zipup --tag_var=tenpy_variational --tag_exact=qiskit_exact \
+    --outdir=03_Nature_review_checks/results
+
+Heisenberg: compare Julia TDVP vs Julia BUG2nd in the SAME run (both plotted)
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=Heisenberg --L=8 --steps=20 --dt=0.05 --periodic=true \
+    --Jx=1.0 --Jy=1.0 --Jz=1.0 --h=0.0 \
+    --sites=1,4,8 --state_jl=Neel --state_py=neel \
+    --chi_max=256 --trunc=1e-12 --trunc_mode=relative \
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP \
+    --jl_compare_bug=true --tag_jl=circuitTDVP --tag_jl_bug=circuitBUG \
     --outdir=03_Nature_review_checks/results
 
 Legacy Julia truncation mode (NOTE: TenPy stays relative; use only for Julia-side comparisons):
@@ -39,16 +109,31 @@ Ising:
   julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
     --circuit=Ising --L=8 --steps=20 --dt=0.05 --periodic=true \
     --J=1.0 --g=0.5 \
-    --sites=1,4,8 --chi_max=256 --trunc=1e-12
+    --sites=1,4,8 --chi_max=256 --trunc=1e-12 \
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP
+
+Ising: BUG2nd-only (Julia) against TenPy/Qiskit
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=Ising --L=8 --steps=20 --dt=0.05 --periodic=true \
+    --J=1.0 --g=0.5 \
+    --sites=1,4,8 --chi_max=256 --trunc=1e-12 \
+    --jl_local_mode=BUG --jl_longrange_mode=BUG --tag_jl=circuitBUG
 
 Brickwork examples:
   julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl --circuit=CZBrickwork --L=12 --steps=30 --sites=1,6,12 --chi_max=256 --trunc=1e-12
   julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl --circuit=RZZPiOver2Brickwork --L=12 --steps=30 --sites=1,6,12 --chi_max=256 --trunc=1e-12
 
+Brickwork: compare TDVP vs BUG2nd (Julia) and include both in plots
+  julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl \
+    --circuit=CZBrickwork --L=12 --steps=30 --sites=1,6,12 --chi_max=256 --trunc=1e-12 \
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --jl_compare_bug=true
+
 Tips:
 - `--trunc=0` disables discarded-weight truncation (still capped by `--chi_max`).
 - `--warmup=false` includes compilation cost in CircuitTDVP wallclock (usually not desired).
 - `--min_sweeps/--max_sweeps` affect TenPy variational MPO application convergence.
+- `--jl_tdvp_truncation=after_window` can reduce per-gate truncation artifacts (at higher peak χ).
+- `--jl_compare_bug=true` runs TDVP (tag `--tag_jl`) and BUG2nd (tag `--tag_jl_bug`) back-to-back and plots both.
 """
 
 # Minimal Yaqs subset without PythonCall/CircuitIngestion (avoids CondaPkg init)
@@ -72,6 +157,7 @@ include("../src/MPS.jl")
 include("../src/MPO.jl")
 include("../src/SimulationConfigs.jl")
 include("../src/Algorithms.jl")
+include("../src/BUG.jl")
 include("../src/Noise.jl")
 include("../src/StochasticProcess.jl")
 include("../src/Dissipation.jl")
@@ -84,6 +170,7 @@ using .MPSModule
 using .SimulationConfigs
 using .DigitalTJM
 using .CircuitLibrary
+using .BUGModule
 end # YaqsLite
 
 using .YaqsLite.GateLibrary
@@ -255,6 +342,7 @@ end
 function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max::Int, trunc::Float64, outdir::String, tag::String,
                             state_jl::String, local_mode::Symbol, longrange_mode::Symbol,
                             tdvp_truncation_timing::Symbol=:during,
+                            bug_truncation_granularity::Symbol=:after_sweep,
                             warmup::Bool=true)
     mkpath(outdir)
 
@@ -263,7 +351,9 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
     obs_list = [Observable("Z_$s", ZGate(), s) for s in sites]
 
     sim_params = TimeEvolutionConfig(obs_list, 1.0; dt=1.0, num_traj=1, sample_timesteps=true, max_bond_dim=chi_max, truncation_threshold=trunc)
-    alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode, tdvp_truncation_timing=tdvp_truncation_timing)
+    alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode,
+                             tdvp_truncation_timing=tdvp_truncation_timing,
+                             bug_truncation_granularity=bug_truncation_granularity)
 
     # Warm-up run to exclude compilation from timing.
     if warmup
@@ -325,13 +415,16 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
     return obs_path, chi_path, timing_path
 end
 
-function _python_plot!(; outdir::String, jl_tag::String, zip_tag::String, var_tag::String, exact_tag::String)
+function _python_plot!(; outdir::String, jl_tag::String, zip_tag::String, var_tag::String, exact_tag::String,
+                       jl_tag_bug::Union{Nothing,String}=nothing)
     # Plot with system python to avoid PythonCall/CondaPkg initialization issues.
     code = """
 import os, sys, csv
 
 outdir = sys.argv[1]
 jl_tag, zip_tag, var_tag, exact_tag = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+jl_bug = sys.argv[6] if len(sys.argv) > 6 else "none"
+jl_bug = None if (jl_bug is None or jl_bug.lower() in ("none","null","")) else jl_bug
 
 def read_csv(path):
     with open(path, newline="") as f:
@@ -383,6 +476,20 @@ t_zip = read_timing(zip_tag)
 t_var = read_timing(var_tag)
 t_ex = read_timing(exact_tag)
 
+# Optional second Julia curve (BUG2nd)
+obs_bug = None
+chi_bug = None
+t_bug = None
+if jl_bug is not None:
+    obs_path = os.path.join(outdir, f"{jl_bug}_obs.csv")
+    chi_path = os.path.join(outdir, f"{jl_bug}_chi.csv")
+    if os.path.exists(obs_path) and os.path.exists(chi_path):
+        _, _, obs_bug = read_obs(jl_bug)
+        _, _, chi_bug = read_chi(jl_bug)
+        t_bug = read_timing(jl_bug)
+    else:
+        jl_bug = None
+
 def col_index(cols, name):
     try:
         return cols.index(name)
@@ -393,6 +500,9 @@ chi_max_jl = [row[0] for row in chi_jl]  # only chi_max
 chi_max_zip = [row[col_index(chi_cols_zip, "chi_max")] for row in chi_zip]
 chi_max_var = [row[col_index(chi_cols_var, "chi_max")] for row in chi_var]
 chi_max_ex = [row[col_index(chi_cols_ex, "chi_max")] for row in chi_ex]
+chi_max_bug = None
+if jl_bug is not None:
+    chi_max_bug = [row[0] for row in chi_bug]
 
 nmin = min(len(step_jl), len(step_zip), len(step_var), len(step_ex))
 x = list(range(nmin))
@@ -400,10 +510,14 @@ chi_max_jl = chi_max_jl[:nmin]
 chi_max_zip = chi_max_zip[:nmin]
 chi_max_var = chi_max_var[:nmin]
 chi_max_ex = chi_max_ex[:nmin]
+if chi_max_bug is not None:
+    chi_max_bug = chi_max_bug[:nmin]
 obs_jl = obs_jl[:nmin]
 obs_zip = obs_zip[:nmin]
 obs_var = obs_var[:nmin]
 obs_ex = obs_ex[:nmin]
+if obs_bug is not None:
+    obs_bug = obs_bug[:nmin]
 
 try:
     import matplotlib.pyplot as plt
@@ -413,6 +527,8 @@ except Exception as e:
 # Bond dims
 plt.figure(figsize=(10,4))
 plt.plot(x, chi_max_jl, label=f"CircuitTDVP (Julia) [{fmt_s(t_jl)}]", linewidth=2)
+if chi_max_bug is not None:
+    plt.plot(x, chi_max_bug, label=f"BUG2nd (Julia) [{fmt_s(t_bug)}]", linewidth=2, linestyle="--")
 plt.plot(x, chi_max_zip, label=f"TenPy MPO zip-up [{fmt_s(t_zip)}]", linewidth=2, linestyle="--")
 plt.plot(x, chi_max_var, label=f"TenPy MPO variational [{fmt_s(t_var)}]", linewidth=2, linestyle=":")
 plt.plot(x, chi_max_ex, label=f"Qiskit exact (chi N/A) [{fmt_s(t_ex)}]", linewidth=2, linestyle="-.", color="k", alpha=0.6)
@@ -438,8 +554,11 @@ for i in range(nsites):
     y_zip = [r[i] for r in obs_zip]
     y_var = [r[i] for r in obs_var]
     y_ex = [r[i] for r in obs_ex]
+    y_bug = [r[i] for r in obs_bug] if obs_bug is not None else None
 
     ax.plot(x, y_jl, label="CircuitTDVP (Julia)", linewidth=2)
+    if y_bug is not None:
+        ax.plot(x, y_bug, label="BUG2nd (Julia)", linewidth=2, linestyle="--")
     ax.plot(x, y_zip, label="TenPy zip-up", linewidth=2, linestyle="--")
     ax.plot(x, y_var, label="TenPy variational", linewidth=2, linestyle=":")
     ax.plot(x, y_ex, label="Qiskit exact", linewidth=2, linestyle="-.", color="k", alpha=0.6)
@@ -447,16 +566,19 @@ for i in range(nsites):
     # Right y-axis: per-timepoint squared error vs exact
     ax2 = ax.twinx()
     se_jl = [(abs(a - b)) ** 2 for a, b in zip(y_jl, y_ex)]
+    se_bug = [(abs(a - b)) ** 2 for a, b in zip(y_bug, y_ex)] if y_bug is not None else None
     se_zip = [(abs(a - b)) ** 2 for a, b in zip(y_zip, y_ex)]
     se_var = [(abs(a - b)) ** 2 for a, b in zip(y_var, y_ex)]
     # Plot SE curves with distinct styles and keep CircuitTDVP on top (in case curves overlap).
     ax2.plot(x, se_zip, label="SE: TenPy zip-up", linewidth=1.3, linestyle="--", alpha=0.8, color="C1", zorder=2)
     ax2.plot(x, se_var, label="SE: TenPy variational", linewidth=1.3, linestyle=":", alpha=0.8, color="C2", zorder=3)
     ax2.plot(x, se_jl, label="SE: CircuitTDVP", linewidth=1.6, linestyle="-.", alpha=0.9, color="C0", zorder=4)
+    if se_bug is not None:
+        ax2.plot(x, se_bug, label="SE: BUG2nd", linewidth=1.6, linestyle="--", alpha=0.9, color="C3", zorder=5)
     ax2.set_ylabel("Squared error vs exact")
 
     # If SE spans many orders of magnitude, use log-scale.
-    all_se = [v for v in (se_jl + se_zip + se_var) if v > 0.0]
+    all_se = [v for v in (se_jl + se_zip + se_var + ([] if se_bug is None else se_bug)) if v > 0.0]
     if all_se:
         mn, mx = min(all_se), max(all_se)
         if mx / mn > 1.0e6:
@@ -479,7 +601,8 @@ print("Saved plots:")
 print(bond_plot)
 print(obs_plot)
 """
-    cmd = `python3 -c $code $outdir $jl_tag $zip_tag $var_tag $exact_tag`
+    jl_bug = jl_tag_bug === nothing ? "none" : jl_tag_bug
+    cmd = `python3 -c $code $outdir $jl_tag $zip_tag $var_tag $exact_tag $jl_bug`
     run(cmd)
 end
 
@@ -507,6 +630,15 @@ function main()
     end
     warmup = lowercase(get(kv, "warmup", "true")) in ("1", "true", "yes", "y")
 
+    jl_bug_trunc_raw = lowercase(get(kv, "jl_bug_truncation", "after_sweep"))  # after_sweep|after_site
+    jl_bug_trunc = if jl_bug_trunc_raw in ("after_sweep", "sweep", "after")
+        :after_sweep
+    elseif jl_bug_trunc_raw in ("after_site", "site", "per_site")
+        :after_site
+    else
+        error("Unknown --jl_bug_truncation=$jl_bug_trunc_raw. Use after_sweep|after_site.")
+    end
+
     base_outdir = get(kv, "outdir", "03_Nature_review_checks/results")
     outdir = _next_experiment_outdir(base_outdir)
 
@@ -515,6 +647,7 @@ function main()
     @printf("CircuitTDVP modes: local=%s longrange=%s (warmup=%s)\n",
             String(jl_local_mode), String(jl_longrange_mode), string(warmup))
     @printf("CircuitTDVP truncation timing (2-site TDVP): %s\n", String(jl_tdvp_truncation))
+    @printf("BUG truncation granularity (when truncating during): %s\n", String(jl_bug_trunc))
     if trunc_mode in ("absolute", "abs")
         @printf("Truncation (Julia): absolute_discarded_weight=%.3g  [legacy]\n", trunc)
         @printf("Note: TenPy uses relative discarded weight; for strict matching use --trunc_mode=relative.\n")
@@ -541,7 +674,22 @@ function main()
     jl_tag = get(kv, "tag_jl", "circuitTDVP")
     _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag,
                        state_jl=state_jl, local_mode=jl_local_mode, longrange_mode=jl_longrange_mode,
-                       tdvp_truncation_timing=jl_tdvp_truncation, warmup=warmup)
+                       tdvp_truncation_timing=jl_tdvp_truncation,
+                       bug_truncation_granularity=jl_bug_trunc,
+                       warmup=warmup)
+
+    # Optional: also run BUG2nd (Julia) and include in plots.
+    jl_compare_bug = lowercase(get(kv, "jl_compare_bug", "false")) in ("1", "true", "yes", "y")
+    jl_tag_bug = nothing
+    if jl_compare_bug
+        jl_tag_bug = get(kv, "tag_jl_bug", "circuitBUG")
+        @printf("[jl_compare_bug] running additional Julia BUG2nd (tag=%s)\n", jl_tag_bug)
+        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_bug,
+                           state_jl=state_jl, local_mode=:BUG, longrange_mode=:BUG,
+                           tdvp_truncation_timing=jl_tdvp_truncation,
+                           bug_truncation_granularity=jl_bug_trunc,
+                           warmup=false)
+    end
 
     # --- Run TenPy zip-up from gate-list ---
     py_tenpy = joinpath(@__DIR__, "tenpy_mpo_from_gatelist.py")
@@ -576,7 +724,8 @@ function main()
     ex_obs = joinpath(outdir, "$(py_ex_tag)_obs.csv")
     ex_chi = joinpath(outdir, "$(py_ex_tag)_chi.csv")
 
-    _python_plot!(; outdir=outdir, jl_tag=jl_tag, zip_tag=py_zip_tag, var_tag=py_var_tag, exact_tag=py_ex_tag)
+    _python_plot!(; outdir=outdir, jl_tag=jl_tag, jl_tag_bug=jl_tag_bug,
+                  zip_tag=py_zip_tag, var_tag=py_var_tag, exact_tag=py_ex_tag)
 end
 
 main()

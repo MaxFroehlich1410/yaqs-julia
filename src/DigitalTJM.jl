@@ -10,6 +10,7 @@ using ..NoiseModule
 using ..DissipationModule
 using ..SimulationConfigs
 using ..Algorithms
+using ..BUGModule
 using ..StochasticProcessModule
 import ..Timing
 using ..Timing: @t
@@ -67,16 +68,47 @@ end
 
 # --- Options ---
 
+"""
+    TJMOptions(; local_method=:TDVP,
+                long_range_method=:TDVP,
+                tdvp_truncation_timing=:during,
+                bug_truncation_granularity=:after_sweep)
+
+Algorithm options for `run_digital_tjm` (circuit simulation).
+
+## Methods
+
+- **`local_method` / `long_range_method`**:
+  - `:TDVP`: window evolution via `Algorithms.two_site_tdvp!` (circuit-directed sweep)
+  - `:BUG`: window evolution via `BUGModule.bug_second_order!`
+  - `:TEBD`: apply 2-qubit gate directly (plus SWAP network for long-range gates)
+
+## Truncation controls
+
+- **`tdvp_truncation_timing`** (`:during` | `:after_window`):
+  - Affects both `:TDVP` and `:BUG` window evolutions.
+  - `:during`: truncate within the evolution (default; cheaper, lower peak χ).
+  - `:after_window`: defer threshold-based truncation until after the whole window step
+    (can reduce truncation artifacts but may increase peak χ).
+
+- **`bug_truncation_granularity`** (`:after_sweep` | `:after_site`) (BUG-only):
+  - Only relevant when `tdvp_truncation_timing == :during`.
+  - `:after_sweep`: truncate once per BUG half-step sweep (default; cheapest).
+  - `:after_site`: truncate after every local BUG site update (tight bond control; more SVDs).
+"""
 struct TJMOptions
-    local_method::Symbol # :TEBD or :TDVP
-    long_range_method::Symbol # :TEBD or :TDVP
+    local_method::Symbol # :TEBD | :TDVP | :BUG
+    long_range_method::Symbol # :TEBD | :TDVP | :BUG
     tdvp_truncation_timing::Symbol # :during (default) | :after_window
+    bug_truncation_granularity::Symbol # :after_sweep (default) | :after_site
 end
 
 # Default constructor
 TJMOptions(; local_method::Symbol=:TDVP,
              long_range_method::Symbol=:TDVP,
-             tdvp_truncation_timing::Symbol=:during) = TJMOptions(local_method, long_range_method, tdvp_truncation_timing)
+             tdvp_truncation_timing::Symbol=:during,
+             bug_truncation_granularity::Symbol=:after_sweep) =
+    TJMOptions(local_method, long_range_method, tdvp_truncation_timing, bug_truncation_granularity)
 
 # --- Circuit Processing ---
 
@@ -335,7 +367,7 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
             # Nearest Neighbor: Direct
             @t :apply_local_gate_exact apply_local_gate_exact!(state, gate.op, s1, s2, sim_params)
         end
-    else # :TDVP
+    elseif method == :TDVP
         padding = 0
         win_start = max(1, s1 - padding)
         win_end = min(state.length, s2 + padding)
@@ -384,6 +416,43 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
     
         @t :window_writeback state.tensors[win_start:win_end] .= short_state.tensors
         state.orth_center = win_end
+    elseif method == :BUG
+        padding = 0
+        win_start = max(1, s1 - padding)
+        win_end = min(state.length, s2 + padding)
+        @t :shift_orth_center MPSModule.shift_orthogonality_center!(state, win_start)
+        win_len = win_end - win_start + 1
+        @t :window_slice begin
+            win_tensors = state.tensors[win_start:win_end]
+            win_phys = state.phys_dims[win_start:win_end]
+            short_state = MPS(win_len, win_tensors, win_phys, 1)
+        end
+        @t :construct_window_mpo short_mpo = construct_window_mpo(gate, win_start, win_end)
+
+        trunc_timing = alg_options.tdvp_truncation_timing
+        @assert trunc_timing === :during || trunc_timing === :after_window
+
+        # BUG uses a time step dt=1.0 to apply exp(-i * 1 * H_gate).
+        # For 2nd order BUG, we internally use dt/2 per sweep direction.
+        bug_cfg = TimeEvolutionConfig(Observable[], 1.0;
+                                      dt=1.0,
+                                      num_traj=1,
+                                      sample_timesteps=false,
+                                      max_bond_dim=sim_params.max_bond_dim,
+                                      truncation_threshold=sim_params.truncation_threshold,
+                                      order=2)
+
+        @t :bug_second_order BUGModule.bug_second_order!(short_state, short_mpo, bug_cfg;
+                                                        numiter_lanczos=25,
+                                                        truncation_timing=trunc_timing,
+                                                        truncation_granularity=alg_options.bug_truncation_granularity)
+
+        # Canonicalize for writeback: make window left-canonical with center at right boundary.
+        @t :window_canonicalize MPSModule.shift_orthogonality_center!(short_state, win_len)
+        @t :window_writeback state.tensors[win_start:win_end] .= short_state.tensors
+        state.orth_center = win_end
+    else
+        error("Unknown method $(method). Expected :TEBD, :TDVP, or :BUG.")
     end
 end
 
