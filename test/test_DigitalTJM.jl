@@ -166,4 +166,26 @@ using Yaqs.NoiseModule
         @test ov ≥ 1 - 1e-6
     end
 
+    @testset "ZIPUP method for long-range 2-qubit gate matches TEBD (up to tolerance)" begin
+        L = 3
+        circ = DigitalCircuit(L)
+        add_gate!(circ, HGate(), [1])
+        add_gate!(circ, CZGate(), [1, 3])  # long-range
+
+        sim_params = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=128, truncation_threshold=1e-12)
+        psi0 = MPS(L; state="zeros")
+
+        opts_tebd  = TJMOptions(local_method=:TEBD,  long_range_method=:TEBD)
+        opts_zipup = TJMOptions(local_method=:ZIPUP, long_range_method=:ZIPUP)
+
+        psi_tebd,  _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_tebd)
+        psi_zipup, _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_zipup)
+
+        @test check_if_valid_mps(psi_tebd)
+        @test check_if_valid_mps(psi_zipup)
+
+        ov = abs(MPSModule.scalar_product(psi_tebd, psi_zipup))
+        @test ov ≥ 1 - 1e-8
+    end
+
 end

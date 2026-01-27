@@ -10,7 +10,8 @@ Methods:
 - CircuitTDVP (Julia): DigitalTJM on a `CircuitLibrary.jl` circuit
 - CircuitTEBD (Julia): DigitalTJM forced to TEBD for local + long-range evolution
 - CircuitSRC  (Julia): DigitalTJM forced to SRC (randomized MPO×MPS application) for 2q / kq gates
-- TenPy MPO zip-up / variational (Python): driven by gate-list exported from Julia circuit
+- CircuitZIPUP (Julia): DigitalTJM forced to ZIPUP (MPO×MPS zip-up application) for 2q / kq gates
+- TenPy MPO variational (Python): driven by gate-list exported from Julia circuit
 - Qiskit exact (Python): driven by the same gate-list
 
 All parameters can be adjusted below (or via ARGS using --key=value).
@@ -24,7 +25,7 @@ Core / output:
   --tag_jl=circuitTDVP
   --tag_jl_tebd=circuitTEBD
   --tag_jl_src=circuitSRC
-  --tag_zipup=tenpy_zipup
+  --tag_jl_zipup=circuitZIPUP
   --tag_var=tenpy_variational
   --tag_exact=qiskit_exact
     Note: the exact (Qiskit) reference is automatically skipped for L > 12.
@@ -51,10 +52,11 @@ Truncation / bond cap:
     Note: TenPy uses relative discarded weight. Use `absolute` only for Julia-side legacy comparisons.
 
 Julia circuit evolution backend:
-  --jl_local_mode=TDVP       (TDVP | TEBD | BUG | SRC)
-  --jl_longrange_mode=TDVP   (TDVP | TEBD | BUG | SRC)
+  --jl_local_mode=TDVP       (TDVP | TEBD | BUG | ZIPUP | SRC)
+  --jl_longrange_mode=TDVP   (TDVP | TEBD | BUG | ZIPUP | SRC)
   --jl_run_tebd=true         (true | false)
   --jl_run_src=false         (true | false)
+  --jl_run_zipup=false       (true | false)
   --jl_tdvp_truncation=during (during | after_window)
     Applies to TDVP window evolution; BUG reuses the same setting.
   --jl_bug_truncation=after_sweep (after_sweep | after_site)
@@ -94,9 +96,10 @@ Base (Heisenberg):
     --chi_max=256 --trunc=1e-16 --trunc_mode=relative \
     --jl_local_mode=TDVP --jl_longrange_mode=TDVP --warmup=true \
     --jl_run_tebd=true --tag_jl_tebd=circuitTEBD \
+    --jl_run_zipup=false --tag_jl_zipup=circuitZIPUP \
     --jl_tdvp_truncation=after_window \
     --min_sweeps=2 --max_sweeps=10 \
-    --tag_jl=circuitTDVP --tag_zipup=tenpy_zipup --tag_var=tenpy_variational --tag_exact=qiskit_exact \
+    --tag_jl=circuitTDVP --tag_var=tenpy_variational --tag_exact=qiskit_exact \
     --outdir=03_Nature_review_checks/results
 
 Heisenberg: compare Julia TDVP vs Julia BUG2nd in the SAME run (both plotted)
@@ -126,8 +129,8 @@ Heisenberg: include SRC + BUG as additional Julia curves (plotted alongside TDVP
     --sites=1,4,8 --state_jl=Neel --state_py=neel \
     --chi_max=256 --trunc=1e-16 --trunc_mode=relative \
     --jl_tdvp_truncation=after_window \
-    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --jl_run_tebd=true --jl_run_src=true --jl_compare_bug=true \
-    --tag_jl=circuitTDVP --tag_jl_tebd=circuitTEBD --tag_jl_src=circuitSRC --tag_jl_bug=circuitBUG \
+    --jl_local_mode=TDVP --jl_longrange_mode=TDVP --jl_run_tebd=true --jl_run_src=true --jl_run_zipup=true --jl_compare_bug=true \
+    --tag_jl=circuitTDVP --tag_jl_tebd=circuitTEBD --tag_jl_src=circuitSRC --tag_jl_zipup=circuitZIPUP --tag_jl_bug=circuitBUG \
     --outdir=03_Nature_review_checks/results
 
 Legacy Julia truncation mode (NOTE: TenPy stays relative; use only for Julia-side comparisons):
@@ -167,6 +170,7 @@ Tips:
 - `--jl_tdvp_truncation=after_window` can reduce per-gate truncation artifacts (at higher peak χ).
 - `--jl_compare_bug=true` runs TDVP (tag `--tag_jl`) and BUG2nd (tag `--tag_jl_bug`) back-to-back and plots both.
 - `--jl_run_src=true` runs an additional Julia SRC curve (tag `--tag_jl_src`) and includes it in plots.
+- `--jl_run_zipup=true` runs an additional Julia ZIPUP curve (tag `--tag_jl_zipup`) and includes it in plots.
 - For large systems (L > 12), the script skips Qiskit exact automatically (runtime scales ~O(2^L) per gate).
 """
 
@@ -512,22 +516,26 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
     return obs_path, chi_path, timing_path
 end
 
-function _python_plot!(; outdir::String, jl_tag::String, zip_tag::String, var_tag::String, exact_tag::String,
+function _python_plot!(; outdir::String, jl_tag::String, var_tag::String, exact_tag::String,
                        jl_tag_bug::Union{Nothing,String}=nothing,
                        jl_tag_tebd::Union{Nothing,String}=nothing,
-                       jl_tag_src::Union{Nothing,String}=nothing)
+                       jl_tag_src::Union{Nothing,String}=nothing,
+                       jl_tag_zipup::Union{Nothing,String}=nothing)
     # Plot with system python to avoid PythonCall/CondaPkg initialization issues.
     code = """
 import os, sys, csv
 
 outdir = sys.argv[1]
-jl_tag, zip_tag, var_tag, exact_tag = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-jl_bug = sys.argv[6] if len(sys.argv) > 6 else "none"
-jl_tebd = sys.argv[7] if len(sys.argv) > 7 else "none"
-jl_src = sys.argv[8] if len(sys.argv) > 8 else "none"
+jl_tag, var_tag, exact_tag = sys.argv[2], sys.argv[3], sys.argv[4]
+jl_bug = sys.argv[5] if len(sys.argv) > 5 else "none"
+jl_tebd = sys.argv[6] if len(sys.argv) > 6 else "none"
+jl_src = sys.argv[7] if len(sys.argv) > 7 else "none"
+jl_zipup = sys.argv[8] if len(sys.argv) > 8 else "none"
 jl_bug = None if (jl_bug is None or jl_bug.lower() in ("none","null","")) else jl_bug
 jl_tebd = None if (jl_tebd is None or jl_tebd.lower() in ("none","null","")) else jl_tebd
 jl_src = None if (jl_src is None or jl_src.lower() in ("none","null","")) else jl_src
+jl_zipup = None if (jl_zipup is None or jl_zipup.lower() in ("none","null","")) else jl_zipup
+var_tag = None if (var_tag is None or str(var_tag).lower() in ("none","null","")) else var_tag
 exact_tag = None if (exact_tag is None or str(exact_tag).lower() in ("none","null","")) else exact_tag
 
 def read_csv(path):
@@ -566,22 +574,23 @@ def fmt_s(x):
     return f"{x:.2f} s"
 
 step_jl, obs_cols, obs_jl = read_obs(jl_tag)
-step_zip, _, obs_zip = read_obs(zip_tag)
-step_var, _, obs_var = read_obs(var_tag)
+step_var, obs_var = None, None
+if var_tag is not None:
+    step_var, _, obs_var = read_obs(var_tag)
 step_ex, obs_ex = None, None
 if exact_tag is not None:
     step_ex, _, obs_ex = read_obs(exact_tag)
 
 _, chi_cols_jl, chi_jl = read_chi(jl_tag)
-_, chi_cols_zip, chi_zip = read_chi(zip_tag)
-_, chi_cols_var, chi_var = read_chi(var_tag)
+chi_cols_var, chi_var = None, None
+if var_tag is not None:
+    _, chi_cols_var, chi_var = read_chi(var_tag)
 chi_cols_ex, chi_ex = None, None
 if exact_tag is not None:
     _, chi_cols_ex, chi_ex = read_chi(exact_tag)
 
 t_jl = read_timing(jl_tag)
-t_zip = read_timing(zip_tag)
-t_var = read_timing(var_tag)
+t_var = read_timing(var_tag) if var_tag is not None else None
 t_ex = read_timing(exact_tag) if exact_tag is not None else None
 
 # Optional second Julia curve (BUG2nd)
@@ -628,6 +637,21 @@ if jl_src is not None:
         t_src = read_timing(jl_src)
     else:
         jl_src = None
+
+# Optional ZIPUP curve (Julia)
+step_zipup = None
+obs_zipup = None
+chi_zipup = None
+t_zipup = None
+if jl_zipup is not None:
+    obs_path = os.path.join(outdir, f"{jl_zipup}_obs.csv")
+    chi_path = os.path.join(outdir, f"{jl_zipup}_chi.csv")
+    if os.path.exists(obs_path) and os.path.exists(chi_path):
+        step_zipup, _, obs_zipup = read_obs(jl_zipup)
+        _, _, chi_zipup = read_chi(jl_zipup)
+        t_zipup = read_timing(jl_zipup)
+    else:
+        jl_zipup = None
 def col_index(cols, name):
     try:
         return cols.index(name)
@@ -641,8 +665,12 @@ if chi_tebd is not None:
 chi_max_src = None
 if chi_src is not None:
     chi_max_src = [row[0] for row in chi_src]
-chi_max_zip = [row[col_index(chi_cols_zip, "chi_max")] for row in chi_zip]
-chi_max_var = [row[col_index(chi_cols_var, "chi_max")] for row in chi_var]
+chi_max_zipup = None
+if chi_zipup is not None:
+    chi_max_zipup = [row[0] for row in chi_zipup]
+chi_max_var = None
+if chi_var is not None:
+    chi_max_var = [row[col_index(chi_cols_var, "chi_max")] for row in chi_var]
 chi_max_ex = None
 if chi_ex is not None:
     chi_max_ex = [row[col_index(chi_cols_ex, "chi_max")] for row in chi_ex]
@@ -650,13 +678,17 @@ chi_max_bug = None
 if jl_bug is not None:
     chi_max_bug = [row[0] for row in chi_bug]
 
-lengths = [len(step_jl), len(step_zip), len(step_var)]
+lengths = [len(step_jl)]
+if step_var is not None:
+    lengths.append(len(step_var))
 if step_ex is not None:
     lengths.append(len(step_ex))
 if step_tebd is not None:
     lengths.append(len(step_tebd))
 if step_src is not None:
     lengths.append(len(step_src))
+if step_zipup is not None:
+    lengths.append(len(step_zipup))
 nmin = min(lengths)
 x = list(range(nmin))
 chi_max_jl = chi_max_jl[:nmin]
@@ -664,8 +696,10 @@ if chi_max_tebd is not None:
     chi_max_tebd = chi_max_tebd[:nmin]
 if chi_max_src is not None:
     chi_max_src = chi_max_src[:nmin]
-chi_max_zip = chi_max_zip[:nmin]
-chi_max_var = chi_max_var[:nmin]
+if chi_max_zipup is not None:
+    chi_max_zipup = chi_max_zipup[:nmin]
+if chi_max_var is not None:
+    chi_max_var = chi_max_var[:nmin]
 if chi_max_ex is not None:
     chi_max_ex = chi_max_ex[:nmin]
 if chi_max_bug is not None:
@@ -675,8 +709,10 @@ if obs_tebd is not None:
     obs_tebd = obs_tebd[:nmin]
 if obs_src is not None:
     obs_src = obs_src[:nmin]
-obs_zip = obs_zip[:nmin]
-obs_var = obs_var[:nmin]
+if obs_zipup is not None:
+    obs_zipup = obs_zipup[:nmin]
+if obs_var is not None:
+    obs_var = obs_var[:nmin]
 if obs_ex is not None:
     obs_ex = obs_ex[:nmin]
 if obs_bug is not None:
@@ -694,10 +730,12 @@ if chi_max_tebd is not None:
     plt.plot(x, chi_max_tebd, label=f"{jl_tebd} (Julia) [{fmt_s(t_tebd)}]", linewidth=2, linestyle="-.")
 if chi_max_src is not None:
     plt.plot(x, chi_max_src, label=f"{jl_src} (Julia) [{fmt_s(t_src)}]", linewidth=2, linestyle=":")
+if chi_max_zipup is not None:
+    plt.plot(x, chi_max_zipup, label=f"{jl_zipup} (Julia) [{fmt_s(t_zipup)}]", linewidth=2, linestyle=(0, (5, 2, 1, 2)))
 if chi_max_bug is not None:
     plt.plot(x, chi_max_bug, label=f"BUG2nd (Julia) [{fmt_s(t_bug)}]", linewidth=2, linestyle="--")
-plt.plot(x, chi_max_zip, label=f"TenPy MPO zip-up [{fmt_s(t_zip)}]", linewidth=2, linestyle="--")
-plt.plot(x, chi_max_var, label=f"TenPy MPO variational [{fmt_s(t_var)}]", linewidth=2, linestyle=":")
+if chi_max_var is not None:
+    plt.plot(x, chi_max_var, label=f"TenPy MPO variational [{fmt_s(t_var)}]", linewidth=2, linestyle=":")
 if chi_max_ex is not None:
     plt.plot(x, chi_max_ex, label=f"Qiskit exact (chi N/A) [{fmt_s(t_ex)}]", linewidth=2, linestyle="-.", color="k", alpha=0.6)
 plt.xlabel("Layer / step")
@@ -721,8 +759,8 @@ for i in range(nsites):
     y_jl = [r[i] for r in obs_jl]
     y_tebd = [r[i] for r in obs_tebd] if obs_tebd is not None else None
     y_src = [r[i] for r in obs_src] if obs_src is not None else None
-    y_zip = [r[i] for r in obs_zip]
-    y_var = [r[i] for r in obs_var]
+    y_zipup = [r[i] for r in obs_zipup] if obs_zipup is not None else None
+    y_var = [r[i] for r in obs_var] if obs_var is not None else None
     y_ex = [r[i] for r in obs_ex] if obs_ex is not None else None
     y_bug = [r[i] for r in obs_bug] if obs_bug is not None else None
 
@@ -731,10 +769,12 @@ for i in range(nsites):
         ax.plot(x, y_tebd, label=f"{jl_tebd} (Julia)", linewidth=2, linestyle="-.")
     if y_src is not None:
         ax.plot(x, y_src, label=f"{jl_src} (Julia)", linewidth=2, linestyle=":")
+    if y_zipup is not None:
+        ax.plot(x, y_zipup, label=f"{jl_zipup} (Julia)", linewidth=2, linestyle=(0, (5, 2, 1, 2)))
     if y_bug is not None:
         ax.plot(x, y_bug, label="BUG2nd (Julia)", linewidth=2, linestyle="--")
-    ax.plot(x, y_zip, label="TenPy zip-up", linewidth=2, linestyle="--")
-    ax.plot(x, y_var, label="TenPy variational", linewidth=2, linestyle=":")
+    if y_var is not None:
+        ax.plot(x, y_var, label="TenPy variational", linewidth=2, linestyle=":")
     if y_ex is not None:
         ax.plot(x, y_ex, label="Qiskit exact", linewidth=2, linestyle="-.", color="k", alpha=0.6)
 
@@ -745,27 +785,31 @@ for i in range(nsites):
         se_jl = [(abs(a - b)) ** 2 for a, b in zip(y_jl, y_ex)]
         se_tebd = [(abs(a - b)) ** 2 for a, b in zip(y_tebd, y_ex)] if y_tebd is not None else None
         se_src = [(abs(a - b)) ** 2 for a, b in zip(y_src, y_ex)] if y_src is not None else None
+        se_zipup = [(abs(a - b)) ** 2 for a, b in zip(y_zipup, y_ex)] if y_zipup is not None else None
         se_bug = [(abs(a - b)) ** 2 for a, b in zip(y_bug, y_ex)] if y_bug is not None else None
-        se_zip = [(abs(a - b)) ** 2 for a, b in zip(y_zip, y_ex)]
-        se_var = [(abs(a - b)) ** 2 for a, b in zip(y_var, y_ex)]
+        se_var = [(abs(a - b)) ** 2 for a, b in zip(y_var, y_ex)] if y_var is not None else None
         # Plot SE curves with distinct styles and keep CircuitTDVP on top (in case curves overlap).
-        ax2.plot(x, se_zip, label="SE: TenPy zip-up", linewidth=1.3, linestyle="--", alpha=0.8, color="C1", zorder=2)
-        ax2.plot(x, se_var, label="SE: TenPy variational", linewidth=1.3, linestyle=":", alpha=0.8, color="C2", zorder=3)
+        if se_var is not None:
+            ax2.plot(x, se_var, label="SE: TenPy variational", linewidth=1.3, linestyle=":", alpha=0.8, color="C2", zorder=3)
         ax2.plot(x, se_jl, label=f"SE: {jl_tag}", linewidth=1.6, linestyle="-.", alpha=0.9, color="C0", zorder=4)
         if se_tebd is not None:
             ax2.plot(x, se_tebd, label=f"SE: {jl_tebd}", linewidth=1.6, linestyle=":", alpha=0.9, color="C4", zorder=4)
         if se_src is not None:
             ax2.plot(x, se_src, label=f"SE: {jl_src}", linewidth=1.6, linestyle="-", alpha=0.9, color="C5", zorder=4)
+        if se_zipup is not None:
+            ax2.plot(x, se_zipup, label=f"SE: {jl_zipup}", linewidth=1.6, linestyle="-.", alpha=0.9, color="C6", zorder=4)
         if se_bug is not None:
             ax2.plot(x, se_bug, label="SE: BUG2nd", linewidth=1.6, linestyle="--", alpha=0.9, color="C3", zorder=5)
         ax2.set_ylabel("Squared error vs exact")
 
         # If SE spans many orders of magnitude, use log-scale.
-        all_se = se_jl + se_zip + se_var
+        all_se = se_jl + (se_var if se_var is not None else [])
         if se_tebd is not None:
             all_se = all_se + se_tebd
         if se_src is not None:
             all_se = all_se + se_src
+        if se_zipup is not None:
+            all_se = all_se + se_zipup
         if se_bug is not None:
             all_se = all_se + se_bug
         all_se = [v for v in all_se if v > 0.0]
@@ -797,7 +841,8 @@ print(obs_plot)
     jl_bug = jl_tag_bug === nothing ? "none" : jl_tag_bug
     jl_tebd = jl_tag_tebd === nothing ? "none" : jl_tag_tebd
     jl_src = jl_tag_src === nothing ? "none" : jl_tag_src
-    cmd = `python3 -c $code $outdir $jl_tag $zip_tag $var_tag $exact_tag $jl_bug $jl_tebd $jl_src`
+    jl_zipup = jl_tag_zipup === nothing ? "none" : jl_tag_zipup
+    cmd = `python3 -c $code $outdir $jl_tag $var_tag $exact_tag $jl_bug $jl_tebd $jl_src $jl_zipup`
     run(cmd)
 end
 
@@ -837,7 +882,7 @@ function main()
     base_outdir = get(kv, "outdir", "03_Nature_review_checks/results")
     outdir = _next_experiment_outdir(base_outdir)
 
-    @printf("Running 4-way comparison (CircuitLibrary → gatelist): circuit=%s L=%d chi_max=%d sites=%s\n",
+    @printf("Running comparison (CircuitLibrary → gatelist): circuit=%s L=%d chi_max=%d sites=%s\n",
             circuit, L, chi_max, join(string.(sites), ","))
     @printf("CircuitTDVP modes: local=%s longrange=%s (warmup=%s)\n",
             String(jl_local_mode), String(jl_longrange_mode), string(warmup))
@@ -921,6 +966,19 @@ function main()
                            warmup=warmup)
     end
 
+    # Additional: run ZIPUP (Julia) and include in plots.
+    jl_run_zipup = lowercase(get(kv, "jl_run_zipup", "false")) in ("1", "true", "yes", "y")
+    jl_tag_zipup = nothing
+    if jl_run_zipup
+        jl_tag_zipup = get(kv, "tag_jl_zipup", "circuitZIPUP")
+        @printf("[jl_zipup] running additional Julia ZIPUP (tag=%s)\n", jl_tag_zipup)
+        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_zipup,
+                           state_jl=state_jl, local_mode=:ZIPUP, longrange_mode=:ZIPUP,
+                           tdvp_truncation_timing=jl_tdvp_truncation,
+                           bug_truncation_granularity=jl_bug_trunc,
+                           warmup=warmup)
+    end
+
     # Optional: also run BUG2nd (Julia) and include in plots.
     jl_compare_bug = lowercase(get(kv, "jl_compare_bug", "false")) in ("1", "true", "yes", "y")
     jl_tag_bug = nothing
@@ -934,26 +992,27 @@ function main()
                            warmup=false)
     end
 
-    # --- Run TenPy zip-up from gate-list ---
+    # --- Run TenPy variational from gate-list (optional) ---
     py_tenpy = joinpath(@__DIR__, "tenpy_mpo_from_gatelist.py")
-    py_zip_tag = get(kv, "tag_zipup", "tenpy_zipup")
-    cmd_zip = `python3 $py_tenpy --gatelist=$gatelist_path --method=zip_up --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_zip_tag`
-    @printf("-> %s\n", string(cmd_zip))
-    run(cmd_zip)
-
-    # --- Run TenPy variational from gate-list ---
     py_var_tag = get(kv, "tag_var", "tenpy_variational")
-    # Variational MPO application needs enough sweeps to converge when truncation is effectively off.
-    min_sweeps = parse(Int, get(kv, "min_sweeps", "2"))
-    max_sweeps = parse(Int, get(kv, "max_sweeps", "10"))
-    cmd_var = `python3 $py_tenpy --gatelist=$gatelist_path --method=variational --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps --max-trunc-err=none`
-    @printf("-> %s\n", string(cmd_var))
-    run(cmd_var)
+    if lowercase(py_var_tag) in ("none", "null", "")
+        @printf("[tenpy_variational] skipping (tag_var=%s)\n", py_var_tag)
+    else
+        # Variational MPO application needs enough sweeps to converge when truncation is effectively off.
+        min_sweeps = parse(Int, get(kv, "min_sweeps", "2"))
+        max_sweeps = parse(Int, get(kv, "max_sweeps", "10"))
+        cmd_var = `python3 $py_tenpy --gatelist=$gatelist_path --method=variational --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps --max-trunc-err=none`
+        @printf("-> %s\n", string(cmd_var))
+        run(cmd_var)
+    end
 
-    # --- Run Qiskit exact (statevector) from gate-list ---
+    # --- Run Qiskit exact (statevector) from gate-list (optional) ---
     py_ex = joinpath(@__DIR__, "qiskit_exact_from_gatelist.py")
     py_ex_tag = get(kv, "tag_exact", "qiskit_exact")
-    if L > 12
+    if lowercase(py_ex_tag) in ("none", "null", "")
+        @printf("[qiskit_exact] skipping (tag_exact=%s)\n", py_ex_tag)
+        py_ex_tag = "none"
+    elseif L > 12
         @printf("[qiskit_exact] skipping exact reference for L=%d (>12)\n", L)
         py_ex_tag = "none"
     else
@@ -965,15 +1024,13 @@ function main()
     # --- Load results ---
     jl_obs = joinpath(outdir, "$(jl_tag)_obs.csv")
     jl_chi = joinpath(outdir, "$(jl_tag)_chi.csv")
-    zip_obs = joinpath(outdir, "$(py_zip_tag)_obs.csv")
-    zip_chi = joinpath(outdir, "$(py_zip_tag)_chi.csv")
     var_obs = joinpath(outdir, "$(py_var_tag)_obs.csv")
     var_chi = joinpath(outdir, "$(py_var_tag)_chi.csv")
     ex_obs = joinpath(outdir, "$(py_ex_tag)_obs.csv")
     ex_chi = joinpath(outdir, "$(py_ex_tag)_chi.csv")
 
-    _python_plot!(; outdir=outdir, jl_tag=jl_tag, jl_tag_bug=jl_tag_bug, jl_tag_tebd=jl_tag_tebd, jl_tag_src=jl_tag_src,
-                  zip_tag=py_zip_tag, var_tag=py_var_tag, exact_tag=py_ex_tag)
+    _python_plot!(; outdir=outdir, jl_tag=jl_tag, jl_tag_bug=jl_tag_bug, jl_tag_tebd=jl_tag_tebd, jl_tag_src=jl_tag_src, jl_tag_zipup=jl_tag_zipup,
+                  var_tag=py_var_tag, exact_tag=py_ex_tag)
 end
 
 main()
