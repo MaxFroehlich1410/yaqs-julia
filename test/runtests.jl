@@ -8,6 +8,8 @@ using Yaqs
         "test_Decompositions.jl",
         "test_MPS.jl",
         "test_MPO.jl",
+        "test_ZipUp.jl",
+        "test_VariationalApplyMPO.jl",
         "test_SimulationConfigs.jl",
         "test_Algorithms.jl",
         "test_BUG.jl",

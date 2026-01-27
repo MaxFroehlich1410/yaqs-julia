@@ -8,6 +8,8 @@ using ..GateLibrary
 
 export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_general_hamiltonian
 export orthogonalize!, truncate!
+export apply_zipup!
+export apply_variational!, mpo_from_two_qubit_gate_matrix
 
 abstract type AbstractTensorNetwork end
 
@@ -430,6 +432,490 @@ function contract_mpo_mps(w::MPO, psi::MPS)
     # Resulting MPS usually has high bond dimension.
     # Center is undefined/mixed (0).
     return MPS(L, new_tensors, psi.phys_dims, 0)
+end
+
+# --- Application (MPO x MPS) with Zip-up compression ---
+
+@inline function _zipup_keep(S::AbstractVector{<:Real}, chi_max::Int, svd_min::Real)
+    # TenPy's truncation supports multiple constraints. For zip-up we primarily need:
+    # - keep at most `chi_max`
+    # - drop singular values below `svd_min` (absolute cutoff)
+    k = min(length(S), chi_max)
+    if svd_min > 0
+        # Find the last index with S[idx] >= svd_min
+        last_good = 0
+        @inbounds for i in 1:k
+            if S[i] >= svd_min
+                last_good = i
+            end
+        end
+        k = max(last_good, 1)
+    end
+    return k
+end
+
+"""
+    apply_zipup!(psi::MPS, W::MPO; chi_max, svd_min=0.0, m_temp=2, trunc_weight=1.0) -> trunc_err
+
+Apply an MPO `W` to an MPS `psi` **in-place** using the *zip-up* method
+(Stoudenmire & White, 2010; TenPy `MPO.apply_zipup`).
+
+This performs a left-to-right sweep, contracting each site tensor with the MPO and
+compressing immediately via an SVD. Intermediate SVDs use **relaxed truncation**
+parameters:
+
+- `chi_max_zip = m_temp * chi_max`
+- `svd_min_zip = trunc_weight * svd_min`
+
+The resulting MPS is (approximately) left-canonical with `psi.orth_center = psi.length`.
+
+Notes:
+- Only **finite** boundary conditions are supported (requires `size(W.tensors[1],1)==1`
+  and `size(W.tensors[end],4)==1`).
+- This implementation is optimized for the repo’s tensor layouts:
+  - MPS: `(χL, d, χR)`
+  - MPO: `(Dl, d_out, d_in, Dr)`
+
+Returns `trunc_err` as the discarded weight `sum_{i>χ} s_i^2` accumulated across SVDs.
+"""
+function apply_zipup!(psi::MPSModule.MPS{T},
+                      W::MPO{T};
+                      chi_max::Int,
+                      svd_min::Real=0.0,
+                      m_temp::Int=2,
+                      trunc_weight::Real=1.0) where {T<:Number}
+    @assert psi.length == W.length "MPS and MPO lengths must match"
+    L = psi.length
+    @assert L >= 1
+    @assert size(W.tensors[1], 1) == 1 "apply_zipup! currently supports finite MPOs (left boundary Dl=1)."
+    @assert size(W.tensors[end], 4) == 1 "apply_zipup! currently supports finite MPOs (right boundary Dr=1)."
+
+    chi_relax = max(1, m_temp * chi_max)
+    svd_min_relax = trunc_weight * svd_min
+
+    trunc_err = 0.0
+
+    if L == 1
+        A = psi.tensors[1] # (1, d_in, 1)
+        W1 = W.tensors[1]  # (1, d_out, d_in, 1)
+        d_out = size(W1, 2)
+        @views W1s = W1[1, :, :, 1]  # (d_out, d_in)
+        @views A1s = A[1, :, 1]      # (d_in,)
+        @tensor T1[pout] := W1s[pout, pin] * A1s[pin]
+        psi.tensors[1] = reshape(Array(T1), 1, d_out, 1)
+        psi.orth_center = 1
+        return trunc_err
+    end
+
+    # Carry tensor: (χ_prev, Dl, χL_site) with Dl = MPO left bond of the current site
+    # Initialized after the first SVD.
+    carry = Array{T,3}(undef, 0, 0, 0)
+
+    for i in 1:L
+        A = psi.tensors[i] # (χL, d_in, χR)
+        Wi = W.tensors[i]  # (Dl, d_out, d_in, Dr)
+
+        Dl = size(Wi, 1)
+        d_out = size(Wi, 2)
+        d_in = size(Wi, 3)
+        Dr = size(Wi, 4)
+        @assert size(A, 2) == d_in "MPO/MPS physical dimensions mismatch at site $i"
+
+        if i == 1
+            # T4[χL(=1), pout, Dr, χR]
+            @views Wis = Wi[1, :, :, :]  # (d_out, d_in, Dr)
+            @tensor T4[aL, pout, rW, aR] := A[aL, pin, aR] * Wis[pout, pin, rW]
+            Mat = reshape(Array(T4), size(A, 1) * d_out, Dr * size(A, 3))
+
+            F = svd(Mat)
+            keep = _zipup_keep(F.S, chi_relax, svd_min_relax)
+            trunc_err += sum(abs2, @view(F.S[(keep + 1):end]))
+
+            U = @view(F.U[:, 1:keep])
+            S = @view(F.S[1:keep])
+            Vt = @view(F.Vt[1:keep, :])
+
+            psi.tensors[i] = reshape(Array(U), size(A, 1), d_out, keep)
+
+            # carry := (diag(S) * Vt) reshaped to (keep, Dr, χR)
+            Vt_full = Array(Vt)  # keep × (Dr*χR)
+            carry = reshape(Vt_full, keep, Dr, size(A, 3))
+            @views carry .*= reshape(S, keep, 1, 1)
+        elseif i == L
+            # Last site: contract carry with current tensors, right boundary Dr=1 and χR=1.
+            @assert Dr == 1
+            @assert size(A, 3) == 1
+
+            χprev = size(carry, 1)
+            @views Wis = Wi[:, :, :, 1]   # (Dl, d_out, d_in)
+            @views As = A[:, :, 1]        # (χL, d_in)
+            @tensor T2[cp, pout] := carry[cp, lW, aL] * As[aL, pin] * Wis[lW, pout, pin]
+            Mat = reshape(Array(T2), χprev * d_out, 1)
+
+            F = svd(Mat)
+            keep = _zipup_keep(F.S, 1, svd_min_relax)  # boundary enforces keep=1
+            trunc_err += sum(abs2, @view(F.S[(keep + 1):end]))
+
+            U = @view(F.U[:, 1:keep])
+            psi.tensors[i] = reshape(Array(U), χprev, d_out, 1)
+        else
+            χprev = size(carry, 1)
+            @tensor T4[cp, pout, rW, aR] := carry[cp, lW, aL] * A[aL, pin, aR] * Wi[lW, pout, pin, rW]
+            Mat = reshape(Array(T4), χprev * d_out, Dr * size(A, 3))
+
+            F = svd(Mat)
+            keep = _zipup_keep(F.S, chi_relax, svd_min_relax)
+            trunc_err += sum(abs2, @view(F.S[(keep + 1):end]))
+
+            U = @view(F.U[:, 1:keep])
+            S = @view(F.S[1:keep])
+            Vt = @view(F.Vt[1:keep, :])
+
+            psi.tensors[i] = reshape(Array(U), χprev, d_out, keep)
+
+            Vt_full = Array(Vt)
+            carry = reshape(Vt_full, keep, Dr, size(A, 3))
+            @views carry .*= reshape(S, keep, 1, 1)
+        end
+    end
+
+    psi.orth_center = psi.length
+    return trunc_err
+end
+
+# --- Application (MPO x MPS) with variational compression (TenPy-style) ---
+
+@inline function _variational_keep(S::AbstractVector{<:Real}, chi_max::Int, trunc::Real, svd_min::Real)
+    # Match the repo-wide convention: `trunc` is a relative discarded-weight tolerance (>=0).
+    # We emulate the logic used in `Decompositions.two_site_svd` / `DigitalTJM.apply_local_gate_exact!`:
+    # accumulate from the smallest singular values, and once the cumulative discarded weight
+    # would exceed `trunc`, keep the current value (hence the actual discarded weight stays < trunc).
+    kχ = min(length(S), chi_max)
+    # absolute cutoff (drop tiny/zero singular values)
+    if svd_min > 0
+        last_good = 0
+        @inbounds for i in 1:kχ
+            if S[i] >= svd_min
+                last_good = i
+            end
+        end
+        kχ = max(last_good, 1)
+    end
+
+    if trunc <= 0
+        return kχ
+    end
+
+    total_sq = sum(abs2, S)
+    discarded_sq = 0.0
+    keep_dim = kχ
+    min_keep = 2
+    @inbounds for k in length(S):-1:1
+        discarded_sq += S[k]^2
+        frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+        if frac >= trunc
+            keep_dim = max(k, min_keep)
+            break
+        end
+    end
+    keep_dim = min(keep_dim, kχ)
+    keep_dim = max(keep_dim, 1)
+    return keep_dim
+end
+
+@inline function _theta_overlap_diff(theta_new::AbstractArray{T,4}, theta_old::AbstractArray{T,4}) where {T<:Number}
+    # Return 1 - |<new|old>|/(||new||*||old||), in [0, 1] (up to roundoff)
+    num = dot(vec(theta_new), vec(theta_old))  # dot() conjugates the first argument for complex arrays
+    den = norm(vec(theta_new)) * norm(vec(theta_old))
+    if den == 0
+        return 0.0
+    end
+    return 1.0 - abs(num) / den
+end
+
+@inline function _update_left_env(Lenv::Array{T,3},
+                                 Abra::Array{T,3},
+                                 Wi::Array{T,4},
+                                 Aket::Array{T,3}) where {T<:Number}
+    # Lenv[aL, wL, bL] -> Lnew[aR, wR, bR]
+    @tensor Lnew[aR, wR, bR] := Lenv[aL, wL, bL] * conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR]
+    return Array(Lnew)
+end
+
+@inline function _update_right_env(Rnext::Array{T,3},
+                                  Abra::Array{T,3},
+                                  Wi::Array{T,4},
+                                  Aket::Array{T,3}) where {T<:Number}
+    # Rnext[aR, wR, bR] -> Rcur[aL, wL, bL]
+    @tensor Rcur[aL, wL, bL] := conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR] * Rnext[aR, wR, bR]
+    return Array(Rcur)
+end
+
+function _build_right_envs(psi::MPSModule.MPS{T}, W::MPO{T}, psi0::MPSModule.MPS{T}) where {T<:Number}
+    L = psi.length
+    Renv = Vector{Array{T,3}}(undef, L + 1)
+    Renv[L + 1] = fill(one(T), 1, 1, 1)
+    for i in L:-1:1
+        Renv[i] = _update_right_env(Renv[i + 1], psi.tensors[i], W.tensors[i], psi0.tensors[i])
+    end
+    return Renv
+end
+
+function _build_left_envs(psi::MPSModule.MPS{T}, W::MPO{T}, psi0::MPSModule.MPS{T}) where {T<:Number}
+    L = psi.length
+    Lenv = Vector{Array{T,3}}(undef, L + 1)
+    Lenv[1] = fill(one(T), 1, 1, 1)
+    for i in 1:L
+        Lenv[i + 1] = _update_left_env(Lenv[i], psi.tensors[i], W.tensors[i], psi0.tensors[i])
+    end
+    return Lenv
+end
+
+"""
+    apply_variational!(psi::MPS, W::MPO; chi_max, trunc=0.0, svd_min=eps(), min_sweeps=1, max_sweeps=4, tol_theta_diff=1e-12) -> (trunc_err, sweeps, last_theta_diff)
+
+Apply an MPO `W` to an MPS `psi` **in-place** using a TenPy-style *variational MPO application*.
+
+This finds an MPS `phi` (stored back into `psi`) which best approximates `W|psi0⟩`, where `psi0`
+is the input state (captured internally once), by alternating least-squares sweeps with two-site
+updates and SVD-based truncation.
+
+Tensor layouts (repo convention):
+- MPS: `(χL, d, χR)`
+- MPO: `(Dl, d_out, d_in, Dr)`
+
+Truncation:
+- `chi_max`: hard cap on MPS bond dimension
+- `trunc`: relative discarded-weight tolerance (>=0), matching the rest of this repo’s conventions
+- `svd_min`: absolute cutoff for singular values (drop exact zeros / tiny values)
+"""
+function apply_variational!(psi::MPSModule.MPS{T},
+                            W::MPO{T};
+                            chi_max::Int,
+                            trunc::Real=0.0,
+                            svd_min::Real=eps(Float64),
+                            min_sweeps::Int=1,
+                            max_sweeps::Int=4,
+                            tol_theta_diff::Real=1.0e-12) where {T<:Number}
+    @assert psi.length == W.length "MPS and MPO lengths must match"
+    @assert psi.length >= 1
+    @assert trunc >= 0.0
+
+    L = psi.length
+    # Capture input state (ket) once, as in TenPy.
+    psi0 = deepcopy(psi)
+
+    # Handle L=1 directly
+    if L == 1
+        A = psi.tensors[1]
+        W1 = W.tensors[1]
+        d_out = size(W1, 2)
+        @tensor T1[pout] := W1[1, pout, pin, 1] * A[1, pin, 1]
+        psi.tensors[1] = reshape(Array(T1), 1, d_out, 1)
+        psi.orth_center = 1
+        MPSModule.normalize!(psi)
+        return (0.0, 0, 0.0)
+    end
+
+    trunc_err_total = 0.0
+    last_max_diff = Inf
+    sweeps_done = 0
+
+    for sweep in 1:max_sweeps
+        sweeps_done = sweep
+        max_diff = 0.0
+
+        # --- Left-to-right sweep ---
+        Renv = _build_right_envs(psi, W, psi0)             # environments for cuts i..L
+        Lenv = fill(one(T), 1, 1, 1)                       # cut before site 1
+
+        for i in 1:(L - 1)
+            # old theta from current bra (for convergence diagnostics)
+            A0b = psi.tensors[i]
+            A1b = psi.tensors[i + 1]
+            @tensor theta_old[aL, p0, p1, aR] := A0b[aL, p0, k] * A1b[k, p1, aR]
+            theta_old_arr = Array(theta_old)
+
+            Wi0 = W.tensors[i]
+            Wi1 = W.tensors[i + 1]
+            K0 = psi0.tensors[i]
+            K1 = psi0.tensors[i + 1]
+            Rcut = Renv[i + 2]
+
+            @tensor theta[aL, p0o, p1o, aR2] :=
+                Lenv[aL, wL, bL] *
+                Wi0[wL, p0o, p0i, wM] * K0[bL, p0i, bM] *
+                Wi1[wM, p1o, p1i, wR] * K1[bM, p1i, bR] *
+                Rcut[aR2, wR, bR]
+            theta_arr = Array(theta)
+
+            χL = size(theta_arr, 1)
+            d0 = size(theta_arr, 2)
+            d1 = size(theta_arr, 3)
+            χR = size(theta_arr, 4)
+            M = reshape(theta_arr, χL * d0, d1 * χR)
+            F = svd(M)
+            keep = _variational_keep(F.S, chi_max, trunc, svd_min)
+            trunc_err_total += sum(abs2, @view(F.S[(keep + 1):end]))
+
+            U = @view(F.U[:, 1:keep])
+            S = @view(F.S[1:keep])
+            Vt = @view(F.Vt[1:keep, :])
+
+            psi.tensors[i] = reshape(Array(U), χL, d0, keep)
+            psi.tensors[i + 1] = reshape(Array(Diagonal(S) * Array(Vt)), keep, d1, χR)
+            psi.orth_center = i + 1
+
+            @tensor theta_new[aL, p0, p1, aR] := psi.tensors[i][aL, p0, k] * psi.tensors[i + 1][k, p1, aR]
+            max_diff = max(max_diff, _theta_overlap_diff(Array(theta_new), theta_old_arr))
+
+            # update Lenv to cut before site i+1 using UPDATED bra tensor at site i
+            Lenv = _update_left_env(Lenv, psi.tensors[i], Wi0, K0)
+        end
+
+        # --- Right-to-left sweep ---
+        Lenvs = _build_left_envs(psi, W, psi0)             # environments for cuts 1..i-1
+        Rcut = fill(one(T), 1, 1, 1)                       # cut after site L
+
+        for i in (L - 1):-1:1
+            # old theta from current bra
+            A0b = psi.tensors[i]
+            A1b = psi.tensors[i + 1]
+            @tensor theta_old[aL, p0, p1, aR] := A0b[aL, p0, k] * A1b[k, p1, aR]
+            theta_old_arr = Array(theta_old)
+
+            Wi0 = W.tensors[i]
+            Wi1 = W.tensors[i + 1]
+            K0 = psi0.tensors[i]
+            K1 = psi0.tensors[i + 1]
+            Lcut = Lenvs[i]
+
+            @tensor theta[aL, p0o, p1o, aR2] :=
+                Lcut[aL, wL, bL] *
+                Wi0[wL, p0o, p0i, wM] * K0[bL, p0i, bM] *
+                Wi1[wM, p1o, p1i, wR] * K1[bM, p1i, bR] *
+                Rcut[aR2, wR, bR]
+            theta_arr = Array(theta)
+
+            χL = size(theta_arr, 1)
+            d0 = size(theta_arr, 2)
+            d1 = size(theta_arr, 3)
+            χR = size(theta_arr, 4)
+            M = reshape(theta_arr, χL * d0, d1 * χR)
+            F = svd(M)
+            keep = _variational_keep(F.S, chi_max, trunc, svd_min)
+            trunc_err_total += sum(abs2, @view(F.S[(keep + 1):end]))
+
+            U = @view(F.U[:, 1:keep])
+            S = @view(F.S[1:keep])
+            Vt = @view(F.Vt[1:keep, :])
+
+            psi.tensors[i] = reshape(Array(U), χL, d0, keep)
+            psi.tensors[i + 1] = reshape(Array(Diagonal(S) * Array(Vt)), keep, d1, χR)
+            psi.orth_center = i
+
+            @tensor theta_new[aL, p0, p1, aR] := psi.tensors[i][aL, p0, k] * psi.tensors[i + 1][k, p1, aR]
+            max_diff = max(max_diff, _theta_overlap_diff(Array(theta_new), theta_old_arr))
+
+            # update Rcut to include UPDATED bra tensor at site i+1 for next step (moving left)
+            Rcut = _update_right_env(Rcut, psi.tensors[i + 1], Wi1, K1)
+        end
+
+        last_max_diff = max_diff
+        if sweep >= min_sweeps && max_diff <= tol_theta_diff
+            break
+        end
+    end
+
+    MPSModule.normalize!(psi)
+    return (trunc_err_total, sweeps_done, last_max_diff)
+end
+
+"""
+    mpo_from_two_qubit_gate_matrix(U::AbstractMatrix{ComplexF64}, i::Int, j::Int, L::Int; d::Int=2) -> MPO
+
+Build an MPO (length `L`) for a 2-site operator `U` acting on sites `i` and `j` (1-based),
+identity elsewhere, using an operator-Schmidt (SVD) decomposition.
+
+If `i > j`, the qubit order in `U` is swapped by conjugating with SWAP such that the returned MPO
+still represents the operator acting on the originally requested ordered pair.
+"""
+function mpo_from_two_qubit_gate_matrix(U::AbstractMatrix{ComplexF64},
+                                       i::Int,
+                                       j::Int,
+                                       L::Int;
+                                       d::Int=2)
+    @assert 1 ≤ i ≤ L && 1 ≤ j ≤ L && i != j
+    @assert size(U, 1) == d^2 && size(U, 2) == d^2
+
+    ii, jj = i, j
+    Uuse = Matrix(U)
+    if ii > jj
+        # U' = SWAP * U * SWAP to flip qubit order
+        swap = zeros(ComplexF64, d^2, d^2)
+        # For qubits d=2 this is the usual swap; for general d it swaps |a,b> -> |b,a>.
+        for a in 0:(d - 1), b in 0:(d - 1)
+            in_idx = a * d + b + 1
+            out_idx = b * d + a + 1
+            swap[out_idx, in_idx] = 1.0
+        end
+        Uuse = swap * Uuse * swap
+        ii, jj = jj, ii
+    end
+    @assert ii < jj
+
+    # Convention: U_tensor[p1_out, p2_out, p1_in, p2_in]
+    Uten = reshape(Uuse, d, d, d, d)
+    # Matrix M[(p1_out,p1_in), (p2_out,p2_in)]
+    X = permutedims(Uten, (1, 3, 2, 4))  # (p1_out,p1_in,p2_out,p2_in)
+    M = reshape(X, d * d, d * d)
+    F = svd(M)
+
+    # Drop near-zero singular values (numerical rank)
+    s = F.S
+    r = 0
+    @inbounds for k in 1:length(s)
+        if s[k] > 1.0e-14
+            r = k
+        end
+    end
+    r = max(r, 1)
+
+    tensors = Vector{Array{ComplexF64,4}}(undef, L)
+    for sidx in 1:L
+        tensors[sidx] = zeros(ComplexF64, 1, d, d, 1) # overwritten below
+        @inbounds for p in 1:d
+            tensors[sidx][1, p, p, 1] = 1.0
+        end
+    end
+
+    Wi = zeros(ComplexF64, 1, d, d, r)
+    @inbounds for α in 1:r
+        Avec = F.U[:, α] * sqrt(s[α])
+        Aα = reshape(Avec, d, d)
+        Wi[1, :, :, α] .= Aα
+    end
+    tensors[ii] = Wi
+
+    if jj > ii + 1
+        Wmid = zeros(ComplexF64, r, d, d, r)
+        @inbounds for α in 1:r, p in 1:d
+            Wmid[α, p, p, α] = 1.0
+        end
+        for sidx in (ii + 1):(jj - 1)
+            tensors[sidx] = Wmid
+        end
+    end
+
+    Wj = zeros(ComplexF64, r, d, d, 1)
+    @inbounds for α in 1:r
+        Bvec = sqrt(s[α]) * F.Vt[α, :]
+        Bα = reshape(Bvec, d, d)
+        Wj[α, :, :, 1] .= Bα
+    end
+    tensors[jj] = Wj
+
+    return MPO(L, tensors, fill(d, L), 0)
 end
 
 # --- Expectation Value ---
