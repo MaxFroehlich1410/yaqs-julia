@@ -1021,6 +1021,18 @@ function random_contraction(H::MPO{T},
         current_mindim = min(mindim, current_maxdim)
         current_sketchdim = max(min(sketchdim, current_maxdim), current_mindim)
 
+        # Performance guard: if `cutoff <= 0`, the adaptive criterion
+        #   err_est <= cutoff * norm_est
+        # cannot succeed before hitting `current_maxdim` (unless err_est=0 exactly).
+        # Growing the sketch dimension by 1 and recomputing QR each time is pathological.
+        # Jump directly to the required maximum dimension for this site.
+        if (outdim === nothing) && (cutoff !== nothing) && (cutoff <= 0)
+            current_sketchdim = current_maxdim
+        elseif (outdim === nothing) && (cutoff === nothing)
+            # `no_truncation()` mode: we also know we must go all the way to `current_maxdim`.
+            current_sketchdim = current_maxdim
+        end
+
         sketches_complete = 0
         sketch = (j == n) ? zeros(T, visible_dim, current_sketchdim) : zeros(T, visible_dim, cap_dim, current_sketchdim)
 

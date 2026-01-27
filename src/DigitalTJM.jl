@@ -19,6 +19,12 @@ using ..Timing: @t
 export DigitalGate, DigitalCircuit, RepeatedDigitalCircuit, add_gate!, process_circuit, run_digital_tjm, TJMOptions,
        enable_timing!, set_timing_print_each_call!, reset_timing!, print_timing_summary!
 
+# SRC: keep Python default cutoff for the randomized contraction itself.
+# Any user-provided `truncation_threshold` is enforced *afterwards* via standard
+# SVD-based `MPSModule.truncate!` so the bond Schmidt spectra satisfy the same
+# truncation condition as TEBD/TDVP/BUG.
+const SRC_DEFAULT_CUTOFF = 1e-6
+
 """
     enable_timing!(flag::Bool=true)
 
@@ -460,17 +466,29 @@ function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::In
     threshold = config.truncation_threshold
     max_bond = config.max_bond_dim
     
-    # Truncate based on threshold
-    current_sum = 0.0
-    keep_count = length(F.S)
+    # Truncation mode (consistent with TDVP/BUG/MPS.truncate!):
+    # - if `threshold >= 0`: relative discarded weight  sum(discarded S^2)/sum(all S^2) <= threshold
+    # - if `threshold < 0`: absolute discarded weight  sum(discarded S^2) <= -threshold
+    total_sq = sum(abs2, F.S)
+    discarded_sq = 0.0
+    keep_rank = length(F.S)
+    min_keep = 2
     @t :truncation_loop for k in length(F.S):-1:1
-        if current_sum + F.S[k]^2 > threshold
-            break
+        discarded_sq += F.S[k]^2
+        if threshold < 0
+            if discarded_sq >= -threshold
+                keep_rank = max(k, min_keep)
+                break
+            end
+        else
+            frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+            if frac >= threshold
+                keep_rank = max(k, min_keep)
+                break
+            end
         end
-        current_sum += F.S[k]^2
-        keep_count -= 1
     end
-    keep = clamp(keep_count, 1, max_bond)
+    keep = clamp(keep_rank, 1, max_bond)
     
     U = F.U[:, 1:keep]
     S = F.S[1:keep]
@@ -603,10 +621,14 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
         L = state.length
         mpo_gate = _mpo_from_two_qubit_gate_matrix(op_mat, s1, s2, L; d=state.phys_dims[1])
 
-        stop = Algorithms.Cutoff(sim_params.truncation_threshold;
+        # Keep the SRC contraction cutoff at the Python default and enforce the
+        # user-provided truncation threshold via a standard post-pass SVD compression.
+        stop = Algorithms.Cutoff(SRC_DEFAULT_CUTOFF;
                                  mindim=sim_params.min_bond_dim,
                                  maxdim=sim_params.max_bond_dim)
         new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
+        @t :src_post_truncate MPSModule.truncate!(new_state; threshold=sim_params.truncation_threshold,
+                                                 max_bond_dim=sim_params.max_bond_dim)
         state.tensors = new_state.tensors
         state.orth_center = new_state.orth_center
     else
@@ -675,16 +697,8 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
                      @t :normalize MPSModule.normalize!(state)
                 end
             elseif length(gate.sites) > 2
-                # Multi-qubit gate: apply via SRC MPO×MPS (currently contiguous-only).
-                op_mat = Matrix{ComplexF64}(matrix(gate.op))
-                mpo_gate = _mpo_from_contiguous_k_qubit_gate_matrix(op_mat, gate.sites, state.length; d=state.phys_dims[1])
-                stop = Algorithms.Cutoff(sim_params.truncation_threshold;
-                                         mindim=sim_params.min_bond_dim,
-                                         maxdim=sim_params.max_bond_dim)
-                new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
-                state.tensors = new_state.tensors
-                state.orth_center = new_state.orth_center
-                @t :normalize MPSModule.normalize!(state)
+                error("Multi-qubit gates acting on more than 2 sites are not implemented. " *
+                      "Please decompose into 1- and 2-qubit gates.")
             end
         end
 
@@ -779,15 +793,8 @@ function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                             @t :normalize MPSModule.normalize!(state)
                         end
                     elseif length(gate.sites) > 2
-                        op_mat = Matrix{ComplexF64}(matrix(gate.op))
-                        mpo_gate = _mpo_from_contiguous_k_qubit_gate_matrix(op_mat, gate.sites, state.length; d=state.phys_dims[1])
-                        stop = Algorithms.Cutoff(sim_params.truncation_threshold;
-                                                 mindim=sim_params.min_bond_dim,
-                                                 maxdim=sim_params.max_bond_dim)
-                        new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
-                        state.tensors = new_state.tensors
-                        state.orth_center = new_state.orth_center
-                        @t :normalize MPSModule.normalize!(state)
+                        error("Multi-qubit gates acting on more than 2 sites are not implemented. " *
+                              "Please decompose into 1- and 2-qubit gates.")
                     end
                 end
 

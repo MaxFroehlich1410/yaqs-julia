@@ -1,5 +1,6 @@
 using Printf
 using DelimitedFiles
+using Dates
 
 """
 Driver script: run Julia + TenPy methods + 1 exact reference on the same circuit and plot
@@ -243,6 +244,69 @@ function _parse_sites(s::AbstractString, L::Int)
     end
     isempty(sites) && error("No valid sites in --sites (1..$L).")
     return sites
+end
+
+function _write_run_params_md(outdir::AbstractString,
+                             argv::Vector{String},
+                             kv::Dict{String,String},
+                             resolved::Dict{String,Any})
+    # Derive experiment id from folder name `experimentX`
+    exp_id = nothing
+    name = basename(outdir)
+    m = match(r"^experiment(\d+)$", name)
+    if m !== nothing
+        exp_id = m.captures[1]
+    end
+
+    md_name = exp_id === nothing ? "run_params.md" : "experiment$(exp_id)_params.md"
+    md_path = joinpath(outdir, md_name)
+
+    # Stable ordering for readability
+    kv_keys = sort!(collect(keys(kv)))
+    res_keys = sort!(collect(keys(resolved)))
+
+    open(md_path, "w") do io
+        println(io, "# Run parameters")
+        println(io)
+        if exp_id !== nothing
+            println(io, "**Experiment**: experiment$(exp_id)")
+        end
+        println(io, "**Timestamp**: ", Dates.format(Dates.now(), dateformat"yyyy-mm-dd HH:MM:SS"))
+        println(io, "**Output directory**: `", outdir, "`")
+        println(io)
+
+        println(io, "## Command")
+        println(io)
+        # Best-effort reconstruction: the script path is fixed; ARGS contains the flags.
+        println(io, "```bash")
+        println(io, "julia --project=. 03_Nature_review_checks/run_three_method_comparison.jl ", join(argv, " "))
+        println(io, "```")
+        println(io)
+
+        println(io, "## Parsed flags (from command)")
+        println(io)
+        println(io, "| key | value |")
+        println(io, "|---|---|")
+        for k in kv_keys
+            v = kv[k]
+            # Escape newlines just in case
+            v1 = replace(v, "\n" => "\\n")
+            println(io, "| `", k, "` | `", v1, "` |")
+        end
+        println(io)
+
+        println(io, "## Resolved parameters used")
+        println(io)
+        println(io, "| key | value |")
+        println(io, "|---|---|")
+        for k in res_keys
+            v = resolved[k]
+            println(io, "| `", k, "` | `", string(v), "` |")
+        end
+        println(io)
+    end
+
+    return md_path
 end
 
 function _read_csv_matrix(path::AbstractString)
@@ -795,6 +859,28 @@ function main()
     circ = _build_circuit_from_library(kv)
     # update L for downstream consistency
     L = circ.num_qubits
+
+    # --- Write a markdown run manifest with parsed + resolved parameters ---
+    resolved = Dict{String,Any}(
+        "circuit" => circuit,
+        "L" => L,
+        "chi_max" => chi_max,
+        "trunc" => trunc,
+        "trunc_mode" => trunc_mode,
+        "trunc_julia_internal" => trunc_jl,
+        "sites" => join(string.(sites), ","),
+        "state_jl" => state_jl,
+        "state_py" => state_py,
+        "jl_local_mode" => jl_local_mode,
+        "jl_longrange_mode" => jl_longrange_mode,
+        "jl_tdvp_truncation" => jl_tdvp_truncation,
+        "jl_bug_truncation_granularity" => jl_bug_trunc,
+        "warmup" => warmup,
+        "base_outdir" => base_outdir,
+        "outdir" => outdir,
+    )
+    md_path = _write_run_params_md(outdir, ARGS, kv, resolved)
+    @printf("Wrote run parameters: %s\n", md_path)
 
     # --- Export gate-list (shared by TenPy + Qiskit exact) ---
     gatelist_path = joinpath(outdir, "circuit_gatelist.csv")
