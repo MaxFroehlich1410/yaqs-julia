@@ -23,7 +23,8 @@ else
 end
 
 export single_site_tdvp!, two_site_tdvp!, set_krylov_ishermitian_mode!, reset_krylov_ishermitian_cache!,
-       reset_krylov_ishermitian_stats!, print_krylov_ishermitian_stats
+       reset_krylov_ishermitian_stats!, print_krylov_ishermitian_stats,
+       Cutoff, FixedDimension, no_truncation, random_contraction
 
 # --- Krylov Subspace Methods ---
 
@@ -831,6 +832,404 @@ function _init_envs(state, H)
     E_left[1] = @t :tdvp_env_make_id make_identity_env(l_bond, l_mpo)
     
     return E_left, E_right
+end
+
+# ==============================================================================
+# Successive Randomized Compression (SRC) MPO-MPS product
+# Port of `random_contraction` from:
+#   third_party/RandomMPOMPS/code/tensornetwork/contraction.py
+#
+# Notes:
+# - Python code relies heavily on reshape order in NumPy (row-major). In Julia
+#   (column-major), we implement the *same algebra* using explicit tensor
+#   contractions to avoid subtle index-linearization bugs.
+# - We assume square local operators: `d_out == d_in == psi.phys_dims[i]`.
+# ==============================================================================
+
+"""
+    StoppingRule(outputdim, mindim, maxdim, cutoff)
+
+Stopping rule for SRC contraction (mirrors Python `StoppingRule`).
+
+- `outputdim::Union{Nothing,Int}`: fixed output bond dimension (if set).
+- `mindim::Union{Nothing,Int}`: minimum sketch dimension (adaptive mode).
+- `maxdim::Int`: maximum sketch dimension cap (adaptive mode).
+- `cutoff::Union{Nothing,Float64}`: relative tolerance for adaptive termination.
+"""
+struct StoppingRule
+    outputdim::Union{Nothing, Int}
+    mindim::Union{Nothing, Int}
+    maxdim::Int
+    cutoff::Union{Nothing, Float64}
+end
+
+"""
+    Cutoff(cutoff; mindim=1, maxdim=typemax(Int))
+
+Adaptive SRC stopping rule with relative cutoff `cutoff`.
+"""
+Cutoff(cutoff::Real; mindim::Int=1, maxdim::Int=typemax(Int)) =
+    StoppingRule(nothing, mindim, maxdim, Float64(cutoff))
+
+"""
+    FixedDimension(dim)
+
+Fixed-dimension SRC stopping rule (no adaptive error estimation).
+"""
+FixedDimension(dim::Int) = StoppingRule(dim, 1, typemax(Int), nothing)
+
+"""
+    no_truncation()
+
+SRC stopping rule that disables truncation/error-based early stopping.
+"""
+no_truncation() = StoppingRule(nothing, nothing, typemax(Int), nothing)
+
+@inline _is_truncation(stop::StoppingRule) = !((stop.outputdim === nothing) && (stop.cutoff === nothing))
+
+@inline function _maxlinkdim_mps(psi::MPS)
+    maxχ = 1
+    for A in psi.tensors
+        maxχ = max(maxχ, size(A, 1), size(A, 3))
+    end
+    return maxχ
+end
+
+@inline function _maxlinkdim_mpo(H::MPO)
+    maxχ = 1
+    for W in H.tensors
+        maxχ = max(maxχ, size(W, 1), size(W, 4))
+    end
+    return maxχ
+end
+
+@inline function _randn_real_as_T!(rng::AbstractRNG, x::Vector{T}) where {T}
+    @inbounds for i in eachindex(x)
+        x[i] = T(randn(rng))
+    end
+    return x
+end
+
+"""
+    random_contraction(H::MPO, psi::MPS;
+        stop=Cutoff(1e-6), sketchdim=1, sketchincrement=1,
+        finalround=nothing, accuracychecks=false, rng=Random.default_rng())
+
+Compute a compressed approximation to the MPO–MPS product `H * psi` using
+Successive Randomized Compression (SRC) (Camaño–Epperly–Tropp, 2025).
+
+This is a direct Julia port of the Python reference implementation’s
+`random_contraction` routine.
+
+Returns an MPS in **left-canonical** form (orthogonality center at `L`).
+"""
+function random_contraction(H::MPO{T},
+                            psi::MPS{T};
+                            stop::StoppingRule=Cutoff(1e-6),
+                            sketchdim::Int=1,
+                            sketchincrement::Int=1,
+                            finalround=nothing,
+                            accuracychecks::Bool=false,
+                            rng::AbstractRNG=Random.default_rng()) where {T<:Number}
+    n = H.length
+    @assert n == psi.length "lengths of MPO and MPS do not match"
+    n == 1 && throw(ArgumentError("MPO-MPS product for n=1 is not implemented"))
+
+    # Physical dimension (assume uniform and square local operators)
+    d = H.phys_dims[1]
+    @assert all(==(d), H.phys_dims) "SRC currently assumes uniform physical dimension in MPO"
+    @assert all(==(d), psi.phys_dims) "SRC currently assumes uniform physical dimension in MPS"
+
+    # Stopping parameters (mirror Python defaults)
+    maxdim = stop.maxdim
+    outdim = stop.outputdim
+    mindim = stop.mindim
+    cutoff = stop.cutoff
+
+    if outdim === nothing
+        # If user left maxdim "effectively infinite", cap it like the Python code does when maxdim=None.
+        if maxdim == typemax(Int)
+            maxdim = _maxlinkdim_mpo(H) * _maxlinkdim_mps(psi)
+        end
+        mindim = max(something(mindim, 1), 1)
+    else
+        maxdim = outdim
+        mindim = outdim
+        sketchdim = outdim
+    end
+
+    # --- Boundary/bulk views in "Python algebra" index order ---
+    # MPO layout used by the Python algorithm:
+    #   first: (d_out, D_right, d_in)
+    #   bulk : (D_left, d_out, D_right, d_in)
+    #   last : (D_left, d_out, d_in)
+    #
+    # Our MPO layout:
+    #   (D_left, d_out, d_in, D_right)
+    #
+    # MPS in Python:
+    #   first: (d, χR)
+    #   bulk : (χL, d, χR)
+    #   last : (χL, d)
+    #
+    # Our MPS layout is always (χL, d, χR) with χL/χR possibly 1.
+    @views psi_first = psi.tensors[1][1, :, :]          # (d, χ2)
+    @views psi_last  = psi.tensors[n][:, :, 1]          # (χ_{n}, d)
+    psi_bulk = (n > 2) ? psi.tensors[2:(n-1)] : Array{T,3}[]
+
+    @views Hfirst_raw = H.tensors[1][1, :, :, :]        # (d_out, d_in, D2)
+    H_first = permutedims(Hfirst_raw, (1, 3, 2))        # (d_out, D2, d_in)
+    @views Hlast_raw  = H.tensors[n][:, :, :, 1]        # (D_n, d_out, d_in)
+    H_last = Array{T,3}(Hlast_raw)                      # ensure dense
+    H_bulk = Vector{Array{T,4}}(undef, max(n - 2, 0))    # sites 2..n-1
+    for site in 2:(n-1)
+        H_bulk[site - 1] = permutedims(H.tensors[site], (1, 2, 4, 3)) # (Dl, d_out, Dr, d_in)
+    end
+
+    # Output tensors (Julia MPS layout (χL, d, χR))
+    psi_out = Vector{Array{T,3}}(undef, n)
+
+    # Cached left environments for each sketch column.
+    # envs[idx][k] is a matrix corresponding to the contraction up to site (k+1) (1-based sites):
+    # k=1 corresponds to site 1, k=2 to site 2, ... k=j-1 to site j-1.
+    envs = Vector{Vector{Matrix{T}}}()
+
+    # "Cap" tensor carrying the right-side compression information.
+    # Shape: (cap_dim, Dl_next, χL_next) where Dl_next is the left MPO bond at the next site
+    # and χL_next is the left MPS bond at the next site (i.e. previous site’s χR).
+    cap = Array{T,3}(undef, 1, 1, 1)
+    cap[1, 1, 1] = one(T)
+    cap_dim = 1
+
+    visible_dim = d
+    x = Vector{T}(undef, visible_dim)
+
+    # Main right-to-left sweep: sites n, n-1, ..., 2
+    for j in n:-1:2
+        # Dimension heuristics (match Python)
+        local prod_bond_dims::Int
+        if j == n
+            prod_bond_dims = size(H_last, 1) * size(psi_last, 1)
+        else
+            Hj = H_bulk[j - 1]
+            psij = psi_bulk[j - 1]
+            prod_bond_dims = max(size(Hj, 1) * size(psij, 1),
+                                 size(Hj, 3) * size(psij, 3))
+        end
+
+        current_maxdim = min(prod_bond_dims, maxdim, visible_dim * cap_dim)
+        current_mindim = min(mindim, current_maxdim)
+        current_sketchdim = max(min(sketchdim, current_maxdim), current_mindim)
+
+        sketches_complete = 0
+        sketch = (j == n) ? zeros(T, visible_dim, current_sketchdim) : zeros(T, visible_dim, cap_dim, current_sketchdim)
+
+        while true
+            # --- 1) Build any missing environments up to current_sketchdim ---
+            for idx in (length(envs) + 1):current_sketchdim
+                # Environments only need sites 1..(j-1), but since the sweep starts at j=n,
+                # the first time we build envs we end up constructing the full chain (1..n-1),
+                # which is sufficient for later (smaller j) steps.
+                env_len = j - 1
+                env = Vector{Matrix{T}}(undef, env_len)
+
+                # Site 1
+                _randn_real_as_T!(rng, x)
+                Dr1 = size(H_first, 2)
+                din = size(H_first, 3)
+                temp1 = Array{T,2}(undef, Dr1, din)
+                @tensor temp1[Dr, pin] := H_first[pout, Dr, pin] * x[pout]
+                env1 = Array{T,2}(undef, Dr1, size(psi_first, 2))
+                mul!(env1, temp1, psi_first)
+                env[1] = env1
+
+                # Sites 2..(j-1)
+                for site in 2:(j - 1)
+                    _randn_real_as_T!(rng, x)
+                    Hs = H_bulk[site - 1]     # (Dl, do, Dr, di)
+                    psis = psi_bulk[site - 1] # (χL, di, χR)
+                    Dl = size(Hs, 1)
+                    Dr = size(Hs, 3)
+                    di = size(Hs, 4)
+
+                    # tempH[Dl,Dr,di] = Σ_do Hs[Dl,do,Dr,di] * x[do]
+                    tempH = Array{T,3}(undef, Dl, Dr, di)
+                    @tensor tempH[Dl_, Dr_, pin_] := Hs[Dl_, pout, Dr_, pin_] * x[pout]
+
+                    # res[Dr,di,χ] = Σ_Dl tempH[Dl,Dr,di] * env_prev[Dl,χ]
+                    env_prev = env[site - 1]
+                    χprev = size(env_prev, 2)
+                    res = Array{T,3}(undef, Dr, di, χprev)
+                    @tensor res[Dr_, di_, χ_] := tempH[Dl_, Dr_, di_] * env_prev[Dl_, χ_]
+
+                    # env_next[Dr,χR] = Σ_{di,χ} res[Dr,di,χ] * psis[χ,di,χR]
+                    χR = size(psis, 3)
+                    env_next = Array{T,2}(undef, Dr, χR)
+                    @tensor env_next[Dr_, χR_] := res[Dr_, di_, χ_] * psis[χ_, di_, χR_]
+                    env[site] = env_next
+                end
+
+                push!(envs, env)
+            end
+
+            # --- 2) Form any missing sketch columns ---
+            for idx in (sketches_complete + 1):current_sketchdim
+                if j == n
+                    # sketch[:, idx] = contraction of env(site n-1), psi_last, H_last
+                    env_prev = envs[idx][j - 1] # (Dl_last, χL_last)
+                    mat = env_prev * psi_last   # (Dl_last, di)
+                    y = Vector{T}(undef, visible_dim)
+                    @tensor y[pout] := H_last[Dl, pout, pin] * mat[Dl, pin]
+                    sketch[:, idx] .= y
+                else
+                    Hj = H_bulk[j - 1]       # (Dl, do, Dr, di)
+                    psij = psi_bulk[j - 1]   # (χL, di, χR)
+                    env_prev = envs[idx][j - 1] # (Dl, χL)
+
+                    # t[Dl,di,χR] = Σ_χL env_prev[Dl,χL] * psij[χL,di,χR]
+                    Dl = size(Hj, 1)
+                    Dr = size(Hj, 3)
+                    di = size(Hj, 4)
+                    χR = size(psij, 3)
+                    t = Array{T,3}(undef, Dl, di, χR)
+                    @tensor t[Dl_, di_, χR_] := env_prev[Dl_, χL] * psij[χL, di_, χR_]
+
+                    # u[do,Dr,χR] = Σ_{Dl,di} Hj[Dl,do,Dr,di] * t[Dl,di,χR]
+                    u = Array{T,3}(undef, visible_dim, Dr, χR)
+                    @tensor u[pout, Dr_, χR_] := Hj[Dl_, pout, Dr_, pin_] * t[Dl_, pin_, χR_]
+
+                    # v[do,β] = Σ_{Dr,χR} u[do,Dr,χR] * cap[β,Dr,χR]
+                    v = Array{T,2}(undef, visible_dim, cap_dim)
+                    @tensor v[pout, β] := u[pout, Dr_, χR_] * cap[β, Dr_, χR_]
+                    sketch[:, :, idx] .= v
+                end
+            end
+            sketches_complete = current_sketchdim
+
+            # --- 3) QR and (optional) error estimate ---
+            local Qmat::Matrix{T}
+            local Rmat::Matrix{T}
+            local Qten::Union{Nothing, Array{T,3}} = nothing
+
+            if j == n
+                F = qr(sketch)
+                Qmat = Matrix(F.Q)
+                Rmat = Matrix(F.R)
+            else
+                M = reshape(sketch, visible_dim * cap_dim, current_sketchdim)
+                F = qr(M)
+                Qmat = Matrix(F.Q)
+                Rmat = Matrix(F.R)
+                Qten = reshape(Qmat, visible_dim, cap_dim, current_sketchdim)
+            end
+
+            done = false
+            if outdim !== nothing
+                done = true
+            elseif cutoff === nothing
+                done = (current_sketchdim == current_maxdim)
+            else
+                if current_sketchdim == current_maxdim
+                    done = true
+                else
+                    # Python: norm_est = ||sketch|| / sqrt(r)
+                    #         G = inv(R.T)
+                    #         err_est = sqrt(sum(norm(G, axis=0)^(-2)) / r)
+                    r = current_sketchdim
+                    norm_est = norm((j == n) ? sketch : reshape(sketch, visible_dim * cap_dim, r)) / sqrt(r)
+                    # `Rmat` can be (near-)singular if the current sketch columns are not
+                    # linearly independent. In that case, the Python reference would also
+                    # fail at `inv`. We treat that as "not done" and request more sketches.
+                    local ok_inv = true
+                    local err_est = Inf
+                    try
+                        G = inv(transpose(Rmat))
+                        coln = vec(sum(abs2, G; dims=1)).^(0.5)
+                        err_est = sqrt(sum((coln .^ (-2))) / r)
+                    catch e
+                        ok_inv = false
+                    end
+                    done = ok_inv && (err_est <= cutoff * norm_est) && (r >= current_mindim)
+                end
+            end
+
+            if done
+                # --- 4) Store output tensor at site j and update cap ---
+                if j == n
+                    # psi_out[n] : (χL, d, 1)
+                    psi_out[j] = reshape(transpose(Qmat), current_sketchdim, visible_dim, 1)
+
+                    # cap[α,Dl,χL] = Σ_{do,di} conj(Q[do,α]) * H_last[Dl,do,di] * psi_last[χL,di]
+                    cap_new = Array{T,3}(undef, current_sketchdim, size(H_last, 1), size(psi_last, 1))
+                    @tensor cap_new[α, Dl, χ] := conj(Qmat[pout, α]) * H_last[Dl, pout, pin] * psi_last[χ, pin]
+                    cap = cap_new
+                    cap_dim = current_sketchdim
+                else
+                    @assert Qten !== nothing
+                    # Qten: (do, cap_dim, r) -> output tensor (r, do, cap_dim)
+                    psi_out[j] = permutedims(Qten::Array{T,3}, (3, 1, 2))
+
+                    Hj = H_bulk[j - 1]     # (Dl, do, Dr, di)
+                    psij = psi_bulk[j - 1] # (χL, di, χR)
+
+                    # cap_new[α,Dl,χL] = Σ conj(Q[do,β,α]) * cap[β,Dr,χR] * Hj[Dl,do,Dr,di] * psij[χL,di,χR]
+                    cap_new = Array{T,3}(undef, current_sketchdim, size(Hj, 1), size(psij, 1))
+                    @tensor cap_new[α, Dl, χL] :=
+                        conj((Qten::Array{T,3})[pout, β, α]) *
+                        cap[β, Dr, χR] *
+                        Hj[Dl, pout, Dr, pin] *
+                        psij[χL, pin, χR]
+                    cap = cap_new
+                    cap_dim = current_sketchdim
+                end
+
+                # Optional accuracy checks (not yet ported)
+                if accuracychecks
+                    @warn "accuracychecks=true is not implemented in Julia SRC port (skipping)."
+                end
+
+                break
+            end
+
+            # --- 5) Increase sketch dimension and continue ---
+            current_sketchdim = min(current_maxdim, current_sketchdim + sketchincrement)
+            if j == n
+                old = sketch
+                sketch = zeros(T, visible_dim, current_sketchdim)
+                sketch[:, 1:size(old, 2)] .= old
+            else
+                old = sketch
+                sketch = zeros(T, visible_dim, cap_dim, current_sketchdim)
+                sketch[:, :, 1:size(old, 3)] .= old
+            end
+        end
+    end
+
+    # Final left boundary (site 1):
+    # temp[α,Dr,di] = Σ_χ cap[α,Dr,χ] * psi_first[di,χ]
+    Dr1 = size(H_first, 2)
+    di = size(H_first, 3)
+    tmp = Array{T,3}(undef, cap_dim, Dr1, di)
+    @tensor tmp[α, Dr, di_] := cap[α, Dr, χ] * psi_first[di_, χ]
+
+    A1mat = Array{T,2}(undef, visible_dim, cap_dim)
+    @tensor A1mat[pout, α] := H_first[pout, Dr, pin_] * tmp[α, Dr, pin_]
+    psi_out[1] = reshape(A1mat, 1, visible_dim, cap_dim)
+
+    out = MPS(n, psi_out, psi.phys_dims, n)
+
+    # Optional final rounding/compression: interpret `finalround` as (threshold, max_bond_dim)
+    if finalround !== nothing
+        if finalround isa NamedTuple
+            thr = get(finalround, :threshold, 1e-12)
+            mbd = get(finalround, :max_bond_dim, nothing)
+            MPSModule.truncate!(out; threshold=float(thr), max_bond_dim=mbd)
+        else
+            @warn "finalround provided but unsupported type ($(typeof(finalround))); skipping."
+        end
+    end
+
+    return out
 end
 
 end # module

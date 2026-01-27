@@ -140,4 +140,30 @@ using Yaqs.NoiseModule
         @test isapprox(ov, 1.0; atol=1e-10)
     end
 
+    @testset "SRC method for long-range 2-qubit gate matches TEBD (up to tolerance)" begin
+        using Random
+
+        L = 3
+        circ = DigitalCircuit(L)
+        add_gate!(circ, HGate(), [1])
+        add_gate!(circ, CZGate(), [1, 3])  # long-range
+
+        sim_params = TimeEvolutionConfig(Observable[], 1.0; dt=1.0, max_bond_dim=128, truncation_threshold=1e-12)
+        psi0 = MPS(L; state="zeros")
+
+        rng = MersenneTwister(2026)
+
+        opts_tebd = TJMOptions(local_method=:TEBD, long_range_method=:TEBD)
+        opts_src  = TJMOptions(local_method=:SRC,  long_range_method=:SRC)
+
+        psi_tebd, _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_tebd, rng=rng)
+        psi_src,  _ = run_digital_tjm(psi0, circ, nothing, sim_params; alg_options=opts_src,  rng=rng)
+
+        @test check_if_valid_mps(psi_tebd)
+        @test check_if_valid_mps(psi_src)
+
+        ov = abs(MPSModule.scalar_product(psi_tebd, psi_src))
+        @test ov ≥ 1 - 1e-6
+    end
+
 end

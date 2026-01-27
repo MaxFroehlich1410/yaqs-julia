@@ -92,5 +92,48 @@ using .Yaqs.Algorithms
         @test isapprox(ov, expected, atol=1e-2)
     end
 
+    @testset "SRC MPO×MPS (random_contraction)" begin
+        using Random
+
+        # Small deterministic problem: compare SRC result to exact MPO×MPS contraction.
+        rng = MersenneTwister(1234)
+        L = 4
+        d = 2
+
+        # Random MPS with modest bond dimensions.
+        # Bonds: 1 - χ2 - χ3 - 1
+        χ2, χ3 = 3, 2
+        A = Vector{Array{ComplexF64,3}}(undef, L)
+        A[1] = randn(rng, ComplexF64, 1, d, χ2)
+        A[2] = randn(rng, ComplexF64, χ2, d, χ3)
+        A[3] = randn(rng, ComplexF64, χ3, d, 1)
+        # Add a trivial site 4 to make L=4 with final bond 1
+        A[4] = randn(rng, ComplexF64, 1, d, 1)
+        psi = MPS(L, A, fill(d, L), 1)
+        MPSModule.normalize!(psi)
+
+        # Random MPO with modest bond dimensions (square local operator)
+        # Bonds: 1 - μ2 - μ3 - 1
+        μ2, μ3 = 2, 3
+        W = Vector{Array{ComplexF64,4}}(undef, L)
+        W[1] = randn(rng, ComplexF64, 1, d, d, μ2)
+        W[2] = randn(rng, ComplexF64, μ2, d, d, μ3)
+        W[3] = randn(rng, ComplexF64, μ3, d, d, 1)
+        W[4] = randn(rng, ComplexF64, 1, d, d, 1)
+        H = MPO(L, W, fill(d, L), 0)
+
+        # Exact (uncompressed) application
+        exact = contract_mpo_mps(H, psi)
+        v_exact = to_vec(exact)
+
+        # SRC (adaptive). Use a small cutoff and seeded RNG for determinism.
+        psi_src = random_contraction(H, psi; stop=Cutoff(1e-10), sketchdim=1, sketchincrement=1, rng=rng)
+        @test check_if_valid_mps(psi_src)
+
+        v_src = to_vec(psi_src)
+        relerr = norm(v_src - v_exact) / max(norm(v_exact), 1e-30)
+        @test relerr ≤ 1e-6
+    end
+
 end
 

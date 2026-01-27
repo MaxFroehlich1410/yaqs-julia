@@ -3,6 +3,7 @@ module DigitalTJM
 using LinearAlgebra
 using Base.Threads
 using TensorOperations
+using Random
 using ..MPSModule
 using ..MPOModule
 using ..GateLibrary
@@ -97,8 +98,8 @@ Algorithm options for `run_digital_tjm` (circuit simulation).
   - `:after_site`: truncate after every local BUG site update (tight bond control; more SVDs).
 """
 struct TJMOptions
-    local_method::Symbol # :TEBD | :TDVP | :BUG
-    long_range_method::Symbol # :TEBD | :TDVP | :BUG
+    local_method::Symbol # :TEBD | :TDVP | :BUG | :SRC
+    long_range_method::Symbol # :TEBD | :TDVP | :BUG | :SRC
     tdvp_truncation_timing::Symbol # :during (default) | :after_window
     bug_truncation_granularity::Symbol # :after_sweep (default) | :after_site
 end
@@ -109,6 +110,151 @@ TJMOptions(; local_method::Symbol=:TDVP,
              tdvp_truncation_timing::Symbol=:during,
              bug_truncation_granularity::Symbol=:after_sweep) =
     TJMOptions(local_method, long_range_method, tdvp_truncation_timing, bug_truncation_granularity)
+
+# ==============================================================================
+# SRC helpers: construct MPO for (possibly long-range) multi-qubit gates.
+# We apply these MPOs using `Algorithms.random_contraction`.
+# ==============================================================================
+
+@inline function _id_site_tensor(::Type{T}, d::Int) where {T}
+    W = zeros(T, 1, d, d, 1)
+    @inbounds for p in 1:d
+        W[1, p, p, 1] = one(T)
+    end
+    return W
+end
+
+"""
+    _mpo_from_two_qubit_gate_matrix(U, i, j, L; d=2)
+
+Build an MPO (length `L`) for a 2-qubit operator `U` acting on sites `i<j`
+with identity elsewhere, using an operator-Schmidt (SVD) decomposition.
+
+This avoids constructing a dense 2^(j-i+1) × 2^(j-i+1) operator for long-range gates.
+"""
+function _mpo_from_two_qubit_gate_matrix(U::AbstractMatrix{ComplexF64},
+                                         i::Int,
+                                         j::Int,
+                                         L::Int;
+                                         d::Int=2)
+    @assert 1 ≤ i < j ≤ L
+    @assert size(U, 1) == d^2 && size(U, 2) == d^2
+
+    # Tensor convention consistent with existing TEBD code:
+    # U_tensor[p1_out, p2_out, p1_in, p2_in]
+    Uten = reshape(Matrix(U), d, d, d, d)
+    # Form matrix M[(p1_out,p1_in), (p2_out,p2_in)]
+    X = permutedims(Uten, (1, 3, 2, 4))                 # (p1_out,p1_in,p2_out,p2_in)
+    M = reshape(X, d*d, d*d)
+
+    F = svd(M)
+    r = length(F.S)
+
+    tensors = Vector{Array{ComplexF64,4}}(undef, L)
+    # Identities outside the support
+    for s in 1:(i-1)
+        tensors[s] = _id_site_tensor(ComplexF64, d)
+    end
+    for s in (j+1):L
+        tensors[s] = _id_site_tensor(ComplexF64, d)
+    end
+
+    # Site i: (1, d, d, r) with Aα
+    Wi = zeros(ComplexF64, 1, d, d, r)
+    @inbounds for α in 1:r
+        Avec = F.U[:, α] * F.S[α]          # absorb σ into left factor
+        Aα = reshape(Avec, d, d)           # (pout, pin)
+        Wi[1, :, :, α] .= Aα
+    end
+    tensors[i] = Wi
+
+    # Middle identities: (r, d, d, r) diag in bond
+    if j > i + 1
+        Wmid = zeros(ComplexF64, r, d, d, r)
+        @inbounds for α in 1:r
+            for p in 1:d
+                Wmid[α, p, p, α] = 1.0
+            end
+        end
+        for s in (i+1):(j-1)
+            tensors[s] = Wmid
+        end
+    end
+
+    # Site j: (r, d, d, 1) with Bα
+    Wj = zeros(ComplexF64, r, d, d, 1)
+    @inbounds for α in 1:r
+        Bvec = F.Vt[α, :]                 # row vector
+        Bα = reshape(Bvec, d, d)
+        Wj[α, :, :, 1] .= Bα
+    end
+    tensors[j] = Wj
+
+    return MPO(L, tensors, fill(d, L), 0)
+end
+
+"""
+    _mpo_from_contiguous_k_qubit_gate_matrix(U, sites, L; d=2)
+
+Build an MPO (length `L`) for a k-qubit operator `U` acting on a *contiguous*
+block `sites = [s, s+1, ..., s+k-1]`, with identity elsewhere.
+
+Uses a TT-SVD (successive SVD) on the operator viewed as an MPO with per-site
+physical dimension `d` on both input/output legs.
+"""
+function _mpo_from_contiguous_k_qubit_gate_matrix(U::AbstractMatrix{ComplexF64},
+                                                  sites::Vector{Int},
+                                                  L::Int;
+                                                  d::Int=2)
+    @assert !isempty(sites)
+    ss = sort(unique(sites))
+    k = length(ss)
+    @assert k ≥ 3
+    @assert ss[end] - ss[1] + 1 == k "k-qubit MPO builder currently requires contiguous sites"
+    @assert 1 ≤ ss[1] && ss[end] ≤ L
+    @assert size(U, 1) == d^k && size(U, 2) == d^k
+
+    # Operator tensor: (pout1..poutk, pin1..pink)
+    Uten0 = reshape(Matrix(U), ntuple(_->d, k)..., ntuple(_->d, k)...)
+    # Interleave as (pout1,pin1,pout2,pin2,...)
+    perm = Vector{Int}(undef, 2k)
+    @inbounds for s in 1:k
+        perm[2s-1] = s
+        perm[2s] = k + s
+    end
+    T = permutedims(Uten0, perm)
+
+    # TT-SVD over site pairs (pout_s,pin_s) of dimension d^2.
+    Ws_block = Vector{Array{ComplexF64,4}}(undef, k)
+    rank = 1
+    X = T
+    for s in 1:(k-1)
+        left_dim = rank * d * d
+        M = reshape(X, left_dim, :)
+        F = svd(M)
+        rnew = length(F.S)
+        Umat = F.U[:, 1:rnew]
+        Svec = F.S[1:rnew]
+        Vt = F.Vt[1:rnew, :]
+        Ws_block[s] = reshape(Umat, rank, d, d, rnew)
+        X = reshape(Diagonal(Svec) * Vt, rnew, ntuple(_->d, 2*(k-s))...)
+        rank = rnew
+    end
+    Ws_block[k] = reshape(X, rank, d, d, 1)
+
+    tensors = Vector{Array{ComplexF64,4}}(undef, L)
+    for s in 1:(ss[1]-1)
+        tensors[s] = _id_site_tensor(ComplexF64, d)
+    end
+    for (tidx, site) in enumerate(ss)
+        tensors[site] = Ws_block[tidx]
+    end
+    for s in (ss[end]+1):L
+        tensors[s] = _id_site_tensor(ComplexF64, d)
+    end
+
+    return MPO(L, tensors, fill(d, L), 0)
+end
 
 # --- Circuit Processing ---
 
@@ -339,7 +485,7 @@ function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::In
     mps.orth_center = s2
 end
 
-function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig, alg_options::TJMOptions)
+function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimConfig, alg_options::TJMOptions; rng::AbstractRNG=Random.default_rng())
     s1, s2 = sort(gate.sites)
     is_long_range = (s2 > s1 + 1)
     
@@ -451,8 +597,20 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
         @t :window_canonicalize MPSModule.shift_orthogonality_center!(short_state, win_len)
         @t :window_writeback state.tensors[win_start:win_end] .= short_state.tensors
         state.orth_center = win_end
+    elseif method == :SRC
+        # Apply a (possibly long-range) 2-qubit gate as an MPO×MPS product, compressed via SRC.
+        op_mat = Matrix{ComplexF64}(matrix(gate.op))
+        L = state.length
+        mpo_gate = _mpo_from_two_qubit_gate_matrix(op_mat, s1, s2, L; d=state.phys_dims[1])
+
+        stop = Algorithms.Cutoff(sim_params.truncation_threshold;
+                                 mindim=sim_params.min_bond_dim,
+                                 maxdim=sim_params.max_bond_dim)
+        new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
+        state.tensors = new_state.tensors
+        state.orth_center = new_state.orth_center
     else
-        error("Unknown method $(method). Expected :TEBD, :TDVP, or :BUG.")
+        error("Unknown method $(method). Expected :TEBD, :TDVP, :BUG, or :SRC.")
     end
 end
 
@@ -461,7 +619,8 @@ end
 function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit, 
                             noise_model::Union{NoiseModel, Nothing}, 
                             sim_params::AbstractSimConfig;
-                            alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP))
+                            alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP),
+                            rng::AbstractRNG=Random.default_rng())
 
     local ts = Timing.begin_scope!()
     try
@@ -502,7 +661,7 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
         end
         for gate in layer
             if length(gate.sites) == 2
-                @t :apply_window apply_window!(state, gate, sim_params, alg_options)
+                @t :apply_window apply_window!(state, gate, sim_params, alg_options; rng=rng)
                 if !isnothing(noise_model) && !isempty(noise_model.processes)
                     s1, s2 = sort(gate.sites)
                     local_noise = @t :create_local_noise_model create_local_noise_model(noise_model, s1, s2)
@@ -515,6 +674,17 @@ function run_digital_tjm(initial_state::MPS, circuit::DigitalCircuit,
                 else
                      @t :normalize MPSModule.normalize!(state)
                 end
+            elseif length(gate.sites) > 2
+                # Multi-qubit gate: apply via SRC MPO×MPS (currently contiguous-only).
+                op_mat = Matrix{ComplexF64}(matrix(gate.op))
+                mpo_gate = _mpo_from_contiguous_k_qubit_gate_matrix(op_mat, gate.sites, state.length; d=state.phys_dims[1])
+                stop = Algorithms.Cutoff(sim_params.truncation_threshold;
+                                         mindim=sim_params.min_bond_dim,
+                                         maxdim=sim_params.max_bond_dim)
+                new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
+                state.tensors = new_state.tensors
+                state.orth_center = new_state.orth_center
+                @t :normalize MPSModule.normalize!(state)
             end
         end
 
@@ -550,7 +720,8 @@ end
 function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                          noise_model::Union{NoiseModel, Nothing},
                          sim_params::AbstractSimConfig;
-                         alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP))
+                         alg_options::TJMOptions = TJMOptions(local_method=:TDVP, long_range_method=:TDVP),
+                         rng::AbstractRNG=Random.default_rng())
     local ts = Timing.begin_scope!()
     try
         state = @t :deepcopy_state deepcopy(initial_state)
@@ -594,7 +765,7 @@ function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                 end
                 for gate in layer
                     if length(gate.sites) == 2
-                        @t :apply_window apply_window!(state, gate, sim_params, alg_options)
+                        @t :apply_window apply_window!(state, gate, sim_params, alg_options; rng=rng)
                         if !isnothing(noise_model) && !isempty(noise_model.processes)
                             s1, s2 = sort(gate.sites)
                             local_noise = @t :create_local_noise_model create_local_noise_model(noise_model, s1, s2)
@@ -607,6 +778,16 @@ function run_digital_tjm(initial_state::MPS, circuit::RepeatedDigitalCircuit,
                         else
                             @t :normalize MPSModule.normalize!(state)
                         end
+                    elseif length(gate.sites) > 2
+                        op_mat = Matrix{ComplexF64}(matrix(gate.op))
+                        mpo_gate = _mpo_from_contiguous_k_qubit_gate_matrix(op_mat, gate.sites, state.length; d=state.phys_dims[1])
+                        stop = Algorithms.Cutoff(sim_params.truncation_threshold;
+                                                 mindim=sim_params.min_bond_dim,
+                                                 maxdim=sim_params.max_bond_dim)
+                        new_state = Algorithms.random_contraction(mpo_gate, state; stop=stop, rng=rng)
+                        state.tensors = new_state.tensors
+                        state.orth_center = new_state.orth_center
+                        @t :normalize MPSModule.normalize!(state)
                     end
                 end
 
