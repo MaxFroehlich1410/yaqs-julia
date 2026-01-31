@@ -79,7 +79,8 @@ end
     TJMOptions(; local_method=:TDVP,
                 long_range_method=:TDVP,
                 tdvp_truncation_timing=:during,
-                bug_truncation_granularity=:after_sweep)
+                bug_truncation_granularity=:after_sweep,
+                tdvp_gate_sweeps=1)
 
 Algorithm options for `run_digital_tjm` (circuit simulation).
 
@@ -101,6 +102,14 @@ Algorithm options for `run_digital_tjm` (circuit simulation).
   - `:after_window`: defer threshold-based truncation until after the whole window step
     (can reduce truncation artifacts but may increase peak χ).
 
+- **`tdvp_gate_sweeps`** (`Int`, default `1`) (`:TDVP` only):
+  - Number of *directed* TDVP sweeps used to apply each circuit gate MPO on the window.
+  - The sweeps alternate direction (forward, backward, forward, ...), while splitting the
+    total gate evolution time `dt_total = 1` uniformly across sweeps, i.e.
+    each sweep uses `dt = 1 / tdvp_gate_sweeps`.
+  - The window MPS is returned in the same canonical gauge as the historical 1-sweep
+    behavior (left-canonical with orthogonality center at the right edge) before writeback.
+
 - **`bug_truncation_granularity`** (`:after_sweep` | `:after_site`) (BUG-only):
   - Only relevant when `tdvp_truncation_timing == :during`.
   - `:after_sweep`: truncate once per BUG half-step sweep (default; cheapest).
@@ -111,14 +120,16 @@ struct TJMOptions
     long_range_method::Symbol # :TEBD | :TDVP | :BUG | :ZIPUP | :SRC
     tdvp_truncation_timing::Symbol # :during (default) | :after_window
     bug_truncation_granularity::Symbol # :after_sweep (default) | :after_site
+    tdvp_gate_sweeps::Int # number of back-and-forth TDVP sweeps to apply a gate
 end
 
 # Default constructor
 TJMOptions(; local_method::Symbol=:TDVP,
              long_range_method::Symbol=:TDVP,
              tdvp_truncation_timing::Symbol=:during,
-             bug_truncation_granularity::Symbol=:after_sweep) =
-    TJMOptions(local_method, long_range_method, tdvp_truncation_timing, bug_truncation_granularity)
+             bug_truncation_granularity::Symbol=:after_sweep,
+             tdvp_gate_sweeps::Int=1) =
+    TJMOptions(local_method, long_range_method, tdvp_truncation_timing, bug_truncation_granularity, tdvp_gate_sweeps)
 
 # ==============================================================================
 # SRC helpers: construct MPO for (possibly long-range) multi-qubit gates.
@@ -574,7 +585,11 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
                                                  max_bond_dim=sim_params.max_bond_dim,
                                                  truncation_threshold=th_tdvp)
 
-            @t :two_site_tdvp two_site_tdvp!(short_state, short_mpo, gate_config)
+            # Apply exp(-i * 1.0 * H_gate) using a configurable number of TDVP sweeps.
+            # `sweeps=1` matches the historical behavior (effective dt_total = 1.0).
+            @t :two_site_tdvp two_site_tdvp!(short_state, short_mpo, gate_config;
+                                             sweeps=alg_options.tdvp_gate_sweeps,
+                                             dt=1.0)
 
             if trunc_timing === :after_window
                 # Single post-pass compression of the *short* MPS using the same threshold semantics

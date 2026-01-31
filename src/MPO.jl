@@ -585,44 +585,6 @@ end
 
 # --- Application (MPO x MPS) with variational compression (TenPy-style) ---
 
-@inline function _variational_keep(S::AbstractVector{<:Real}, chi_max::Int, trunc::Real, svd_min::Real)
-    # Match the repo-wide convention: `trunc` is a relative discarded-weight tolerance (>=0).
-    # We emulate the logic used in `Decompositions.two_site_svd` / `DigitalTJM.apply_local_gate_exact!`:
-    # accumulate from the smallest singular values, and once the cumulative discarded weight
-    # would exceed `trunc`, keep the current value (hence the actual discarded weight stays < trunc).
-    kχ = min(length(S), chi_max)
-    # absolute cutoff (drop tiny/zero singular values)
-    if svd_min > 0
-        last_good = 0
-        @inbounds for i in 1:kχ
-            if S[i] >= svd_min
-                last_good = i
-            end
-        end
-        kχ = max(last_good, 1)
-    end
-
-    if trunc <= 0
-        return kχ
-    end
-
-    total_sq = sum(abs2, S)
-    discarded_sq = 0.0
-    keep_dim = kχ
-    min_keep = 2
-    @inbounds for k in length(S):-1:1
-        discarded_sq += S[k]^2
-        frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
-        if frac >= trunc
-            keep_dim = max(k, min_keep)
-            break
-        end
-    end
-    keep_dim = min(keep_dim, kχ)
-    keep_dim = max(keep_dim, 1)
-    return keep_dim
-end
-
 @inline function _theta_overlap_diff(theta_new::AbstractArray{T,4}, theta_old::AbstractArray{T,4}) where {T<:Number}
     # Return 1 - |<new|old>|/(||new||*||old||), in [0, 1] (up to roundoff)
     num = dot(vec(theta_new), vec(theta_old))  # dot() conjugates the first argument for complex arrays
@@ -633,52 +595,211 @@ end
     return 1.0 - abs(num) / den
 end
 
-@inline function _update_left_env(Lenv::Array{T,3},
+@inline function _variational_keep(S::AbstractVector{<:Real}, chi_max::Int, trunc::Real, svd_min::Real)
+    # Keep at most chi_max and drop s < svd_min (absolute).
+    # Then (optionally) enforce a *relative discarded-weight* tolerance:
+    #   sum_{discarded} s^2 / sum_all s^2 <= trunc
+    kχ = min(length(S), chi_max)
+    if svd_min > 0
+        last_good = 0
+        @inbounds for i in 1:kχ
+            if S[i] >= svd_min
+                last_good = i
+            end
+        end
+        kχ = max(last_good, 1)
+    end
+    if trunc <= 0
+        return kχ
+    end
+    total_sq = sum(abs2, S)
+    discarded_sq = 0.0
+    keep_dim = kχ
+    @inbounds for k in length(S):-1:1
+        discarded_sq += S[k]^2
+        frac = (total_sq == 0.0) ? 0.0 : (discarded_sq / total_sq)
+        if frac >= trunc
+            keep_dim = max(k, 1)
+            break
+        end
+    end
+    keep_dim = min(keep_dim, kχ)
+    keep_dim = max(keep_dim, 1)
+    return keep_dim
+end
+
+@inline function _get_theta2(psi::MPSModule.MPS{T}, i0::Int) where {T<:Number}
+    A0 = psi.tensors[i0]
+    A1 = psi.tensors[i0 + 1]
+    @tensor θ[aL, p0, p1, aR] := A0[aL, p0, k] * A1[k, p1, aR]
+    return Array(θ)
+end
+
+@inline function _env_update_left(LP::Array{T,3},
                                  Abra::Array{T,3},
                                  Wi::Array{T,4},
                                  Aket::Array{T,3}) where {T<:Number}
-    # Lenv[aL, wL, bL] -> Lnew[aR, wR, bR]
-    @tensor Lnew[aR, wR, bR] := Lenv[aL, wL, bL] * conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR]
-    return Array(Lnew)
+    # LP[aL, wL, bL] -> LP_next[aR, wR, bR]
+    @tensor LPn[aR, wR, bR] := LP[aL, wL, bL] * conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR]
+    return Array(LPn)
 end
 
-@inline function _update_right_env(Rnext::Array{T,3},
+@inline function _env_update_right(RPnext::Array{T,3},
                                   Abra::Array{T,3},
                                   Wi::Array{T,4},
                                   Aket::Array{T,3}) where {T<:Number}
-    # Rnext[aR, wR, bR] -> Rcur[aL, wL, bL]
-    @tensor Rcur[aL, wL, bL] := conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR] * Rnext[aR, wR, bR]
-    return Array(Rcur)
+    # RPnext[aR, wR, bR] -> RPcur[aL, wL, bL]
+    @tensor RP[aL, wL, bL] := conj(Abra[aL, pout, aR]) * Wi[wL, pout, pin, wR] * Aket[bL, pin, bR] * RPnext[aR, wR, bR]
+    return Array(RP)
 end
 
-function _build_right_envs(psi::MPSModule.MPS{T}, W::MPO{T}, psi0::MPSModule.MPS{T}) where {T<:Number}
-    L = psi.length
-    Renv = Vector{Array{T,3}}(undef, L + 1)
-    Renv[L + 1] = fill(one(T), 1, 1, 1)
+@inline function _build_right_env(psi_bra::MPSModule.MPS{T}, U::MPO{T}, psi_ket::MPSModule.MPS{T}) where {T<:Number}
+    L = psi_bra.length
+    RP = Vector{Array{T,3}}(undef, L + 1) # RP[i] is env starting at site i (1-based), RP[L+1] is boundary
+    RP[L + 1] = fill(one(T), 1, 1, 1)
     for i in L:-1:1
-        Renv[i] = _update_right_env(Renv[i + 1], psi.tensors[i], W.tensors[i], psi0.tensors[i])
+        RP[i] = _env_update_right(RP[i + 1], psi_bra.tensors[i], U.tensors[i], psi_ket.tensors[i])
     end
-    return Renv
+    return RP
 end
 
-function _build_left_envs(psi::MPSModule.MPS{T}, W::MPO{T}, psi0::MPSModule.MPS{T}) where {T<:Number}
-    L = psi.length
-    Lenv = Vector{Array{T,3}}(undef, L + 1)
-    Lenv[1] = fill(one(T), 1, 1, 1)
-    for i in 1:L
-        Lenv[i + 1] = _update_left_env(Lenv[i], psi.tensors[i], W.tensors[i], psi0.tensors[i])
+struct _TwoSiteApplyEff{T<:Number}
+    LP::Array{T,3}   # (aL, wL, bL)
+    W0::Array{T,4}   # (wL, p0_out, p0_in, wM)
+    W1::Array{T,4}   # (wM, p1_out, p1_in, wR)
+    RP::Array{T,3}   # (aR, wR, bR)
+    combine::Bool
+end
+
+@inline function _combine_theta(eff::_TwoSiteApplyEff, θ::Array{T,4}) where {T<:Number}
+    # TenPy's `TwoSiteH.combine_theta` may combine legs depending on `combine`.
+    # We mirror that interface: if `combine=true`, return a matrix with legs (vL*p0) × (p1*vR).
+    if eff.combine
+        χL, d0, d1, χR = size(θ)
+        return reshape(θ, χL * d0, d1 * χR)
     end
-    return Lenv
+    return θ
+end
+
+@inline function _matvec(eff::_TwoSiteApplyEff{T}, θ) where {T<:Number}
+    # Effective action of the MPO environment on the ket two-site tensor.
+    #
+    # TenPy code path (mps_common.py: update_local):
+    #   th = env.ket.get_theta(i0, n=2)
+    #   th = eff_H.combine_theta(th)
+    #   th = eff_H.matvec(th)
+    #
+    # Here we implement the `combine=false` case faithfully and provide a functional
+    # (but not performance-tuned) `combine=true` fallback.
+    if eff.combine
+        # θ is a matrix with shape (χL*d0, d1*χR); reshape back for contraction.
+        # We infer d0,d1 from MPO physical legs.
+        d0o = size(eff.W0, 2)
+        d1o = size(eff.W1, 2)
+        d0i = size(eff.W0, 3)
+        d1i = size(eff.W1, 3)
+        @assert d0o == d0i && d1o == d1i "combine=true currently assumes equal in/out physical dims."
+        χL = size(eff.LP, 1)
+        χR = size(eff.RP, 1)
+        θ4 = reshape(θ, χL, d0i, d1i, χR)
+        @tensor out[aL, p0o, p1o, aR] := eff.LP[aL, wL, bL] *
+                                        eff.W0[wL, p0o, p0i, wM] *
+                                        eff.W1[wM, p1o, p1i, wR] *
+                                        θ4[bL, p0i, p1i, bR] *
+                                        eff.RP[aR, wR, bR]
+        out4 = Array(out)
+        return reshape(out4, χL * d0o, d1o * χR)
+    else
+        θ4 = θ::Array{T,4}
+        @tensor out[aL, p0o, p1o, aR] := eff.LP[aL, wL, bL] *
+                                        eff.W0[wL, p0o, p0i, wM] *
+                                        eff.W1[wM, p1o, p1i, wR] *
+                                        θ4[bL, p0i, p1i, bR] *
+                                        eff.RP[aR, wR, bR]
+        return Array(out)
+    end
+end
+
+@inline function _update_new_psi!(psi::MPSModule.MPS{T},
+                                 i0::Int,
+                                 θ4::Array{T,4};
+                                 chi_max::Int,
+                                 trunc::Real,
+                                 svd_min::Real) where {T<:Number}
+    χL, d0, d1, χR = size(θ4)
+    M = reshape(θ4, χL * d0, d1 * χR)
+    F = svd(M)
+    keep = _variational_keep(F.S, chi_max, trunc, svd_min)
+    trunc_err = sum(abs2, @view(F.S[(keep + 1):end]))
+
+    U = @view(F.U[:, 1:keep])
+    S = @view(F.S[1:keep])
+    Vt = @view(F.Vt[1:keep, :])
+
+    # TenPy's `update_new_psi` stores the singular values `S` on the *bond* (separately from
+    # the site tensors) and sets site `i0` to left-canonical and site `i0+1` to right-canonical.
+    #
+    # Our MPS representation does not store an explicit bond Schmidt vector, so we choose a
+    # fixed convention: absorb `S` into the *right* tensor (matching existing TEBD updates in
+    # `DigitalTJM.apply_local_gate_exact!`).
+    psi.tensors[i0] = reshape(Array(U), χL, d0, keep)
+    psi.tensors[i0 + 1] = reshape(Array(Diagonal(S) * Array(Vt)), keep, d1, χR)
+    psi.orth_center = i0 + 1
+    return trunc_err
+end
+
+@inline function _update_local_variational!(psi_bra::MPSModule.MPS{T},
+                                           psi_ket::MPSModule.MPS{T},
+                                           U::MPO{T},
+                                           LP::Array{T,3},
+                                           RP::Array{T,3},
+                                           i0::Int,
+                                           move_right::Bool;
+                                           chi_max::Int,
+                                           trunc::Real,
+                                           svd_min::Real,
+                                           combine::Bool) where {T<:Number}
+    # Mirrors TenPy mps_common.py (2382-2489) for VariationalApplyMPO.update_local:
+    #   i0 = self.i0
+    #   self.make_eff_H()
+    #   th = self.env.ket.get_theta(i0, n=2)
+    #   th = self.eff_H.combine_theta(th)
+    #   th = self.eff_H.matvec(th)
+    #   if not self.eff_H.combine: th = th.combine_legs(...)
+    #   return self.update_new_psi(th)
+    θ_old = _get_theta2(psi_bra, i0)
+
+    eff = _TwoSiteApplyEff{T}(LP, U.tensors[i0], U.tensors[i0 + 1], RP, combine)
+    th = _get_theta2(psi_ket, i0)
+    th = _combine_theta(eff, th)
+    th = _matvec(eff, th)
+
+    θ4 = if combine
+        # th is a matrix; reshape back for local split (same as TenPy's post-matvec handling).
+        χL = size(LP, 1)
+        χR = size(RP, 1)
+        d0o = size(U.tensors[i0], 2)
+        d1o = size(U.tensors[i0 + 1], 2)
+        reshape(th, χL, d0o, d1o, χR)
+    else
+        th::Array{T,4}
+    end
+
+    trunc_err = _update_new_psi!(psi_bra, i0, θ4; chi_max=chi_max, trunc=trunc, svd_min=svd_min)
+    θ_new = _get_theta2(psi_bra, i0)
+    θdiff = _theta_overlap_diff(θ_new, θ_old)
+    return trunc_err, θdiff
 end
 
 """
-    apply_variational!(psi::MPS, W::MPO; chi_max, trunc=0.0, svd_min=eps(), min_sweeps=1, max_sweeps=4, tol_theta_diff=1e-12) -> (trunc_err, sweeps, last_theta_diff)
+    apply_variational!(psi::MPS, W::MPO; chi_max, trunc=0.0, svd_min=eps(), min_sweeps=1, max_sweeps=4, tol_theta_diff=1e-12, combine=false) -> (trunc_err, sweeps, last_theta_diff)
 
 Apply an MPO `W` to an MPS `psi` **in-place** using a TenPy-style *variational MPO application*.
 
-This finds an MPS `phi` (stored back into `psi`) which best approximates `W|psi0⟩`, where `psi0`
-is the input state (captured internally once), by alternating least-squares sweeps with two-site
-updates and SVD-based truncation.
+This is a direct Julia re-implementation of TenPy's `VariationalApplyMPO` local update logic:
+`MPO.apply(..., compression_method="variational")` dispatches to `VariationalApplyMPO(...).run()`,
+whose `update_local` routine (see `tenpy/algorithms/mps_common.py:2382-2489`) updates two-site
+blocks by contracting an MPO environment with the **ket** two-site tensor and then splitting via SVD.
 
 Tensor layouts (repo convention):
 - MPS: `(χL, d, χR)`
@@ -686,8 +807,8 @@ Tensor layouts (repo convention):
 
 Truncation:
 - `chi_max`: hard cap on MPS bond dimension
-- `trunc`: relative discarded-weight tolerance (>=0), matching the rest of this repo’s conventions
-- `svd_min`: absolute cutoff for singular values (drop exact zeros / tiny values)
+- `trunc`: relative discarded-weight tolerance (>=0)
+- `svd_min`: absolute cutoff for singular values
 """
 function apply_variational!(psi::MPSModule.MPS{T},
                             W::MPO{T};
@@ -696,16 +817,15 @@ function apply_variational!(psi::MPSModule.MPS{T},
                             svd_min::Real=eps(Float64),
                             min_sweeps::Int=1,
                             max_sweeps::Int=4,
-                            tol_theta_diff::Real=1.0e-12) where {T<:Number}
+                            tol_theta_diff::Real=1.0e-12,
+                            combine::Bool=false) where {T<:Number}
     @assert psi.length == W.length "MPS and MPO lengths must match"
     @assert psi.length >= 1
     @assert trunc >= 0.0
 
     L = psi.length
-    # Capture input state (ket) once, as in TenPy.
-    psi0 = deepcopy(psi)
+    psi0 = deepcopy(psi)  # TenPy: old_psi = self.psi.copy()
 
-    # Handle L=1 directly
     if L == 1
         A = psi.tensors[1]
         W1 = W.tensors[1]
@@ -718,107 +838,55 @@ function apply_variational!(psi::MPSModule.MPS{T},
     end
 
     trunc_err_total = 0.0
-    last_max_diff = Inf
     sweeps_done = 0
+    last_max_diff = Inf
 
     for sweep in 1:max_sweeps
         sweeps_done = sweep
         max_diff = 0.0
 
-        # --- Left-to-right sweep ---
-        Renv = _build_right_envs(psi, W, psi0)             # environments for cuts i..L
-        Lenv = fill(one(T), 1, 1, 1)                       # cut before site 1
+        # --- prepare environment (TenPy: init_env/make_eff_H) ---
+        RP = _build_right_env(psi, W, psi0)  # RP[i] is contraction of sites i..L
+        LP = Vector{Array{T,3}}(undef, L + 1)
+        LP[1] = fill(one(T), 1, 1, 1)
 
-        for i in 1:(L - 1)
-            # old theta from current bra (for convergence diagnostics)
-            A0b = psi.tensors[i]
-            A1b = psi.tensors[i + 1]
-            @tensor theta_old[aL, p0, p1, aR] := A0b[aL, p0, k] * A1b[k, p1, aR]
-            theta_old_arr = Array(theta_old)
+        # --- left-to-right sweep (move_right=true) ---
+        for i0 in 1:(L - 1)
+            # RP cut after i0+1 corresponds to RP[i0+2]
+            trunc_err, θdiff = _update_local_variational!(psi, psi0, W, LP[i0], RP[i0 + 2], i0, true;
+                                                         chi_max=chi_max, trunc=trunc, svd_min=svd_min, combine=combine)
+            trunc_err_total += trunc_err
+            max_diff = max(max_diff, θdiff)
 
-            Wi0 = W.tensors[i]
-            Wi1 = W.tensors[i + 1]
-            K0 = psi0.tensors[i]
-            K1 = psi0.tensors[i + 1]
-            Rcut = Renv[i + 2]
-
-            @tensor theta[aL, p0o, p1o, aR2] :=
-                Lenv[aL, wL, bL] *
-                Wi0[wL, p0o, p0i, wM] * K0[bL, p0i, bM] *
-                Wi1[wM, p1o, p1i, wR] * K1[bM, p1i, bR] *
-                Rcut[aR2, wR, bR]
-            theta_arr = Array(theta)
-
-            χL = size(theta_arr, 1)
-            d0 = size(theta_arr, 2)
-            d1 = size(theta_arr, 3)
-            χR = size(theta_arr, 4)
-            M = reshape(theta_arr, χL * d0, d1 * χR)
-            F = svd(M)
-            keep = _variational_keep(F.S, chi_max, trunc, svd_min)
-            trunc_err_total += sum(abs2, @view(F.S[(keep + 1):end]))
-
-            U = @view(F.U[:, 1:keep])
-            S = @view(F.S[1:keep])
-            Vt = @view(F.Vt[1:keep, :])
-
-            psi.tensors[i] = reshape(Array(U), χL, d0, keep)
-            psi.tensors[i + 1] = reshape(Array(Diagonal(S) * Array(Vt)), keep, d1, χR)
-            psi.orth_center = i + 1
-
-            @tensor theta_new[aL, p0, p1, aR] := psi.tensors[i][aL, p0, k] * psi.tensors[i + 1][k, p1, aR]
-            max_diff = max(max_diff, _theta_overlap_diff(Array(theta_new), theta_old_arr))
-
-            # update Lenv to cut before site i+1 using UPDATED bra tensor at site i
-            Lenv = _update_left_env(Lenv, psi.tensors[i], Wi0, K0)
+            # Update LP for the next bond using the UPDATED bra tensor on site i0.
+            LP[i0 + 1] = _env_update_left(LP[i0], psi.tensors[i0], W.tensors[i0], psi0.tensors[i0])
         end
 
-        # --- Right-to-left sweep ---
-        Lenvs = _build_left_envs(psi, W, psi0)             # environments for cuts 1..i-1
-        Rcut = fill(one(T), 1, 1, 1)                       # cut after site L
+        # Ensure LP[L] exists (not used for bond updates, but kept for symmetry/debug).
+        if !isassigned(LP, L + 1)
+            LP[L + 1] = _env_update_left(LP[L], psi.tensors[L], W.tensors[L], psi0.tensors[L])
+        end
 
-        for i in (L - 1):-1:1
-            # old theta from current bra
-            A0b = psi.tensors[i]
-            A1b = psi.tensors[i + 1]
-            @tensor theta_old[aL, p0, p1, aR] := A0b[aL, p0, k] * A1b[k, p1, aR]
-            theta_old_arr = Array(theta_old)
+        # --- right-to-left sweep (move_right=false) ---
+        Rcut = fill(one(T), 1, 1, 1)  # cut after site L
+        for i0 in (L - 1):-1:1
+            trunc_err, θdiff = _update_local_variational!(psi, psi0, W, LP[i0], Rcut, i0, false;
+                                                         chi_max=chi_max, trunc=trunc, svd_min=svd_min, combine=combine)
+            trunc_err_total += trunc_err
+            max_diff = max(max_diff, θdiff)
 
-            Wi0 = W.tensors[i]
-            Wi1 = W.tensors[i + 1]
-            K0 = psi0.tensors[i]
-            K1 = psi0.tensors[i + 1]
-            Lcut = Lenvs[i]
+            # Update Rcut to include UPDATED site (i0+1) for the next step to the left.
+            Rcut = _env_update_right(Rcut, psi.tensors[i0 + 1], W.tensors[i0 + 1], psi0.tensors[i0 + 1])
+        end
 
-            @tensor theta[aL, p0o, p1o, aR2] :=
-                Lcut[aL, wL, bL] *
-                Wi0[wL, p0o, p0i, wM] * K0[bL, p0i, bM] *
-                Wi1[wM, p1o, p1i, wR] * K1[bM, p1i, bR] *
-                Rcut[aR2, wR, bR]
-            theta_arr = Array(theta)
-
-            χL = size(theta_arr, 1)
-            d0 = size(theta_arr, 2)
-            d1 = size(theta_arr, 3)
-            χR = size(theta_arr, 4)
-            M = reshape(theta_arr, χL * d0, d1 * χR)
-            F = svd(M)
-            keep = _variational_keep(F.S, chi_max, trunc, svd_min)
-            trunc_err_total += sum(abs2, @view(F.S[(keep + 1):end]))
-
-            U = @view(F.U[:, 1:keep])
-            S = @view(F.S[1:keep])
-            Vt = @view(F.Vt[1:keep, :])
-
-            psi.tensors[i] = reshape(Array(U), χL, d0, keep)
-            psi.tensors[i + 1] = reshape(Array(Diagonal(S) * Array(Vt)), keep, d1, χR)
-            psi.orth_center = i
-
-            @tensor theta_new[aL, p0, p1, aR] := psi.tensors[i][aL, p0, k] * psi.tensors[i + 1][k, p1, aR]
-            max_diff = max(max_diff, _theta_overlap_diff(Array(theta_new), theta_old_arr))
-
-            # update Rcut to include UPDATED bra tensor at site i+1 for next step (moving left)
-            Rcut = _update_right_env(Rcut, psi.tensors[i + 1], Wi1, K1)
+        # TenPy's `VariationalCompression.get_sweep_schedule` adds one extra update at the end
+        # (re-updating the first bond) to improve convergence. We replicate this for `L>=2`.
+        if L >= 2
+            RP2 = _build_right_env(psi, W, psi0)
+            trunc_err, θdiff = _update_local_variational!(psi, psi0, W, fill(one(T), 1, 1, 1), RP2[3], 1, true;
+                                                         chi_max=chi_max, trunc=trunc, svd_min=svd_min, combine=combine)
+            trunc_err_total += trunc_err
+            max_diff = max(max_diff, θdiff)
         end
 
         last_max_diff = max_diff

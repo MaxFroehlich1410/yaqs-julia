@@ -140,6 +140,33 @@ using Yaqs.NoiseModule
         @test isapprox(ov, 1.0; atol=1e-10)
     end
 
+    @testset "TDVP gate sweeps are configurable and return canonical gauge" begin
+        # Directly exercise the TDVP window evolution used for gate application.
+        # Requirement: regardless of sweep count, TDVP returns the window MPS
+        # left-canonical with orthogonality center at the right boundary (historical behavior).
+        L = 3
+        psi0 = MPS(L; state="zeros")
+        pad_bond_dimension!(psi0, 2; noise_scale=0.0)
+
+        gate = DigitalGate(RzzGate(π/3), [1, 3], nothing) # long-range, triggers a 3-site window
+        win_start, win_end = 1, 3
+        win_len = win_end - win_start + 1
+        short_state = MPS(win_len, psi0.tensors[win_start:win_end], psi0.phys_dims[win_start:win_end], 1)
+        short_mpo = DigitalTJM.construct_window_mpo(gate, win_start, win_end)
+
+        cfg = StrongMeasurementConfig(Observable[];
+                                      max_bond_dim=64,
+                                      truncation_threshold=0.0)
+
+        # Single sweep (baseline)
+        Yaqs.Algorithms.two_site_tdvp!(short_state, short_mpo, cfg; sweeps=1, dt=1.0)
+        @test short_state.orth_center == win_len
+
+        # Multiple back-and-forth sweeps
+        Yaqs.Algorithms.two_site_tdvp!(short_state, short_mpo, cfg; sweeps=4, dt=1.0)
+        @test short_state.orth_center == win_len
+    end
+
     @testset "SRC method for long-range 2-qubit gate matches TEBD (up to tolerance)" begin
         using Random
 

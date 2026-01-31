@@ -59,6 +59,8 @@ Julia circuit evolution backend:
   --jl_run_zipup=false       (true | false)
   --jl_tdvp_truncation=during (during | after_window)
     Applies to TDVP window evolution; BUG reuses the same setting.
+  --jl_tdvp_gate_sweeps=1     (Int; TDVP-only)
+    Number of TDVP sweeps to apply each gate MPO on the window (alternates direction; dt_total=1 split across sweeps).
   --jl_bug_truncation=after_sweep (after_sweep | after_site)
     BUG-only: controls truncation granularity when truncating "during" evolution.
     - after_sweep: truncate once per BUG half-step sweep (default, cheaper)
@@ -443,6 +445,7 @@ end
 function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max::Int, trunc::Float64, outdir::String, tag::String,
                             state_jl::String, local_mode::Symbol, longrange_mode::Symbol,
                             tdvp_truncation_timing::Symbol=:during,
+                            tdvp_gate_sweeps::Int=1,
                             bug_truncation_granularity::Symbol=:after_sweep,
                             warmup::Bool=true)
     mkpath(outdir)
@@ -454,7 +457,8 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
     sim_params = TimeEvolutionConfig(obs_list, 1.0; dt=1.0, num_traj=1, sample_timesteps=true, max_bond_dim=chi_max, truncation_threshold=trunc)
     alg_options = TJMOptions(local_method=local_mode, long_range_method=longrange_mode,
                              tdvp_truncation_timing=tdvp_truncation_timing,
-                             bug_truncation_granularity=bug_truncation_granularity)
+                             bug_truncation_granularity=bug_truncation_granularity,
+                             tdvp_gate_sweeps=tdvp_gate_sweeps)
 
     # Warm-up run to exclude compilation from timing.
     if warmup
@@ -517,6 +521,7 @@ function _run_circuit_tdvp!(; circ::DigitalCircuit, sites::Vector{Int}, chi_max:
 end
 
 function _python_plot!(; outdir::String, jl_tag::String, var_tag::String, exact_tag::String,
+                       sites_plot::Vector{Int},
                        jl_tag_bug::Union{Nothing,String}=nothing,
                        jl_tag_tebd::Union{Nothing,String}=nothing,
                        jl_tag_src::Union{Nothing,String}=nothing,
@@ -531,12 +536,29 @@ jl_bug = sys.argv[5] if len(sys.argv) > 5 else "none"
 jl_tebd = sys.argv[6] if len(sys.argv) > 6 else "none"
 jl_src = sys.argv[7] if len(sys.argv) > 7 else "none"
 jl_zipup = sys.argv[8] if len(sys.argv) > 8 else "none"
+sites_plot_arg = sys.argv[9] if len(sys.argv) > 9 else ""
 jl_bug = None if (jl_bug is None or jl_bug.lower() in ("none","null","")) else jl_bug
 jl_tebd = None if (jl_tebd is None or jl_tebd.lower() in ("none","null","")) else jl_tebd
 jl_src = None if (jl_src is None or jl_src.lower() in ("none","null","")) else jl_src
 jl_zipup = None if (jl_zipup is None or jl_zipup.lower() in ("none","null","")) else jl_zipup
 var_tag = None if (var_tag is None or str(var_tag).lower() in ("none","null","")) else var_tag
 exact_tag = None if (exact_tag is None or str(exact_tag).lower() in ("none","null","")) else exact_tag
+
+def parse_sites(s):
+    if s is None:
+        return []
+    s = str(s).strip()
+    if not s:
+        return []
+    out = []
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.append(int(part))
+    return out
+
+sites_plot = parse_sites(sites_plot_arg)
 
 def read_csv(path):
     with open(path, newline="") as f:
@@ -574,12 +596,12 @@ def fmt_s(x):
     return f"{x:.2f} s"
 
 step_jl, obs_cols, obs_jl = read_obs(jl_tag)
-step_var, obs_var = None, None
+step_var, obs_cols_var, obs_var = None, None, None
 if var_tag is not None:
-    step_var, _, obs_var = read_obs(var_tag)
-step_ex, obs_ex = None, None
+    step_var, obs_cols_var, obs_var = read_obs(var_tag)
+step_ex, obs_cols_ex, obs_ex = None, None, None
 if exact_tag is not None:
-    step_ex, _, obs_ex = read_obs(exact_tag)
+    step_ex, obs_cols_ex, obs_ex = read_obs(exact_tag)
 
 _, chi_cols_jl, chi_jl = read_chi(jl_tag)
 chi_cols_var, chi_var = None, None
@@ -594,6 +616,7 @@ t_var = read_timing(var_tag) if var_tag is not None else None
 t_ex = read_timing(exact_tag) if exact_tag is not None else None
 
 # Optional second Julia curve (BUG2nd)
+obs_cols_bug = None
 obs_bug = None
 chi_bug = None
 t_bug = None
@@ -601,7 +624,7 @@ if jl_bug is not None:
     obs_path = os.path.join(outdir, f"{jl_bug}_obs.csv")
     chi_path = os.path.join(outdir, f"{jl_bug}_chi.csv")
     if os.path.exists(obs_path) and os.path.exists(chi_path):
-        _, _, obs_bug = read_obs(jl_bug)
+        _, obs_cols_bug, obs_bug = read_obs(jl_bug)
         _, _, chi_bug = read_chi(jl_bug)
         t_bug = read_timing(jl_bug)
     else:
@@ -610,6 +633,7 @@ if jl_bug is not None:
 
 # Optional TEBD curve (Julia)
 step_tebd = None
+obs_cols_tebd = None
 obs_tebd = None
 chi_tebd = None
 t_tebd = None
@@ -617,7 +641,7 @@ if jl_tebd is not None:
     obs_path = os.path.join(outdir, f"{jl_tebd}_obs.csv")
     chi_path = os.path.join(outdir, f"{jl_tebd}_chi.csv")
     if os.path.exists(obs_path) and os.path.exists(chi_path):
-        step_tebd, _, obs_tebd = read_obs(jl_tebd)
+        step_tebd, obs_cols_tebd, obs_tebd = read_obs(jl_tebd)
         _, _, chi_tebd = read_chi(jl_tebd)
         t_tebd = read_timing(jl_tebd)
     else:
@@ -625,6 +649,7 @@ if jl_tebd is not None:
 
 # Optional SRC curve (Julia)
 step_src = None
+obs_cols_src = None
 obs_src = None
 chi_src = None
 t_src = None
@@ -632,7 +657,7 @@ if jl_src is not None:
     obs_path = os.path.join(outdir, f"{jl_src}_obs.csv")
     chi_path = os.path.join(outdir, f"{jl_src}_chi.csv")
     if os.path.exists(obs_path) and os.path.exists(chi_path):
-        step_src, _, obs_src = read_obs(jl_src)
+        step_src, obs_cols_src, obs_src = read_obs(jl_src)
         _, _, chi_src = read_chi(jl_src)
         t_src = read_timing(jl_src)
     else:
@@ -640,6 +665,7 @@ if jl_src is not None:
 
 # Optional ZIPUP curve (Julia)
 step_zipup = None
+obs_cols_zipup = None
 obs_zipup = None
 chi_zipup = None
 t_zipup = None
@@ -647,7 +673,7 @@ if jl_zipup is not None:
     obs_path = os.path.join(outdir, f"{jl_zipup}_obs.csv")
     chi_path = os.path.join(outdir, f"{jl_zipup}_chi.csv")
     if os.path.exists(obs_path) and os.path.exists(chi_path):
-        step_zipup, _, obs_zipup = read_obs(jl_zipup)
+        step_zipup, obs_cols_zipup, obs_zipup = read_obs(jl_zipup)
         _, _, chi_zipup = read_chi(jl_zipup)
         t_zipup = read_timing(jl_zipup)
     else:
@@ -723,6 +749,11 @@ try:
 except Exception as e:
     raise RuntimeError("matplotlib not available in system python") from e
 
+try:
+    import numpy as np
+except Exception as e:
+    raise RuntimeError("numpy not available in system python") from e
+
 # Bond dims
 plt.figure(figsize=(10,4))
 plt.plot(x, chi_max_jl, label=f"{jl_tag} (Julia) [{fmt_s(t_jl)}]", linewidth=2)
@@ -749,13 +780,26 @@ plt.savefig(bond_plot)
 plt.close()
 
 # Observables
-nsites = len(obs_cols)
+def col_index(cols, name):
+    try:
+        return cols.index(name)
+    except ValueError:
+        raise RuntimeError(f"Missing column {name} in {cols}")
+
+if sites_plot:
+    plot_cols = [f"Z_site{s}" for s in sites_plot]
+    plot_idx = [col_index(obs_cols, c) for c in plot_cols]
+else:
+    plot_cols = list(obs_cols)
+    plot_idx = list(range(len(obs_cols)))
+
+nsites = len(plot_idx)
 fig, axes = plt.subplots(nsites, 1, figsize=(10, 3*nsites), sharex=True)
 if nsites == 1:
     axes = [axes]
 
-for i in range(nsites):
-    ax = axes[i]
+for p, i in enumerate(plot_idx):
+    ax = axes[p]
     y_jl = [r[i] for r in obs_jl]
     y_tebd = [r[i] for r in obs_tebd] if obs_tebd is not None else None
     y_src = [r[i] for r in obs_src] if obs_src is not None else None
@@ -834,20 +878,100 @@ obs_plot = os.path.join(outdir, "observables_comparison.png")
 fig.savefig(obs_plot)
 plt.close(fig)
 
+# Heatmap: squared error across all sites and timesteps
+ref_tag = None
+ref_cols = None
+ref_obs = None
+if obs_ex is not None:
+    ref_tag = "Qiskit exact"
+    ref_cols = obs_cols_ex
+    ref_obs = obs_ex
+elif obs_tebd is not None:
+    ref_tag = jl_tebd
+    ref_cols = obs_cols_tebd
+    ref_obs = obs_tebd
+
+def align_obs(obs_vals, cols, cols_ref):
+    idx = [col_index(cols, c) for c in cols_ref]
+    # obs_vals: list(time)[list(cols)] -> array(time, cols_ref) -> transpose to (sites, time)
+    arr = np.asarray(obs_vals, dtype=float)
+    return arr[:, idx].T
+
+heatmap_plot = None
+if ref_obs is not None and ref_cols is not None:
+    mats = []
+    if obs_jl is not None and obs_cols is not None:
+        mats.append((jl_tag, obs_cols, obs_jl))
+    if obs_bug is not None and obs_cols_bug is not None:
+        mats.append(("BUG2nd", obs_cols_bug, obs_bug))
+    if obs_src is not None and obs_cols_src is not None:
+        mats.append((jl_src, obs_cols_src, obs_src))
+    if obs_zipup is not None and obs_cols_zipup is not None:
+        mats.append((jl_zipup, obs_cols_zipup, obs_zipup))
+    if obs_var is not None and obs_cols_var is not None:
+        mats.append(("TenPy variational", obs_cols_var, obs_var))
+    if obs_tebd is not None and obs_cols_tebd is not None:
+        mats.append((jl_tebd, obs_cols_tebd, obs_tebd))
+
+    mats = [(name, cols, vals) for (name, cols, vals) in mats if name is not None and name != ref_tag]
+    if mats:
+        ref = align_obs(ref_obs, ref_cols, ref_cols)
+        errs = []
+        labels = []
+        for (name, cols, vals) in mats:
+            a = align_obs(vals, cols, ref_cols)
+            errs.append((a - ref) ** 2)
+            labels.append(name)
+
+        vmax = max(float(np.max(e)) for e in errs)
+        fig2, axes2 = plt.subplots(len(errs), 1, figsize=(12, 2.8 * len(errs)), sharex=True, sharey=True)
+        if len(errs) == 1:
+            axes2 = [axes2]
+        im = None
+        for k, e in enumerate(errs):
+            ax = axes2[k]
+            im = ax.imshow(e, aspect="auto", origin="lower", cmap="viridis", vmin=0.0, vmax=vmax)
+            ax.set_ylabel("site")
+            ax.set_title(f"Squared error vs {ref_tag}: {labels[k]}")
+        axes2[-1].set_xlabel("layer / step")
+        fig2.colorbar(im, ax=axes2, label="(Δ⟨Z⟩)^2")
+        fig2.tight_layout()
+        heatmap_plot = os.path.join(outdir, "squared_error_heatmap.png")
+        fig2.savefig(heatmap_plot, dpi=200)
+        plt.close(fig2)
+
 print("Saved plots:")
 print(bond_plot)
 print(obs_plot)
+if heatmap_plot is not None:
+    print(heatmap_plot)
 """
     jl_bug = jl_tag_bug === nothing ? "none" : jl_tag_bug
     jl_tebd = jl_tag_tebd === nothing ? "none" : jl_tag_tebd
     jl_src = jl_tag_src === nothing ? "none" : jl_tag_src
     jl_zipup = jl_tag_zipup === nothing ? "none" : jl_tag_zipup
-    cmd = `python3 -c $code $outdir $jl_tag $var_tag $exact_tag $jl_bug $jl_tebd $jl_src $jl_zipup`
+    sites_plot_arg = join(sites_plot, ",")
+    cmd = `python3 -c $code $outdir $jl_tag $var_tag $exact_tag $jl_bug $jl_tebd $jl_src $jl_zipup $sites_plot_arg`
     run(cmd)
 end
 
 function main()
     kv = _parse_kv_args(ARGS)
+
+    # --- Krylov/Lanczos tracking (always on) ---
+    # Tracks KrylovKit's `info.numops` per `expm_krylov` call. This is a robust proxy for
+    # the actual Krylov/Lanczos work done, and should drop below the max `k` when early termination happens.
+    YaqsLite.Algorithms.enable_krylov_numops_tracking!(true)
+    YaqsLite.Algorithms.reset_krylov_numops_stats!()
+    YaqsLite.Algorithms.reset_krylov_ishermitian_stats!()
+
+    # Optional: override KrylovKit tolerance (otherwise uses KrylovKit default).
+    krylov_tol_raw = lowercase(get(kv, "krylov_tol", "default"))
+    if krylov_tol_raw in ("default", "none", "null", "")
+        YaqsLite.Algorithms.set_krylov_tol!(nothing)
+    else
+        YaqsLite.Algorithms.set_krylov_tol!(parse(Float64, krylov_tol_raw))
+    end
 
     # --- Adjustable parameters ---
     circuit = get(kv, "circuit", "Heisenberg")
@@ -870,6 +994,9 @@ function main()
     end
     warmup = lowercase(get(kv, "warmup", "true")) in ("1", "true", "yes", "y")
 
+    jl_tdvp_gate_sweeps = parse(Int, get(kv, "jl_tdvp_gate_sweeps", "1"))
+    jl_tdvp_gate_sweeps < 1 && error("--jl_tdvp_gate_sweeps must be ≥ 1 (got $jl_tdvp_gate_sweeps).")
+
     jl_bug_trunc_raw = lowercase(get(kv, "jl_bug_truncation", "after_sweep"))  # after_sweep|after_site
     jl_bug_trunc = if jl_bug_trunc_raw in ("after_sweep", "sweep", "after")
         :after_sweep
@@ -887,6 +1014,7 @@ function main()
     @printf("CircuitTDVP modes: local=%s longrange=%s (warmup=%s)\n",
             String(jl_local_mode), String(jl_longrange_mode), string(warmup))
     @printf("CircuitTDVP truncation timing (2-site TDVP): %s\n", String(jl_tdvp_truncation))
+    @printf("CircuitTDVP TDVP gate sweeps: %d\n", jl_tdvp_gate_sweeps)
     @printf("BUG truncation granularity (when truncating during): %s\n", String(jl_bug_trunc))
     if trunc_mode in ("absolute", "abs")
         @printf("Truncation (Julia): absolute_discarded_weight=%.3g  [legacy]\n", trunc)
@@ -919,6 +1047,7 @@ function main()
         "jl_local_mode" => jl_local_mode,
         "jl_longrange_mode" => jl_longrange_mode,
         "jl_tdvp_truncation" => jl_tdvp_truncation,
+        "jl_tdvp_gate_sweeps" => jl_tdvp_gate_sweeps,
         "jl_bug_truncation_granularity" => jl_bug_trunc,
         "warmup" => warmup,
         "base_outdir" => base_outdir,
@@ -934,9 +1063,13 @@ function main()
 
     # --- Run CircuitTDVP (Julia) in-process ---
     jl_tag = get(kv, "tag_jl", "circuitTDVP")
-    _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag,
+    sites_all = collect(1:L)
+    sites_all_str = join(string.(sites_all), ",")
+
+    _run_circuit_tdvp!(; circ=circ, sites=sites_all, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag,
                        state_jl=state_jl, local_mode=jl_local_mode, longrange_mode=jl_longrange_mode,
                        tdvp_truncation_timing=jl_tdvp_truncation,
+                       tdvp_gate_sweeps=jl_tdvp_gate_sweeps,
                        bug_truncation_granularity=jl_bug_trunc,
                        warmup=warmup)
 
@@ -946,9 +1079,10 @@ function main()
     if jl_run_tebd
         jl_tag_tebd = get(kv, "tag_jl_tebd", "circuitTEBD")
         @printf("[jl_tebd] running additional Julia TEBD (tag=%s)\n", jl_tag_tebd)
-        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_tebd,
+        _run_circuit_tdvp!(; circ=circ, sites=sites_all, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_tebd,
                            state_jl=state_jl, local_mode=:TEBD, longrange_mode=:TEBD,
                            tdvp_truncation_timing=jl_tdvp_truncation,
+                           tdvp_gate_sweeps=jl_tdvp_gate_sweeps,
                            bug_truncation_granularity=jl_bug_trunc,
                            warmup=warmup)
     end
@@ -959,7 +1093,7 @@ function main()
     if jl_run_src
         jl_tag_src = get(kv, "tag_jl_src", "circuitSRC")
         @printf("[jl_src] running additional Julia SRC (tag=%s)\n", jl_tag_src)
-        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_src,
+        _run_circuit_tdvp!(; circ=circ, sites=sites_all, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_src,
                            state_jl=state_jl, local_mode=:SRC, longrange_mode=:SRC,
                            tdvp_truncation_timing=jl_tdvp_truncation,
                            bug_truncation_granularity=jl_bug_trunc,
@@ -972,7 +1106,7 @@ function main()
     if jl_run_zipup
         jl_tag_zipup = get(kv, "tag_jl_zipup", "circuitZIPUP")
         @printf("[jl_zipup] running additional Julia ZIPUP (tag=%s)\n", jl_tag_zipup)
-        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_zipup,
+        _run_circuit_tdvp!(; circ=circ, sites=sites_all, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_zipup,
                            state_jl=state_jl, local_mode=:ZIPUP, longrange_mode=:ZIPUP,
                            tdvp_truncation_timing=jl_tdvp_truncation,
                            bug_truncation_granularity=jl_bug_trunc,
@@ -985,7 +1119,7 @@ function main()
     if jl_compare_bug
         jl_tag_bug = get(kv, "tag_jl_bug", "circuitBUG")
         @printf("[jl_compare_bug] running additional Julia BUG2nd (tag=%s)\n", jl_tag_bug)
-        _run_circuit_tdvp!(; circ=circ, sites=sites, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_bug,
+        _run_circuit_tdvp!(; circ=circ, sites=sites_all, chi_max=chi_max, trunc=trunc_jl, outdir=outdir, tag=jl_tag_bug,
                            state_jl=state_jl, local_mode=:BUG, longrange_mode=:BUG,
                            tdvp_truncation_timing=jl_tdvp_truncation,
                            bug_truncation_granularity=jl_bug_trunc,
@@ -1001,7 +1135,7 @@ function main()
         # Variational MPO application needs enough sweeps to converge when truncation is effectively off.
         min_sweeps = parse(Int, get(kv, "min_sweeps", "2"))
         max_sweeps = parse(Int, get(kv, "max_sweeps", "10"))
-        cmd_var = `python3 $py_tenpy --gatelist=$gatelist_path --method=variational --chi-max=$chi_max --trunc=$trunc --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps --max-trunc-err=none`
+        cmd_var = `python3 $py_tenpy --gatelist=$gatelist_path --method=variational --chi-max=$chi_max --trunc=$trunc --sites=$sites_all_str --state=$state_py --outdir=$outdir --tag=$py_var_tag --min-sweeps=$min_sweeps --max-sweeps=$max_sweeps --max-trunc-err=none`
         @printf("-> %s\n", string(cmd_var))
         run(cmd_var)
     end
@@ -1016,7 +1150,7 @@ function main()
         @printf("[qiskit_exact] skipping exact reference for L=%d (>12)\n", L)
         py_ex_tag = "none"
     else
-        cmd_ex = `python3 $py_ex --gatelist=$gatelist_path --sites=$(join(sites, ",")) --state=$state_py --outdir=$outdir --tag=$py_ex_tag`
+        cmd_ex = `python3 $py_ex --gatelist=$gatelist_path --sites=$sites_all_str --state=$state_py --outdir=$outdir --tag=$py_ex_tag`
         @printf("-> %s\n", string(cmd_ex))
         run(cmd_ex)
     end
@@ -1030,7 +1164,12 @@ function main()
     ex_chi = joinpath(outdir, "$(py_ex_tag)_chi.csv")
 
     _python_plot!(; outdir=outdir, jl_tag=jl_tag, jl_tag_bug=jl_tag_bug, jl_tag_tebd=jl_tag_tebd, jl_tag_src=jl_tag_src, jl_tag_zipup=jl_tag_zipup,
+                  sites_plot=sites,
                   var_tag=py_var_tag, exact_tag=py_ex_tag)
+
+    # --- Print Krylov stats (always) ---
+    YaqsLite.Algorithms.print_krylov_ishermitian_stats(; header="Krylov ishermitian stats (this run)")
+    YaqsLite.Algorithms.print_krylov_numops_stats!(; header="Krylov numops stats (this run)", maxbins=40)
 end
 
 main()

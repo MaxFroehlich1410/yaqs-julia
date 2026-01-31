@@ -24,6 +24,8 @@ end
 
 export single_site_tdvp!, two_site_tdvp!, set_krylov_ishermitian_mode!, reset_krylov_ishermitian_cache!,
        reset_krylov_ishermitian_stats!, print_krylov_ishermitian_stats,
+       enable_krylov_numops_tracking!, reset_krylov_numops_stats!, print_krylov_numops_stats!,
+       set_krylov_tol!,
        Cutoff, FixedDimension, no_truncation, random_contraction
 
 # --- Krylov Subspace Methods ---
@@ -36,6 +38,155 @@ const _KRYLOV_CALLS_LANCZOS = Atomic{Int}(0)  # expm_krylov calls with ishermiti
 const _KRYLOV_CALLS_ARNOLDI = Atomic{Int}(0)  # expm_krylov calls with ishermitian=false
 const _KRYLOV_AUTO_DECISIONS_LANCZOS = Atomic{Int}(0)  # per-thread cache decisions in :auto
 const _KRYLOV_AUTO_DECISIONS_ARNOLDI = Atomic{Int}(0)
+
+# Optional override for KrylovKit's tolerance in `exponentiate`.
+# - `nothing` (default): use KrylovKit defaults
+# - `tol::Float64`: pass `tol=...` into KrylovKit
+const _KRYLOV_TOL = Ref{Union{Nothing, Float64}}(nothing)
+
+"""
+    set_krylov_tol!(tol::Union{Nothing,Real})
+
+Set the tolerance passed to KrylovKit's `exponentiate` inside `expm_krylov`.
+
+- `nothing` (default): use KrylovKit's default `tol`
+- `tol::Real`: explicitly set `tol` (interpreted by KrylovKit as accuracy per unit time)
+"""
+function set_krylov_tol!(tol::Union{Nothing, Real})
+    _KRYLOV_TOL[] = tol === nothing ? nothing : Float64(tol)
+    return nothing
+end
+
+# --- Krylov runtime tracking (easy-to-delete debug aid) ---
+# Tracks how many operator applications (`info.numops`) KrylovKit actually used per `expm_krylov` call.
+# This correlates strongly with Krylov/Lanczos iterations and is what we can robustly access from KrylovKit.
+const _KRYLOV_TRACK_NUMOPS = Ref{Bool}(false)
+const _KRYLOV_NUMOPS_CALLS_LANCZOS = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_CALLS_ARNOLDI = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_TOTAL_LANCZOS = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_TOTAL_ARNOLDI = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_MAX_LANCZOS = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_MAX_ARNOLDI = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_OVERFLOW_LANCZOS = Atomic{Int}(0)
+const _KRYLOV_NUMOPS_OVERFLOW_ARNOLDI = Atomic{Int}(0)
+# Histogram cap: store counts for numops=1..MAX (values > MAX go to overflow)
+const _KRYLOV_NUMOPS_HIST_MAX = 128
+const _KRYLOV_NUMOPS_HIST_LANCZOS = [Atomic{Int}(0) for _ in 1:_KRYLOV_NUMOPS_HIST_MAX]
+const _KRYLOV_NUMOPS_HIST_ARNOLDI = [Atomic{Int}(0) for _ in 1:_KRYLOV_NUMOPS_HIST_MAX]
+
+"""
+    enable_krylov_numops_tracking!(flag::Bool=true)
+
+Enable/disable lightweight runtime stats collection for `expm_krylov`.
+When enabled, counts KrylovKit's `info.numops` per call (number of `A_func` applications).
+"""
+enable_krylov_numops_tracking!(flag::Bool=true) = (_KRYLOV_TRACK_NUMOPS[] = flag)
+
+"""
+    reset_krylov_numops_stats!()
+
+Reset the `expm_krylov` numops counters/histograms.
+"""
+function reset_krylov_numops_stats!()
+    atomic_xchg!(_KRYLOV_NUMOPS_CALLS_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_CALLS_ARNOLDI, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_TOTAL_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_TOTAL_ARNOLDI, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_MAX_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_MAX_ARNOLDI, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_OVERFLOW_LANCZOS, 0)
+    atomic_xchg!(_KRYLOV_NUMOPS_OVERFLOW_ARNOLDI, 0)
+    @inbounds for i in 1:_KRYLOV_NUMOPS_HIST_MAX
+        atomic_xchg!(_KRYLOV_NUMOPS_HIST_LANCZOS[i], 0)
+        atomic_xchg!(_KRYLOV_NUMOPS_HIST_ARNOLDI[i], 0)
+    end
+    return nothing
+end
+
+@inline function _atomic_update_max!(a::Atomic{Int}, x::Int)
+    # lock-free max update
+    while true
+        cur = a[]
+        if x <= cur
+            return nothing
+        end
+        if atomic_cas!(a, cur, x) == cur
+            return nothing
+        end
+    end
+end
+
+@inline function _krylov_track_numops!(isherm::Bool, numops::Int)
+    if !_KRYLOV_TRACK_NUMOPS[]
+        return nothing
+    end
+    if isherm
+        atomic_add!(_KRYLOV_NUMOPS_CALLS_LANCZOS, 1)
+        atomic_add!(_KRYLOV_NUMOPS_TOTAL_LANCZOS, numops)
+        _atomic_update_max!(_KRYLOV_NUMOPS_MAX_LANCZOS, numops)
+        if 1 <= numops <= _KRYLOV_NUMOPS_HIST_MAX
+            atomic_add!(_KRYLOV_NUMOPS_HIST_LANCZOS[numops], 1)
+        else
+            atomic_add!(_KRYLOV_NUMOPS_OVERFLOW_LANCZOS, 1)
+        end
+    else
+        atomic_add!(_KRYLOV_NUMOPS_CALLS_ARNOLDI, 1)
+        atomic_add!(_KRYLOV_NUMOPS_TOTAL_ARNOLDI, numops)
+        _atomic_update_max!(_KRYLOV_NUMOPS_MAX_ARNOLDI, numops)
+        if 1 <= numops <= _KRYLOV_NUMOPS_HIST_MAX
+            atomic_add!(_KRYLOV_NUMOPS_HIST_ARNOLDI[numops], 1)
+        else
+            atomic_add!(_KRYLOV_NUMOPS_OVERFLOW_ARNOLDI, 1)
+        end
+    end
+    return nothing
+end
+
+"""
+    print_krylov_numops_stats!(; header="Krylov numops stats", maxbins=32)
+
+Print a summary and a small histogram of KrylovKit's `info.numops` (number of `A_func` applications)
+observed in `expm_krylov` calls.
+"""
+function print_krylov_numops_stats!(; header::AbstractString="Krylov numops stats", maxbins::Int=32)
+    cl = _KRYLOV_NUMOPS_CALLS_LANCZOS[]
+    ca = _KRYLOV_NUMOPS_CALLS_ARNOLDI[]
+    tl = _KRYLOV_NUMOPS_TOTAL_LANCZOS[]
+    ta = _KRYLOV_NUMOPS_TOTAL_ARNOLDI[]
+    ml = _KRYLOV_NUMOPS_MAX_LANCZOS[]
+    ma = _KRYLOV_NUMOPS_MAX_ARNOLDI[]
+    ol = _KRYLOV_NUMOPS_OVERFLOW_LANCZOS[]
+    oa = _KRYLOV_NUMOPS_OVERFLOW_ARNOLDI[]
+
+    @printf "\n\t%s\n" header
+    if cl > 0
+        @printf "\t  lanczos: calls=%d  mean_numops=%.3f  max_numops=%d  overflow=%d\n" cl (tl / cl) ml ol
+        nshow = min(maxbins, _KRYLOV_NUMOPS_HIST_MAX)
+        @printf "\t  lanczos histogram (numops -> count), first %d bins:\n" nshow
+        @inbounds for i in 1:nshow
+            c = _KRYLOV_NUMOPS_HIST_LANCZOS[i][]
+            if c > 0
+                @printf "\t    %3d -> %d\n" i c
+            end
+        end
+    else
+        @printf "\t  lanczos: calls=0\n"
+    end
+    if ca > 0
+        @printf "\t  arnoldi: calls=%d  mean_numops=%.3f  max_numops=%d  overflow=%d\n" ca (ta / ca) ma oa
+        nshow = min(maxbins, _KRYLOV_NUMOPS_HIST_MAX)
+        @printf "\t  arnoldi histogram (numops -> count), first %d bins:\n" nshow
+        @inbounds for i in 1:nshow
+            c = _KRYLOV_NUMOPS_HIST_ARNOLDI[i][]
+            if c > 0
+                @printf "\t    %3d -> %d\n" i c
+            end
+        end
+    else
+        @printf "\t  arnoldi: calls=0\n"
+    end
+    return nothing
+end
 
 function __init__()
     # Ensure cache is sized to current thread count (important if precompiled with fewer threads).
@@ -183,7 +334,17 @@ function expm_krylov(A_func, v::AbstractArray{T}, dt::Number, k::Int) where T
         atomic_add!(_KRYLOV_CALLS_ARNOLDI, 1)
     end
 
-    val, info = @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; tol=1e-10, krylovdim=k, maxiter=1, ishermitian=isherm)
+    # Treat `k` as a *maximum* Krylov subspace dimension.
+    # Let KrylovKit terminate early based on its tolerance (default, unless overridden via `_KRYLOV_TOL`).
+    tol = _KRYLOV_TOL[]
+    val, info = if tol === nothing
+        @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; krylovdim=k, maxiter=1, ishermitian=isherm)
+    else
+        @t :tdvp_krylov_exponentiate exponentiate(A_func, t_val, v; tol=tol, krylovdim=k, maxiter=1, ishermitian=isherm)
+    end
+    # Track actual work done (proxy: number of A_func applications).
+    # KrylovKit exposes this as `info.numops`.
+    _krylov_track_numops!(isherm, getproperty(info, :numops))
     return val
 end
 
@@ -477,9 +638,22 @@ function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
     _tdvp_sweep_hamiltonian_2site!(state, H, config)
 end
 
-function two_site_tdvp!(state::MPS, H::MPO, config::Union{MeasurementConfig, StrongMeasurementConfig})
-    # Circuit Simulation: Single Forward Sweep
-    _tdvp_sweep_circuit_2site!(state, H, config)
+function two_site_tdvp!(state::MPS,
+                        H::MPO,
+                        config::Union{MeasurementConfig, StrongMeasurementConfig};
+                        sweeps::Int=1,
+                        dt::Float64=1.0)
+    # Circuit Simulation: directed (circuit) TDVP sweeps.
+    # Historically, we applied a single forward sweep corresponding to dt_total=1.
+    # For improved accuracy, we optionally perform multiple back-and-forth sweeps,
+    # splitting dt across the sweeps so the total evolution time remains dt.
+    @assert sweeps ≥ 1 "TDVP circuit sweeps must satisfy sweeps ≥ 1 (got $sweeps)."
+    @assert isfinite(dt) "TDVP circuit dt must be finite (got $dt)."
+    _tdvp_sweep_circuit_2site!(state, H, config; sweeps=sweeps, dt=dt)
+
+    # IMPORTANT: Ensure the same canonical gauge as the historical single-sweep behavior:
+    # return the MPS left-canonical with orthogonality center at the right boundary.
+    shift_orthogonality_center!(state, state.length)
 end
 
 # --- Implementation of Sweeps ---
@@ -619,27 +793,76 @@ function _tdvp_sweep_hamiltonian_2site!(state, H, config)
 end
 
 # 4. Circuit 2-Site (Forward Only)
-function _tdvp_sweep_circuit_2site!(state, H, config)
+function _tdvp_sweep_circuit_2site!(state, H, config; sweeps::Int=1, dt::Float64=1.0)
+    L = state.length
+    if L ≤ 1
+        return nothing
+    end
+
+    dt_step = dt / sweeps
+    for s in 1:sweeps
+        if isodd(s)
+            _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step)
+        else
+            _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step)
+        end
+    end
+    return nothing
+end
+
+function _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step::Float64)
     @t :tdvp_shift_orth_center shift_orthogonality_center!(state, 1)
     L = state.length
-    
+
     E_left, E_right = @t :tdvp_init_envs _init_envs(state, H)
-    
-    # Circuit Logic: 
-    # Bulk dt=2.0 (split into +1.0, -1.0)
-    # Edge dt=1.0 (just +1.0)
-    
-    # Forward Sweep (1 -> L-2)
-    for i in 1:(L-2)
-        # Evolve +1.0, Back -1.0
-        _two_site_update_forward!(state, H, E_left, E_right, i, 1.0, config, true)
+
+    # Circuit Logic (directed sweep):
+    # - Each bulk bond update applies Theta evolution by +dt_step, then evolves the right site back by -dt_step.
+    # - The right edge applies Theta evolution by +dt_step and splits right (no backward evolution).
+    if L == 2
+        _two_site_update_edge_circuit!(state, H, E_left, E_right, 1, dt_step, config)
+        state.orth_center = 2
+        return nothing
     end
-    
-    # Edge Step (L-1)
-    # Evolve +1.0
-    _two_site_update_edge_circuit!(state, H, E_left, E_right, L-1, 1.0, config)
-    
-    # No Backward
+
+    for i in 1:(L-2)
+        _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, true)
+    end
+    _two_site_update_edge_circuit!(state, H, E_left, E_right, L-1, dt_step, config)
+    state.orth_center = L
+    return nothing
+end
+
+function _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step::Float64)
+    @t :tdvp_shift_orth_center shift_orthogonality_center!(state, state.length)
+    L = state.length
+
+    # Right environments (sites i..L), updated on the fly during the backward sweep.
+    E_left_seed, E_right = @t :tdvp_init_envs _init_envs(state, H)
+
+    # Left environments (sites 1..i-1), computed once; they remain valid during the backward sweep
+    # because those tensors are not modified until we reach them.
+    E_left = Vector{Array{ComplexF64, 3}}(undef, L+1)
+    E_left[1] = E_left_seed[1]
+    for i in 1:L
+        E_left[i+1] = update_left_environment(state.tensors[i], H.tensors[i], E_left[i])
+    end
+
+    if L == 2
+        _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config)
+        state.orth_center = 1
+        return nothing
+    end
+
+    # Backward Sweep (L-1 -> 2): evolve +dt_step, split left, evolve left site back by -dt_step.
+    for i in (L-1):-1:2
+        _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, true)
+    end
+
+    # Left edge (bond 1,2): evolve +dt_step, split left, no backward evolution.
+    _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config)
+    state.orth_center = 1
+    return nothing
 end
 
 # --- Helpers for 2-Site ---
@@ -813,6 +1036,55 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     
     # Assign Right (S*V) -> Center
     state.tensors[i+1] = @t :tdvp_form_A2temp reshape(Diagonal(S) * Vt, keep, p2, r_theta)
+end
+
+function _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
+    # Backward-directed circuit update on bond (i, i+1), moving the center to the left.
+    # Steps:
+    # 1) Evolve Theta by +dt_step
+    # 2) Split LEFT (center moves to i): right tensor is right-canonical
+    # 3) Optionally evolve left site back by -dt_step
+    use_ws = _use_tdvp_ws_val()
+
+    A1 = state.tensors[i]
+    A2 = state.tensors[i+1]
+    @t :tdvp_theta_contract @tensor Theta[l, p1, p2, r] := A1[l, p1, k] * A2[k, p2, r]
+
+    W1 = H.tensors[i]
+    W2 = H.tensors[i+1]
+    @t :tdvp_mpo_merge @tensor W_merge[l, p1o, p1i, p2o, p2i, r] := W1[l, p1o, p1i, k] * W2[k, p2o, p2i, r]
+    W_perm = @t :tdvp_mpo_permute permutedims(W_merge, (1, 2, 4, 3, 5, 6))
+    l1, p1o, p1i, _b1 = size(W1)
+    _l2, p2o, p2i, b2 = size(W2)
+    W_group = @t :tdvp_mpo_reshape reshape(W_perm, l1, p1o*p2o, p1i*p2i, b2)
+
+    l_theta, p1, p2, r_theta = size(Theta)
+    Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
+
+    func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
+
+    # Split LEFT: keep S with U, right becomes right-canonical.
+    Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
+    U, S, Vt, keep = @t :tdvp_split_svd split_mps_tensor_svd(Theta_split, l_theta, p1, p2, r_theta, config)
+
+    state.tensors[i+1] = reshape(Vt, keep, p2, r_theta)
+    E_right[i+1] = @t :tdvp_env_update_right update_right_environment(state.tensors[i+1], W2, E_right[i+2])
+
+    A1_temp = reshape(U * Diagonal(S), l_theta, p1, keep)
+    if evolve_back
+        func_back = _site_op(use_ws, E_left[i], E_right[i+1], W1)
+        state.tensors[i] = @t :tdvp_expm_back expm_krylov(func_back, A1_temp, -dt_step, 25)
+    else
+        state.tensors[i] = A1_temp
+    end
+    return nothing
+end
+
+function _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, i, dt_step, config)
+    # Backward sweep edge on bond (1,2): evolve by dt_step, split LEFT, no backward evolution.
+    _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, false)
+    return nothing
 end
 
 function _init_envs(state, H)

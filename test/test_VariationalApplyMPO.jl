@@ -4,6 +4,8 @@ using Yaqs
 using Yaqs.MPOModule
 using Yaqs.MPSModule
 using Yaqs.GateLibrary
+using Yaqs.DigitalTJM
+using Yaqs.SimulationConfigs
 using PythonCall
 
 @testset "Variational MPO×MPS application" begin
@@ -143,6 +145,56 @@ def run_variational(L, U4):
 
         z_py = pyconvert(Vector{Float64}, g["run_variational"](L, U))
         @test isapprox(z_jl, z_py; atol=5e-9, rtol=5e-9)
+    end
+
+    @testset "Matches TEBD on a simple 4-qubit circuit (no truncation)" begin
+        L = 4
+        psi_tebd = MPS(L; state="Neel")
+        MPSModule.normalize!(psi_tebd)
+
+        psi_var = deepcopy(psi_tebd)
+
+        cfg = TimeEvolutionConfig(Observable[], 0.0;
+                                  dt=1.0,
+                                  num_traj=1,
+                                  max_bond_dim=256,
+                                  truncation_threshold=0.0,
+                                  sample_timesteps=false,
+                                  order=1)
+
+        gates = [
+            (RxxGate(0.31), 1, 2),
+            (RzzGate(0.23), 2, 3),
+            (RxxGate(-0.17), 3, 4),
+        ]
+
+        for (g, s1, s2) in gates
+            # Reference: nearest-neighbor TEBD two-site update
+            DigitalTJM.apply_local_gate_exact!(psi_tebd, g, s1, s2, cfg)
+
+            # Variational MPO apply: build the MPO for this 2-site gate and apply it.
+            U = Matrix{ComplexF64}(matrix(g))
+            mpo_gate = mpo_from_two_qubit_gate_matrix(U, s1, s2, L; d=2)
+            apply_variational!(psi_var, mpo_gate;
+                               chi_max=256,
+                               trunc=0.0,
+                               svd_min=eps(Float64),
+                               min_sweeps=2,
+                               max_sweeps=10,
+                               tol_theta_diff=1e-14)
+        end
+
+        MPSModule.normalize!(psi_tebd)
+        MPSModule.normalize!(psi_var)
+
+        v_tebd = to_vec(psi_tebd)
+        v_var = to_vec(psi_var)
+        v_tebd ./= norm(v_tebd)
+        v_var ./= norm(v_var)
+
+        # Compare via fidelity (phase-invariant).
+        overlap = abs(dot(conj(v_tebd), v_var))
+        @test overlap > 1 - 1e-10
     end
 end
 
