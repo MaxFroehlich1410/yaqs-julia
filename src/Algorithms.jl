@@ -623,33 +623,34 @@ end
 
 # --- Main Dispatch Functions ---
 
-function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
+function single_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig; numiter_lanczos::Int=25)
     # Hamiltonian Simulation: Symmetric Sweep (Forward + Backward) with dt/2
-    _tdvp_sweep_hamiltonian_1site!(state, H, config)
+    _tdvp_sweep_hamiltonian_1site!(state, H, config, numiter_lanczos)
 end
 
-function single_site_tdvp!(state::MPS, H::MPO, config::Union{MeasurementConfig, StrongMeasurementConfig})
+function single_site_tdvp!(state::MPS, H::MPO, config::Union{MeasurementConfig, StrongMeasurementConfig}; numiter_lanczos::Int=25)
     # Circuit Simulation: Single Forward Sweep with dt=2 logic
-    _tdvp_sweep_circuit_1site!(state, H, config)
+    _tdvp_sweep_circuit_1site!(state, H, config, numiter_lanczos)
 end
 
-function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig)
+function two_site_tdvp!(state::MPS, H::MPO, config::TimeEvolutionConfig; numiter_lanczos::Int=25)
     # Hamiltonian Simulation: Symmetric Sweep
-    _tdvp_sweep_hamiltonian_2site!(state, H, config)
+    _tdvp_sweep_hamiltonian_2site!(state, H, config, numiter_lanczos)
 end
 
 function two_site_tdvp!(state::MPS,
                         H::MPO,
                         config::Union{MeasurementConfig, StrongMeasurementConfig};
                         sweeps::Int=1,
-                        dt::Float64=1.0)
+                        dt::Float64=1.0,
+                        numiter_lanczos::Int=25)
     # Circuit Simulation: directed (circuit) TDVP sweeps.
     # Historically, we applied a single forward sweep corresponding to dt_total=1.
     # For improved accuracy, we optionally perform multiple back-and-forth sweeps,
     # splitting dt across the sweeps so the total evolution time remains dt.
     @assert sweeps ≥ 1 "TDVP circuit sweeps must satisfy sweeps ≥ 1 (got $sweeps)."
     @assert isfinite(dt) "TDVP circuit dt must be finite (got $dt)."
-    _tdvp_sweep_circuit_2site!(state, H, config; sweeps=sweeps, dt=dt)
+    _tdvp_sweep_circuit_2site!(state, H, config; sweeps=sweeps, dt=dt, numiter_lanczos=numiter_lanczos)
 
     # IMPORTANT: Ensure the same canonical gauge as the historical single-sweep behavior:
     # return the MPS left-canonical with orthogonality center at the right boundary.
@@ -659,7 +660,7 @@ end
 # --- Implementation of Sweeps ---
 
 # 1. Hamiltonian 1-Site (Forward + Backward)
-function _tdvp_sweep_hamiltonian_1site!(state, H, config)
+function _tdvp_sweep_hamiltonian_1site!(state, H, config, numiter_lanczos::Int)
     shift_orthogonality_center!(state, 1)
     L = state.length
     dt = config.dt
@@ -674,7 +675,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
         func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
         # Evolve Site (dt/2)
-        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, numiter_lanczos)
         
         if i < L
             l, p, r = size(state.tensors[i])
@@ -688,7 +689,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
             
             # Evolve Bond Backward (-dt/2)
             func_bond = _bond_op(use_ws, E_left[i+1], E_right[i+1])
-            C_new = expm_krylov(func_bond, R_mat, -dt/2, 25)
+            C_new = expm_krylov(func_bond, R_mat, -dt/2, numiter_lanczos)
             
             @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
             state.tensors[i+1] = Next
@@ -700,7 +701,7 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
         W = H.tensors[i]
         func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
-        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, 25)
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], dt/2, numiter_lanczos)
         
         if i > 1
             l, p, r = size(state.tensors[i])
@@ -713,17 +714,17 @@ function _tdvp_sweep_hamiltonian_1site!(state, H, config)
             E_right[i] = update_right_environment(state.tensors[i], W, E_right[i+1])
             
             func_bond = _bond_op(use_ws, E_left[i], E_right[i])
-            C_new = expm_krylov(func_bond, L_mat, -dt/2, 25)
+            C_new = expm_krylov(func_bond, L_mat, -dt/2, numiter_lanczos)
             
             @tensor Prev[l, p, r] := state.tensors[i-1][l, p, k] * C_new[k, r]
             state.tensors[i-1] = Prev
         end
     end
-    println("max bond dim: ", write_max_bond_dim(state))
+    # println("max bond dim: ", write_max_bond_dim(state))
 end
 
 # 2. Circuit 1-Site (Forward Only, dt=2 logic)
-function _tdvp_sweep_circuit_1site!(state, H, config)
+function _tdvp_sweep_circuit_1site!(state, H, config, numiter_lanczos::Int)
     shift_orthogonality_center!(state, 1)
     L = state.length
     use_ws = _use_tdvp_ws_val()
@@ -739,7 +740,7 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
         func_site = _site_op(use_ws, E_left[i], E_right[i+1], W)
         
         # Evolve Site (0.5 * dt = 1.0)
-        state.tensors[i] = expm_krylov(func_site, state.tensors[i], 0.5 * dt, 25)
+        state.tensors[i] = expm_krylov(func_site, state.tensors[i], 0.5 * dt, numiter_lanczos)
         
         l, p, r = size(state.tensors[i])
         A_mat = reshape(state.tensors[i], l*p, r)
@@ -751,7 +752,7 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
         
         # Evolve Bond (-0.5 * dt = -1.0)
         func_bond = _bond_op(use_ws, E_left[i+1], E_right[i+1])
-        C_new = expm_krylov(func_bond, R_mat, -0.5 * dt, 25)
+        C_new = expm_krylov(func_bond, R_mat, -0.5 * dt, numiter_lanczos)
         
         @tensor Next[l, p, r] := C_new[l, k] * state.tensors[i+1][k, p, r]
         state.tensors[i+1] = Next
@@ -761,13 +762,13 @@ function _tdvp_sweep_circuit_1site!(state, H, config)
     dt = 1.0
     W = H.tensors[L]
     func_site_last = _site_op(use_ws, E_left[L], E_right[L+1], W)
-    state.tensors[L] = expm_krylov(func_site_last, state.tensors[L], dt, 25)
+    state.tensors[L] = expm_krylov(func_site_last, state.tensors[L], dt, numiter_lanczos)
     
     # No Backward Sweep
 end
 
 # 3. Hamiltonian 2-Site
-function _tdvp_sweep_hamiltonian_2site!(state, H, config)
+function _tdvp_sweep_hamiltonian_2site!(state, H, config, numiter_lanczos::Int)
     shift_orthogonality_center!(state, 1)
     L = state.length
     dt = config.dt
@@ -776,24 +777,24 @@ function _tdvp_sweep_hamiltonian_2site!(state, H, config)
     # Forward Sweep (1 -> L-2)
     # Evolve 2-site by dt/2, Split Right, Evolve Bond/RightSite back by -dt/2
     for i in 1:(L-2)
-        _two_site_update_forward!(state, H, E_left, E_right, i, dt/2, config, true)
+        _two_site_update_forward!(state, H, E_left, E_right, i, dt/2, config, true, numiter_lanczos)
     end
     
     # Edge Step (L-1)
     if L >= 2
         # Evolve 2-site by FULL dt. Split Left. NO backward evolution.
-        _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, L-1, dt, config)
+        _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, L-1, dt, config, numiter_lanczos)
     end
     
     # Backward Sweep (L-2 -> 1)
     # Python: Evolve RightSite back -dt/2, Merge, Evolve dt/2, Split Left
     for i in (L-2):-1:1
-        _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt/2, config)
+        _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt/2, config, numiter_lanczos)
     end
 end
 
 # 4. Circuit 2-Site (Forward Only)
-function _tdvp_sweep_circuit_2site!(state, H, config; sweeps::Int=1, dt::Float64=1.0)
+function _tdvp_sweep_circuit_2site!(state, H, config; sweeps::Int=1, dt::Float64=1.0, numiter_lanczos::Int=25)
     L = state.length
     if L ≤ 1
         return nothing
@@ -802,15 +803,15 @@ function _tdvp_sweep_circuit_2site!(state, H, config; sweeps::Int=1, dt::Float64
     dt_step = dt / sweeps
     for s in 1:sweeps
         if isodd(s)
-            _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step)
+            _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step, numiter_lanczos)
         else
-            _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step)
+            _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step, numiter_lanczos)
         end
     end
     return nothing
 end
 
-function _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step::Float64)
+function _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step::Float64, numiter_lanczos::Int)
     @t :tdvp_shift_orth_center shift_orthogonality_center!(state, 1)
     L = state.length
 
@@ -820,20 +821,20 @@ function _tdvp_sweep_circuit_2site_forward!(state, H, config, dt_step::Float64)
     # - Each bulk bond update applies Theta evolution by +dt_step, then evolves the right site back by -dt_step.
     # - The right edge applies Theta evolution by +dt_step and splits right (no backward evolution).
     if L == 2
-        _two_site_update_edge_circuit!(state, H, E_left, E_right, 1, dt_step, config)
+        _two_site_update_edge_circuit!(state, H, E_left, E_right, 1, dt_step, config, numiter_lanczos)
         state.orth_center = 2
         return nothing
     end
 
     for i in 1:(L-2)
-        _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, true)
+        _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, true, numiter_lanczos)
     end
-    _two_site_update_edge_circuit!(state, H, E_left, E_right, L-1, dt_step, config)
+    _two_site_update_edge_circuit!(state, H, E_left, E_right, L-1, dt_step, config, numiter_lanczos)
     state.orth_center = L
     return nothing
 end
 
-function _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step::Float64)
+function _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step::Float64, numiter_lanczos::Int)
     @t :tdvp_shift_orth_center shift_orthogonality_center!(state, state.length)
     L = state.length
 
@@ -849,25 +850,25 @@ function _tdvp_sweep_circuit_2site_backward!(state, H, config, dt_step::Float64)
     end
 
     if L == 2
-        _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config)
+        _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config, numiter_lanczos)
         state.orth_center = 1
         return nothing
     end
 
     # Backward Sweep (L-1 -> 2): evolve +dt_step, split left, evolve left site back by -dt_step.
     for i in (L-1):-1:2
-        _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, true)
+        _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, true, numiter_lanczos)
     end
 
     # Left edge (bond 1,2): evolve +dt_step, split left, no backward evolution.
-    _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config)
+    _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, 1, dt_step, config, numiter_lanczos)
     state.orth_center = 1
     return nothing
 end
 
 # --- Helpers for 2-Site ---
 
-function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
+function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config, evolve_back, numiter_lanczos::Int)
     use_ws = _use_tdvp_ws_val()
     A1 = state.tensors[i]
     A2 = state.tensors[i+1]
@@ -886,7 +887,7 @@ function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config
     
     # Evolve Theta
     func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
-    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, numiter_lanczos)
     
     # Split (Move Center Right: Keep S with V)
     Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
@@ -903,14 +904,14 @@ function _two_site_update_forward!(state, H, E_left, E_right, i, dt_step, config
     
     if evolve_back
         func_back = _site_op(use_ws, E_left[i+1], E_right[i+2], W2)
-        A2_new = @t :tdvp_expm_back expm_krylov(func_back, A2_temp, -dt_step, 25)
+        A2_new = @t :tdvp_expm_back expm_krylov(func_back, A2_temp, -dt_step, numiter_lanczos)
         state.tensors[i+1] = A2_new
     else
         state.tensors[i+1] = A2_temp
     end
 end
 
-function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_step, config)
+function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_step, config, numiter_lanczos::Int)
     # Edge Step: Evolve by dt_step. Split Left (Center moves to L-1).
     use_ws = _use_tdvp_ws_val()
     
@@ -931,7 +932,7 @@ function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_ste
     
     # Evolve Theta (Full dt)
     func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
-    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, numiter_lanczos)
     
     # Split Left (Move Center Left: Keep S with U)
     Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
@@ -949,7 +950,7 @@ function _two_site_update_edge_hamiltonian!(state, H, E_left, E_right, i, dt_ste
     # No Backward evolution at edge
 end
 
-function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_step, config)
+function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_step, config, numiter_lanczos::Int)
     # Python Backward Loop Logic:
     # 1. Evolve Right Site (i+1) by -dt_step (Pre-correction)
     # 2. Merge (i, i+1)
@@ -963,7 +964,7 @@ function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_
     use_ws = _use_tdvp_ws_val()
     
     func_back = _site_op(use_ws, E_left[i+1], E_right[i+2], W2)
-    state.tensors[i+1] = expm_krylov(func_back, state.tensors[i+1], -dt_step, 25)
+    state.tensors[i+1] = expm_krylov(func_back, state.tensors[i+1], -dt_step, numiter_lanczos)
     
     # 2. Merge
     A1 = state.tensors[i]
@@ -982,7 +983,7 @@ function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_
     
     # 3. Evolve Theta
     func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
-    Theta_new = expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = expm_krylov(func_two, Theta_group, dt_step, numiter_lanczos)
     
     # 4. Split Left (Center moves to i)
     Theta_split = reshape(Theta_new, l_theta, p1, p2, r_theta)
@@ -998,7 +999,7 @@ function _two_site_update_backward_precorrect!(state, H, E_left, E_right, i, dt_
     state.tensors[i] = reshape(U * Diagonal(S), l_theta, p1, keep)
 end
 
-function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, config)
+function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, config, numiter_lanczos::Int)
     # Circuit Edge: Evolve by dt_step. Split Right. No Back.
     # Note: Python splits "right" here!
     # "state.tensors[i], state.tensors[i+1] = split_mps_tensor(..., "right", ...)"
@@ -1022,7 +1023,7 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     
     # Evolve Theta
     func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
-    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, numiter_lanczos)
     
     # Split Right (Center moves to i+1)
     Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
@@ -1038,7 +1039,7 @@ function _two_site_update_edge_circuit!(state, H, E_left, E_right, i, dt_step, c
     state.tensors[i+1] = @t :tdvp_form_A2temp reshape(Diagonal(S) * Vt, keep, p2, r_theta)
 end
 
-function _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, evolve_back)
+function _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, evolve_back, numiter_lanczos::Int)
     # Backward-directed circuit update on bond (i, i+1), moving the center to the left.
     # Steps:
     # 1) Evolve Theta by +dt_step
@@ -1062,7 +1063,7 @@ function _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_ste
     Theta_group = @t :tdvp_theta_reshape reshape(Theta, l_theta, p1*p2, r_theta)
 
     func_two = _site_op(use_ws, E_left[i], E_right[i+2], W_group)
-    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, 25)
+    Theta_new = @t :tdvp_expm_theta expm_krylov(func_two, Theta_group, dt_step, numiter_lanczos)
 
     # Split LEFT: keep S with U, right becomes right-canonical.
     Theta_split = @t :tdvp_theta_split_reshape reshape(Theta_new, l_theta, p1, p2, r_theta)
@@ -1074,16 +1075,16 @@ function _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_ste
     A1_temp = reshape(U * Diagonal(S), l_theta, p1, keep)
     if evolve_back
         func_back = _site_op(use_ws, E_left[i], E_right[i+1], W1)
-        state.tensors[i] = @t :tdvp_expm_back expm_krylov(func_back, A1_temp, -dt_step, 25)
+        state.tensors[i] = @t :tdvp_expm_back expm_krylov(func_back, A1_temp, -dt_step, numiter_lanczos)
     else
         state.tensors[i] = A1_temp
     end
     return nothing
 end
 
-function _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, i, dt_step, config)
+function _two_site_update_edge_circuit_backward!(state, H, E_left, E_right, i, dt_step, config, numiter_lanczos::Int)
     # Backward sweep edge on bond (1,2): evolve by dt_step, split LEFT, no backward evolution.
-    _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, false)
+    _two_site_update_backward_circuit!(state, H, E_left, E_right, i, dt_step, config, false, numiter_lanczos)
     return nothing
 end
 
