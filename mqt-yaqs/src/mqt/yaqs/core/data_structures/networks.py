@@ -932,16 +932,26 @@ class MPO:
         self.length = length
         self.physical_dimension = physical_dimension
 
-    def init_heisenberg(self, length: int, Jx: float, Jy: float, Jz: float, h: float) -> None:  # noqa: N803
+    def init_heisenberg(
+        self,
+        length: int,
+        Jx: float,
+        Jy: float,
+        Jz: float,
+        h: float = 0.0,
+        hx: float = 0.0,
+        hy: float = 0.0,
+        hz: float | None = None,
+    ) -> None:  # noqa: N803
         """Heisenberg MPO.
 
         Initialize the Heisenberg model as a Matrix Product Operator (MPO).
 
         Left boundary: shape (1, 5, d, d)
-        [I, Jx*X, Jy*Y, Jz*Z, h*Z]
+        [I, Jx*X, Jy*Y, Jz*Z, hx*X + hy*Y + hz*Z]
 
         Inner tensor: shape (5, 5, d, d)
-        W = [[ I,    Jx*X,  Jy*Y,  Jz*Z,   h*Z ],
+        W = [[ I,    Jx*X,  Jy*Y,  Jz*Z,   hx*X + hy*Y + hz*Z ],
               [ 0,     0,     0,     0,     X  ],
               [ 0,     0,     0,     0,     Y  ],
               [ 0,     0,     0,     0,     Z  ],
@@ -955,7 +965,10 @@ class MPO:
         Jx (float): The coupling constant for the X interaction.
         Jy (float): The coupling constant for the Y interaction.
         Jz (float): The coupling constant for the Z interaction.
-        h (float): The magnetic field strength.
+        h (float): Legacy Z-field strength (kept for backward compatibility).
+        hx (float): X-field strength.
+        hy (float): Y-field strength.
+        hz (float | None): Z-field strength. If None, uses `h`.
         """
         physical_dimension = 2
         zero = np.zeros((physical_dimension, physical_dimension), dtype=complex)
@@ -964,14 +977,18 @@ class MPO:
         y = Y().matrix
         z = Z().matrix
 
-        left_bound = np.array([identity, -Jx * x, -Jy * y, -Jz * z, -h * z])[np.newaxis, :]
+        if hz is None:
+            hz = h
+        field = hx * x + hy * y + hz * z
+
+        left_bound = np.array([identity, -Jx * x, -Jy * y, -Jz * z, -field])[np.newaxis, :]
 
         inner = np.zeros((5, 5, physical_dimension, physical_dimension), dtype=complex)
         inner[0, 0] = identity
         inner[0, 1] = -Jx * x
         inner[0, 2] = -Jy * y
         inner[0, 3] = -Jz * z
-        inner[0, 4] = -h * z
+        inner[0, 4] = -field
         inner[1, 4] = x
         inner[2, 4] = y
         inner[3, 4] = z

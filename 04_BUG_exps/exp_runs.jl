@@ -2,6 +2,27 @@ module BUGExpRuns
 
 using Printf
 using DelimitedFiles
+
+# ------------------------------------------------------------------------------
+# Python / QuTiP startup note (macOS / OpenMP):
+# Importing QuTiP can hang or take a very long time if OpenMP / BLAS tries to
+# spawn many threads during library initialization. We defensively set the common
+# thread env vars to 1 *unless the user already set them*.
+# This must happen before the first Python/QuTiP import.
+# ------------------------------------------------------------------------------
+if !haskey(ENV, "OMP_NUM_THREADS")
+    ENV["OMP_NUM_THREADS"] = "1"
+end
+if !haskey(ENV, "OPENBLAS_NUM_THREADS")
+    ENV["OPENBLAS_NUM_THREADS"] = "1"
+end
+if !haskey(ENV, "MKL_NUM_THREADS")
+    ENV["MKL_NUM_THREADS"] = "1"
+end
+if !haskey(ENV, "VECLIB_MAXIMUM_THREADS")
+    ENV["VECLIB_MAXIMUM_THREADS"] = "1"
+end
+
 using PythonCall
 
 include("exp_util.jl")

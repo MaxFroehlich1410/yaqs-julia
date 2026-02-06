@@ -578,8 +578,17 @@ function split_mps_tensor_svd(Theta, l_virt, p1, p2, r_virt, config)
         replace!(Mat, NaN => 0.0, Inf => 0.0, -Inf => 0.0)
     end
 
-    # Use QRIteration for robustness against LAPACKException(1)
-    F = @t :tdvp_svd svd(Mat)
+    # Default SVD can throw LAPACKException(1) (failure to converge) on ill-conditioned matrices.
+    # Retry with QRIteration which is more robust in those cases.
+    F = @t :tdvp_svd try
+        svd(Mat)
+    catch e
+        if e isa LinearAlgebra.LAPACKException
+            svd(Mat; alg=LinearAlgebra.QRIteration())
+        else
+            rethrow(e)
+        end
+    end
     
     # Truncation
     # Truncation mode:
