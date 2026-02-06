@@ -14,6 +14,10 @@ const MPOMod = Yaqs.MPOModule
 const Cfg = Yaqs.SimulationConfigs
 const GL = Yaqs.GateLibrary
 
+const _qutip_mods = Ref{Any}(nothing)
+const _qutip_cache = Dict{Tuple{Int,String}, Any}()  # (L, initial_state) -> psi0
+const _qutip_ops_cache = Dict{Int, Any}()           # L -> (sx_list, sy_list, sz_list)
+
 export parse_kv_args,
        mid_site,
        qutip_expect_z_site,
@@ -26,11 +30,18 @@ export parse_kv_args,
 @inline mid_site(L::Int) = (L + 1) ÷ 2
 
 function parse_kv_args(args::Vector{String})
-    # Minimal `--key=value` parser (also supports `--flag` => "true")
+    # Minimal `--key=value` parser (also supports `--flag` => "true").
+    # Also accepts `key=value` / `flag` (useful when calling `main([...])`).
     out = Dict{String, String}()
     for a in args
-        startswith(a, "--") || continue
-        s = a[3:end]
+        s = if startswith(a, "--")
+            a[3:end]
+        elseif startswith(a, "-")
+            continue
+        else
+            a
+        end
+
         if occursin("=", s)
             k, v = split(s, "=", limit=2)
             out[k] = v
@@ -85,6 +96,38 @@ function _dense_ising_hamiltonian(L::Int; J::Real=1.0, g::Real=0.5)
     return H
 end
 
+@inline function _get_param(p, i::Int)
+    return isa(p, Vector) ? (i <= Base.length(p) ? p[i] : 0.0) : p
+end
+
+function _mpo_hamiltonian(model::AbstractString, L::Int;
+                          # TFIM params
+                          J::Real=1.0, g::Real=0.5,
+                          # General params (used by `general`)
+                          Jxx::Real=0.0, Jyy::Real=0.0, Jzz::Real=0.0,
+                          hx::Real=0.0, hy::Real=0.0, hz::Real=0.0,
+                          # Convenience params for common models
+                          Delta::Real=1.0, gamma::Real=0.0)
+    m = lowercase(strip(model))
+    if m in ("tfim", "ising")
+        return MPOMod.init_ising(L, float(J), float(g))
+    elseif m in ("heisenberg", "xxx")
+        return MPOMod.init_general_hamiltonian(L, float(J), float(J), float(J), float(hx), float(hy), float(hz))
+    elseif m in ("xx",)
+        return MPOMod.init_general_hamiltonian(L, float(J), float(J), 0.0, float(hx), float(hy), float(hz))
+    elseif m in ("xy",)
+        Jx = float(J) * (1 + float(gamma))
+        Jy = float(J) * (1 - float(gamma))
+        return MPOMod.init_general_hamiltonian(L, Jx, Jy, 0.0, float(hx), float(hy), float(hz))
+    elseif m in ("xxz",)
+        return MPOMod.init_general_hamiltonian(L, float(J), float(J), float(Delta) * float(J), float(hx), float(hy), float(hz))
+    elseif m in ("general",)
+        return MPOMod.init_general_hamiltonian(L, float(Jxx), float(Jyy), float(Jzz), float(hx), float(hy), float(hz))
+    else
+        error("Unsupported model=$model (supported: tfim/ising, xx, xy, xxz, heisenberg, general)")
+    end
+end
+
 """
     dense_expect_z_site(L; J, g, dt, steps, initial_state, site) -> (times, z)
 
@@ -124,8 +167,20 @@ Compute exact real-time evolution using qutip (via PythonCall) and return ⟨Z_s
 This matches the reference used by the original Python scripts.
 """
 function qutip_expect_z_site(L::Int;
-                             J::Real,
-                             g::Real,
+                             model::AbstractString="tfim",
+                             # TFIM params
+                             J::Real=1.0,
+                             g::Real=0.5,
+                             # General params (used by `general`)
+                             Jxx::Real=0.0,
+                             Jyy::Real=0.0,
+                             Jzz::Real=0.0,
+                             hx::Real=0.0,
+                             hy::Real=0.0,
+                             hz::Real=0.0,
+                             # Convenience params for common models
+                             Delta::Real=1.0,
+                             gamma::Real=0.0,
                              dt::Real,
                              steps::Int,
                              initial_state::AbstractString="zeros",
@@ -133,54 +188,145 @@ function qutip_expect_z_site(L::Int;
     @assert steps ≥ 0
     @assert 1 ≤ site ≤ L
 
-    builtins = pyimport("builtins")
-    np = pyimport("numpy")
+    mods = _qutip_mods[]
+    if mods === nothing
+        builtins = pyimport("builtins")
+        np = pyimport("numpy")
+        qutip = pyimport("qutip")
+        mods = (;
+            builtins,
+            np,
+            qutip,
+            basis = qutip.basis,
+            tensor = qutip.tensor,
+            qeye = qutip.qeye,
+            sigmax = qutip.sigmax,
+            sigmay = qutip.sigmay,
+            sigmaz = qutip.sigmaz,
+            sesolve = qutip.sesolve,
+        )
+        _qutip_mods[] = mods
+    end
 
-    # Import qutip and helpers
-    qutip = pyimport("qutip")
-    basis = qutip.basis
-    sigmax = qutip.sigmax
-    sigmaz = qutip.sigmaz
-    tensor = qutip.tensor
-    qeye = qutip.qeye
-    mesolve = qutip.mesolve
+    builtins = mods.builtins
+    np = mods.np
+    basis = mods.basis
+    tensor = mods.tensor
+    qeye = mods.qeye
+    sigmax = mods.sigmax
+    sigmay = mods.sigmay
+    sigmaz = mods.sigmaz
+    sesolve = mods.sesolve
 
     sx = sigmax()
+    sy = sigmay()
     sz = sigmaz()
     id2 = qeye(2)
 
-    # Build operators acting on the full space
-    sx_list = Py[]
-    sz_list = Py[]
-    for i in 1:L
-        ops_x_jl = Py[ id2 for _ in 1:L ]
-        ops_z_jl = Py[ id2 for _ in 1:L ]
-        ops_x_jl[i] = sx
-        ops_z_jl[i] = sz
-        push!(sx_list, tensor(builtins.list(ops_x_jl)))
-        push!(sz_list, tensor(builtins.list(ops_z_jl)))
+    # Build operators acting on the full space (cached per L).
+    ops = get(_qutip_ops_cache, L, nothing)
+    if ops === nothing
+        sx_list = Py[]
+        sy_list = Py[]
+        sz_list = Py[]
+        for i in 1:L
+            ops_x_jl = Py[id2 for _ in 1:L]
+            ops_y_jl = Py[id2 for _ in 1:L]
+            ops_z_jl = Py[id2 for _ in 1:L]
+            ops_x_jl[i] = sx
+            ops_y_jl[i] = sy
+            ops_z_jl[i] = sz
+            push!(sx_list, tensor(builtins.list(ops_x_jl)))
+            push!(sy_list, tensor(builtins.list(ops_y_jl)))
+            push!(sz_list, tensor(builtins.list(ops_z_jl)))
+        end
+        ops = (; sx_list, sy_list, sz_list)
+        _qutip_ops_cache[L] = ops
     end
 
-    # Hamiltonian H = -J Σ Z_i Z_{i+1} - g Σ X_i
+    sx_list = ops.sx_list
+    sy_list = ops.sy_list
+    sz_list = ops.sz_list
+
+    m = lowercase(strip(model))
     H = 0 * sz_list[1]  # ensure Python/qutip type
-    for i in 1:(L - 1)
-        H = H + (-J) * (sz_list[i] * sz_list[i + 1])
-    end
-    for i in 1:L
-        H = H + (-g) * sx_list[i]
+    if m in ("tfim", "ising")
+        # H = -J Σ Z_i Z_{i+1} - g Σ X_i
+        for i in 1:(L - 1)
+            H = H + (-J) * (sz_list[i] * sz_list[i + 1])
+        end
+        for i in 1:L
+            H = H + (-g) * sx_list[i]
+        end
+    else
+        # General Hamiltonian:
+        # H = Σ_i (Jxx X_i X_{i+1} + Jyy Y_i Y_{i+1} + Jzz Z_i Z_{i+1})
+        #   + Σ_i (hx X_i + hy Y_i + hz Z_i)
+        local Jxx_eff, Jyy_eff, Jzz_eff, hx_eff, hy_eff, hz_eff
+        if m in ("heisenberg", "xxx")
+            Jxx_eff, Jyy_eff, Jzz_eff = J, J, J
+            hx_eff, hy_eff, hz_eff = hx, hy, hz
+        elseif m in ("xx",)
+            Jxx_eff, Jyy_eff, Jzz_eff = J, J, 0.0
+            hx_eff, hy_eff, hz_eff = hx, hy, hz
+        elseif m in ("xy",)
+            Jxx_eff, Jyy_eff, Jzz_eff = J * (1 + gamma), J * (1 - gamma), 0.0
+            hx_eff, hy_eff, hz_eff = hx, hy, hz
+        elseif m in ("xxz",)
+            Jxx_eff, Jyy_eff, Jzz_eff = J, J, Delta * J
+            hx_eff, hy_eff, hz_eff = hx, hy, hz
+        elseif m in ("general",)
+            Jxx_eff, Jyy_eff, Jzz_eff = Jxx, Jyy, Jzz
+            hx_eff, hy_eff, hz_eff = hx, hy, hz
+        else
+            error("Unsupported model=$model (supported: tfim/ising, xx, xy, xxz, heisenberg, general)")
+        end
+
+        for i in 1:(L - 1)
+            if Jxx_eff != 0
+                H = H + Jxx_eff * (sx_list[i] * sx_list[i + 1])
+            end
+            if Jyy_eff != 0
+                H = H + Jyy_eff * (sy_list[i] * sy_list[i + 1])
+            end
+            if Jzz_eff != 0
+                H = H + Jzz_eff * (sz_list[i] * sz_list[i + 1])
+            end
+        end
+        for i in 1:L
+            if hx_eff != 0
+                H = H + hx_eff * sx_list[i]
+            end
+            if hy_eff != 0
+                H = H + hy_eff * sy_list[i]
+            end
+            if hz_eff != 0
+                H = H + hz_eff * sz_list[i]
+            end
+        end
     end
 
     # Initial state
-    if initial_state == "zeros"
-        psi0 = tensor(builtins.list(Py[ basis(2, 0) for _ in 1:L ]))
-    elseif initial_state == "ones"
-        psi0 = tensor(builtins.list(Py[ basis(2, 1) for _ in 1:L ]))
-    elseif initial_state == "x+"
-        # Keep consistent with our Julia exp default: start from |+>^⊗L
-        plus = (basis(2, 0) + basis(2, 1)) / sqrt(2)
-        psi0 = tensor(builtins.list(Py[ plus for _ in 1:L ]))
-    else
-        error("Unsupported initial state for qutip: $initial_state (supported: zeros, ones, x+)")
+    psi0 = get(_qutip_cache, (L, initial_state), nothing)
+    if psi0 === nothing
+        if initial_state == "zeros"
+            psi0 = tensor(builtins.list(Py[basis(2, 0) for _ in 1:L]))
+        elseif initial_state == "ones"
+            psi0 = tensor(builtins.list(Py[basis(2, 1) for _ in 1:L]))
+        elseif initial_state == "x+"
+            plus = (basis(2, 0) + basis(2, 1)) / sqrt(2)
+            psi0 = tensor(builtins.list(Py[plus for _ in 1:L]))
+        elseif initial_state == "Neel"
+            # Match `MPSModule.MPS(...; state="Neel")`: |0 1 0 1 ...> with site 1 = |0>
+            jl = Py[]
+            for i in 1:L
+                push!(jl, isodd(i) ? basis(2, 0) : basis(2, 1))
+            end
+            psi0 = tensor(builtins.list(jl))
+        else
+            error("Unsupported initial state for qutip: $initial_state (supported: zeros, ones, x+, Neel)")
+        end
+        _qutip_cache[(L, initial_state)] = psi0
     end
 
     times = collect(0:dt:(steps * dt))
@@ -188,13 +334,11 @@ function qutip_expect_z_site(L::Int;
 
     # Expectation values: qutip wants list of operators
     eops = builtins.list(Py[ sz_list[site] ])
-    # Modern qutip prefers options as a Python dict.
+    # Options as Python dict.
     opts = builtins.dict()
     opts["store_states"] = false
-    c_ops = builtins.list()
-    res = mesolve(H, psi0, tlist, c_ops, eops; options=opts)
-    # res.expect[0] is the first eop (python indexing)
-    exp0 = res.expect[0]
+    res = sesolve(H, psi0, tlist, eops; options=opts)
+    exp0 = res.expect[0] # first eop (python indexing)
     z = Vector{Float64}(pyconvert(Vector{Float64}, np.real(exp0)))
 
     return times, z
@@ -227,22 +371,39 @@ Run one method (BUG variants or TDVP) for a small Ising chain and return ⟨Z_si
 """
 function run_method_expect_z_site(method::Union{Symbol, AbstractString};
                                   L::Int,
-                                  J::Real,
-                                  g::Real,
+                                  model::AbstractString="tfim",
+                                  # TFIM params
+                                  J::Real=1.0,
+                                  g::Real=0.5,
+                                  # General params (used by `general`)
+                                  Jxx::Real=0.0,
+                                  Jyy::Real=0.0,
+                                  Jzz::Real=0.0,
+                                  hx::Real=0.0,
+                                  hy::Real=0.0,
+                                  hz::Real=0.0,
+                                  # Convenience params for common models
+                                  Delta::Real=1.0,
+                                  gamma::Real=0.0,
                                   dt::Real,
                                   steps::Int,
                                   initial_state::AbstractString="x+",
                                   site::Int=mid_site(L),
                                   max_bond_dim::Int=128,
                                   threshold::Real=1e-12,
-                                  numiter_lanczos::Int=25)
+                                  numiter_lanczos::Int=25,
+                                  track_bond_dims::Bool=false)
     method_sym = method isa AbstractString ? _method_from_string(method) : method
 
     times = collect(0:dt:(steps * dt))
     Z = ComplexF64.(Matrix(GL.matrix(GL.ZGate())))
 
     ψ = MPSMod.MPS(L; state=initial_state)
-    H = MPOMod.init_ising(L, float(J), float(g))
+    H = _mpo_hamiltonian(model, L;
+                         J=J, g=g,
+                         Jxx=Jxx, Jyy=Jyy, Jzz=Jzz,
+                         hx=hx, hy=hy, hz=hz,
+                         Delta=Delta, gamma=gamma)
     cfg = Cfg.TimeEvolutionConfig(Cfg.Observable[], float(dt); dt=float(dt),
                                   max_bond_dim=max_bond_dim,
                                   truncation_threshold=float(threshold),
@@ -255,6 +416,11 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
 
     out = Vector{Float64}(undef, steps + 1)
     out[1] = real(MPSMod.local_expect(ψ, Z, site))
+
+    bond_dims = track_bond_dims ? Vector{Int}(undef, steps + 1) : Int[]
+    if track_bond_dims
+        bond_dims[1] = MPSMod.write_max_bond_dim(ψ)
+    end
 
     t0 = time()
     for k in 1:steps
@@ -280,10 +446,13 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
             error("Unknown method_sym: $method_sym")
         end
         out[k + 1] = real(MPSMod.local_expect(ψ, Z, site))
+        if track_bond_dims
+            bond_dims[k + 1] = MPSMod.write_max_bond_dim(ψ)
+        end
     end
     wall = time() - t0
 
-    return times, out, wall
+    return track_bond_dims ? (times, out, bond_dims, wall) : (times, out, wall)
 end
 
 @inline function rms_error(x::AbstractVector{<:Real}, y::AbstractVector{<:Real}; skip::Int=0)

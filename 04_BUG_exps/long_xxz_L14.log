@@ -1,0 +1,9 @@
+
+[4831] signal 15: Terminated: 15
+in expression starting at /Users/maximilianfrohlich/Documents/GitHub/yaqs-julia/04_BUG_exps/exp_runs.jl:239
+__psynch_cvwait at /usr/lib/system/libsystem_kernel.dylib (unknown line)
+unknown function (ip: 0x0) at (unknown file)
+exec_blas at /Applications/Julia-1.12.app/Contents/Resources/julia/lib/julia/libopenblas64_.dylib (unknown line)
+unknown function (ip: 0x0) at (unknown file)
+Allocations: 83757024 (Pool: 83756167; Big: 857); GC: 24
+[exp_runs] using auto outdir /Users/maximilianfrohlich/Documents/GitHub/yaqs-julia/04_BUG_exps/experiment20 (experiment 20)

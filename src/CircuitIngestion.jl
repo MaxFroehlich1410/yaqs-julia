@@ -6,13 +6,15 @@ using ..GateLibrary
 
 export ingest_qiskit_circuit, map_qiskit_name, convert_instruction_to_gate
 
+@inline pybuiltins() = PythonCall.pybuiltins
+
 """
-    ingest_qiskit_circuit(qc::Py)::DigitalCircuit
+    ingest_qiskit_circuit(qc)::DigitalCircuit
 
 Ingest a Qiskit QuantumCircuit (as a Python Object), convert it to a DAG,
 and process it into layers of commuting gates suitable for DigitalTJM.
 """
-function ingest_qiskit_circuit(qc::Py)
+function ingest_qiskit_circuit(qc)
     qiskit = pyimport("qiskit")
     dag_converter = pyimport("qiskit.converters")
     
@@ -32,7 +34,7 @@ function ingest_qiskit_circuit(qc::Py)
     processed_layers = Vector{Vector{DigitalGate}}()
     
     # Loop while DAG has op nodes
-    while pyconvert(Int, pybuiltins.len(dag.op_nodes())) > 0
+    while pyconvert(Int, pybuiltins().len(dag.op_nodes())) > 0
         layer_gates = Vector{DigitalGate}()
         
         # Extract front layer
@@ -59,7 +61,7 @@ function ingest_qiskit_circuit(qc::Py)
             if name == "barrier"
                 # Check label
                 label = pygetattr(op, "label", nothing)
-                if !pyis(label, nothing) && uppercase(pyconvert(String, str(label))) == "SAMPLE_OBSERVABLES"
+                if !pyis(label, nothing) && uppercase(pyconvert(String, pybuiltins().str(label))) == "SAMPLE_OBSERVABLES"
                     # Keep barrier? Python code returns it to trigger measurement.
                     # In this ingestion phase, we might want to store it as a "MeasurementGate" or split layers?
                     # The current DigitalTJM structure assumes standard time evolution.
@@ -164,13 +166,13 @@ function ingest_qiskit_circuit(qc::Py)
 end
 
 """
-    convert_instruction_to_gate(instr::Py, circuit::Py)
+    convert_instruction_to_gate(instr, circuit)
 
 Convert a Qiskit CircuitInstruction (as in `circuit.data`) to a Julia `DigitalGate`.
 Also handles Barriers by returning a Barrier gate (unlike `process_layer` which might consume them).
 Returns `nothing` if the gate is not supported (e.g. not in GateLibrary and no mapping).
 """
-function convert_instruction_to_gate(instr::Py, circuit::Py)
+function convert_instruction_to_gate(instr, circuit)
     op = instr.operation
     
     # Try to extract qubits. instr.qubits is a tuple/list of Qubit objects.
@@ -202,7 +204,7 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
     # Handle Barrier specifically
     if name == "barrier"
         label = pygetattr(op, "label", nothing)
-        label_str = pyis(label, nothing) ? "" : pyconvert(String, str(label))
+        label_str = pyis(label, nothing) ? "" : pyconvert(String, pybuiltins().str(label))
         # Use SAMPLE_OBSERVABLES as default if empty?
         if isempty(label_str)
             label_str = "SAMPLE_OBSERVABLES" 
@@ -236,7 +238,7 @@ function convert_instruction_to_gate(instr::Py, circuit::Py)
 end
 
 
-function convert_node_to_gate(node::Py)::DigitalGate
+function convert_node_to_gate(node)::DigitalGate
     op = node.op
     name = pyconvert(String, op.name)
     params = [pyconvert(Float64, p) for p in op.params]
