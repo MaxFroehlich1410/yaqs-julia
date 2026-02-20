@@ -1,0 +1,42 @@
+# Experiment 03: Runtime vs achieved error (Pareto-style scatter)
+# Generates a cloud of (runtime, error) points and marks Pareto-optimal ones.
+
+[global]
+N = 12
+numiter_lanczos = 25
+adaptive_pad = 4
+truncation_mode = "during"
+obs_grid_points = 101
+
+T_list = [1.0]
+
+[pairing_adaptive]
+methods = ["two_site_tdvp", "bug_second_order"]
+pairing = "adaptive"
+trunc_mode = "adaptive"
+max_bond_dim_cap = 512
+dt_list = [0.01, 0.005, 0.0025]
+svd_threshold_list = [1e-4, 1e-5, 1e-6, 1e-7, 1e-8, 1e-9, 1e-10, 1e-11, 1e-12, 1e-13, 1e-14, 1e-15, 1e-16]
+
+[pairing_fixed]
+methods = ["single_site_tdvp", "fixed_bug_second_order"]
+pairing = "fixed"
+trunc_mode = "fixed"
+dt_list = [0.01, 0.005, 0.0025]
+chi_list = [16, 32, 48, 64]
+
+[models.tfim]
+name = "tfim"
+initial_state = "x+"
+J = 1.0
+g = 1.05
+
+[models.xxz]
+name = "general"
+initial_state = "Neel"
+Jxx = 1.0
+Jyy = 1.0
+Jzz = 1.0
+hx = 0.0
+hy = 0.0
+hz = 0.3

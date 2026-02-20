@@ -85,12 +85,15 @@ function main(args=ARGS)
     steps = parse(Int, get(kv, "steps", "40"))
     initial_state = get(kv, "initial_state", "x+")
     max_bond_dim = parse(Int, get(kv, "max_bond_dim", "128"))
+    adaptive_pad = parse(Int, get(kv, "adaptive_pad", "4"))
+    truncation_mode = Symbol(lowercase(get(kv, "truncation_mode", "during")))
     # Fixed-method fairness: enforce a single shared padded bond dimension
     # across {1TDVP, fixed BUG 2nd}.
     fixed_max_bond_dim = parse(Int, get(kv, "fixed_max_bond_dim", string(max_bond_dim)))
     threshold = parse(Float64, get(kv, "threshold", "1e-12"))
     numiter_lanczos = parse(Int, get(kv, "numiter_lanczos", "25"))
     site = parse(Int, get(kv, "site", string(mid_site(L))))
+    measure_runtime = lowercase(get(kv, "measure_runtime", "false")) in ("true", "1", "yes", "y")
 
     # Default: compare only the methods we care about:
     # - TDVP baselines (single-site + two-site)
@@ -136,7 +139,10 @@ function main(args=ARGS)
                 Jxx=Jxx, Jyy=Jyy, Jzz=Jzz, hx=hx, hy=hy, hz=hz,
                 dt=dt, steps=steps, initial_state=initial_state, site=site,
                 max_bond_dim=chi, threshold=threshold, numiter_lanczos=numiter_lanczos,
+                adaptive_pad=adaptive_pad,
+                truncation_mode=truncation_mode,
                 track_bond_dims=true,
+                measure_runtime=measure_runtime,
             )
             bond_dims[m] = bd
         else
@@ -147,6 +153,9 @@ function main(args=ARGS)
                 Jxx=Jxx, Jyy=Jyy, Jzz=Jzz, hx=hx, hy=hy, hz=hz,
                 dt=dt, steps=steps, initial_state=initial_state, site=site,
                 max_bond_dim=chi, threshold=threshold, numiter_lanczos=numiter_lanczos,
+                adaptive_pad=adaptive_pad,
+                truncation_mode=truncation_mode,
+                measure_runtime=measure_runtime,
             )
         end
         @assert times == times_ref
@@ -203,7 +212,7 @@ function main(args=ARGS)
         end
         ax2.set_xlabel("Time")
         ax2.set_ylabel("⟨Z⟩")
-        ax2.set_title("⟨Z⟩ vs time (adaptive family: 2TDVP + BUG2nd adaptive)  (site=$(site))  model=$(model)$(tagstr)  L=$(L), dt=$(dt), steps=$(steps)")
+        ax2.set_title("⟨Z⟩ vs time (adaptive family: 2TDVP + BUG2nd adaptive)  (site=$(site))  model=$(model)$(tagstr)  L=$(L), dt=$(dt), steps=$(steps), χpad=$(adaptive_pad)")
         ax2.grid(true, alpha=0.3)
         maybe_add_legend(ax2)
 
@@ -282,6 +291,8 @@ function main(args=ARGS)
         println(io, "initial_state=$(initial_state)")
         println(io, "max_bond_dim=$(max_bond_dim)")
         println(io, "fixed_max_bond_dim=$(fixed_max_bond_dim)")
+        println(io, "adaptive_pad=$(adaptive_pad)")
+        println(io, "truncation_mode=$(truncation_mode)")
         println(io, "threshold=$(threshold)")
         println(io, "numiter_lanczos=$(numiter_lanczos)")
         println(io, "J=$(J)")

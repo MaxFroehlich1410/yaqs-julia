@@ -13,6 +13,8 @@ const MPSMod = Yaqs.MPSModule
 const MPOMod = Yaqs.MPOModule
 const Cfg = Yaqs.SimulationConfigs
 const GL = Yaqs.GateLibrary
+const Timing = Yaqs.Timing
+using Yaqs.Timing: @t
 
 const _qutip_mods = Ref{Any}(nothing)
 const _qutip_cache = Dict{Tuple{Int,String}, Any}()  # (L, initial_state) -> psi0
@@ -28,6 +30,27 @@ export parse_kv_args,
        max_abs_error
 
 @inline mid_site(L::Int) = (L + 1) ÷ 2
+
+function _print_runtime_table(ts::Timing.TimingStats; header::AbstractString="Timing summary", top::Int=50)
+    total_ns = UInt64(0)
+    @inbounds for v in values(ts.times_ns)
+        total_ns += v
+    end
+
+    pairs = collect(ts.times_ns)
+    sort!(pairs; by = p -> p[2], rev = true)
+
+    @printf "\n\t%s (total %.3f ms)\n" header (total_ns / 1e6)
+    nshow = min(top, length(pairs))
+    for i in 1:nshow
+        key, tns = pairs[i]
+        c = get(ts.counts, key, 0)
+        ms_per = c > 0 ? (tns / 1e6) / c : 0.0
+        frac = total_ns > 0 ? 100.0 * (tns / float(total_ns)) : 0.0
+        @printf "\t  %-36s %10.3f ms  (%5.1f%%)  %8d calls  %9.3f ms/call\n" String(key) (tns / 1e6) frac c ms_per
+    end
+    return nothing
+end
 
 function parse_kv_args(args::Vector{String})
     # Minimal `--key=value` parser (also supports `--flag` => "true").
@@ -390,10 +413,14 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
                                   initial_state::AbstractString="x+",
                                   site::Int=mid_site(L),
                                   max_bond_dim::Int=128,
+                                  adaptive_pad::Int=4,
+                                  truncation_mode::Symbol=:during,
                                   threshold::Real=1e-12,
                                   numiter_lanczos::Int=25,
-                                  track_bond_dims::Bool=false)
+                                  track_bond_dims::Bool=false,
+                                  measure_runtime::Bool=false)
     method_sym = method isa AbstractString ? _method_from_string(method) : method
+    @assert truncation_mode === :during || truncation_mode === :after_sweep
 
     times = collect(0:dt:(steps * dt))
     Z = ComplexF64.(Matrix(GL.matrix(GL.ZGate())))
@@ -409,9 +436,40 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
                                   truncation_threshold=float(threshold),
                                   sample_timesteps=false)
 
-    # Mirror the Python harness: pad for fixed methods and 1-site TDVP.
-    if method_sym in (:fixed_bug, :fixed_bug_second_order, :single_site_tdvp)
+    # TDVP helper: to defer threshold-based truncation until after the step, disable the
+    # in-sweep truncation rule by setting threshold to ±Inf (keeps the hard chi cap).
+    tdvp_thr = if truncation_mode === :after_sweep
+        (cfg.truncation_threshold >= 0) ? Inf : -Inf
+    else
+        cfg.truncation_threshold
+    end
+    cfg_tdvp = Cfg.TimeEvolutionConfig(Cfg.Observable[], float(dt); dt=float(dt),
+                                       max_bond_dim=max_bond_dim,
+                                       truncation_threshold=float(tdvp_thr),
+                                       sample_timesteps=false)
+
+    # Mirror the Python harness: pad selected methods.
+    #
+    # Important: Python pads with *zeros* (then normalizes). In Julia we previously seeded
+    # padding with small noise to help 1-site TDVP explore an enlarged manifold, but that
+    # noise contaminates FIXED BUG variants unless you explicitly truncate afterwards.
+    #
+    # Therefore:
+    # - FIXED BUG variants: zero padding (noise_scale=0.0) to match Python behavior.
+    # - 1-site TDVP       : keep tiny noise to allow entanglement growth.
+    if method_sym in (:fixed_bug, :fixed_bug_second_order)
+        MPSMod.pad_bond_dimension!(ψ, max_bond_dim; noise_scale=0.0)
+    elseif method_sym === :single_site_tdvp
         MPSMod.pad_bond_dimension!(ψ, max_bond_dim; noise_scale=1e-10)
+    end
+
+    # Optional: ensure adaptive runs do not start at χ=1 (can reduce early-time artifacts).
+    # We cap the pad by max_bond_dim to avoid exceeding the method's truncation ceiling.
+    if method_sym in (:bug, :bug_second_order, :two_site_tdvp)
+        padχ = min(adaptive_pad, max_bond_dim)
+        if padχ > 1
+            MPSMod.pad_bond_dimension!(ψ, padχ; noise_scale=1e-10)
+        end
     end
 
     out = Vector{Float64}(undef, steps + 1)
@@ -422,26 +480,40 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
         bond_dims[1] = MPSMod.write_max_bond_dim(ψ)
     end
 
+    if measure_runtime
+        Timing.enable_timing!(true)
+        Timing.set_timing_print_each_call!(false)
+        Timing.reset_timing!()
+    end
+    ts = measure_runtime ? Timing.begin_scope!() : nothing
+
     t0 = time()
     for k in 1:steps
         if method_sym === :bug
-            BUG.bug!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
+            @t :bug_step BUG.bug!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
         elseif method_sym === :fixed_bug
-            BUG.fixed_bug!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
-            MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
+            @t :fixed_bug_step BUG.fixed_bug!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
+            # @t :fixed_bug_truncate MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
         elseif method_sym === :bug_second_order
-            BUG.bug_second_order!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
+            # Second-order adaptive BUG truncation timing controlled by `truncation_mode`.
+            bug_trunc_timing = (truncation_mode === :after_sweep) ? :after_window : :during
+            @t :bug_second_order_step BUG.bug_second_order!(ψ, H, cfg;
+                                                          numiter_lanczos=numiter_lanczos,
+                                                          truncation_timing=bug_trunc_timing)
         elseif method_sym === :fixed_bug_second_order
-            BUG.fixed_bug_second_order!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
-            MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
+            @t :fixed_bug_second_order_step BUG.fixed_bug_second_order!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
+            @t :fixed_bug_second_order_truncate MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
         elseif method_sym === :hybrid_bug_second_order
-            BUG.hybrid_bug_second_order!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
+            @t :hybrid_bug_second_order_step BUG.hybrid_bug_second_order!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
         elseif method_sym === :single_site_tdvp
-            Algo.single_site_tdvp!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
-            MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
+            @t :single_site_tdvp_step Algo.single_site_tdvp!(ψ, H, cfg_tdvp; numiter_lanczos=numiter_lanczos)
+            # @t :single_site_tdvp_truncate MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
         elseif method_sym === :two_site_tdvp
-            Algo.two_site_tdvp!(ψ, H, cfg; numiter_lanczos=numiter_lanczos)
-            MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
+            @t :two_site_tdvp_step Algo.two_site_tdvp!(ψ, H, cfg_tdvp; numiter_lanczos=numiter_lanczos)
+            if truncation_mode === :after_sweep
+                # Single post-pass compression using the user threshold semantics.
+                @t :two_site_tdvp_truncate MPSMod.truncate!(ψ; threshold=cfg.truncation_threshold, max_bond_dim=cfg.max_bond_dim)
+            end
         else
             error("Unknown method_sym: $method_sym")
         end
@@ -451,6 +523,12 @@ function run_method_expect_z_site(method::Union{Symbol, AbstractString};
         end
     end
     wall = time() - t0
+
+    if measure_runtime
+        Timing.end_scope!(ts; header="Timing scope: $(method_sym)")
+        _print_runtime_table(ts; header="Timing summary: $(method_sym)", top=50)
+        Timing.enable_timing!(false)
+    end
 
     return track_bond_dims ? (times, out, bond_dims, wall) : (times, out, wall)
 end

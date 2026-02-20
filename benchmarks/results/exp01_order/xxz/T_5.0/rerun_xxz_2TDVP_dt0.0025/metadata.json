@@ -1,0 +1,22 @@
+{
+  "N": 12,
+  "T": 5.0,
+  "chi_max_over_time": 64,
+  "cpu": "apple-m1",
+  "dt": 0.0025,
+  "err_energy_T": 1.0656327376068475e-8,
+  "err_infidelity_T": 1.0979813858114085e-7,
+  "exp_id": "exp01_order",
+  "git_commit": "5e77191",
+  "hostname": "edu-107.wias-berlin.de",
+  "julia_version": "1.12.1",
+  "method": "2TDVP",
+  "model": "xxz",
+  "nthreads": 1,
+  "os": "Darwin",
+  "pairing": "adaptive",
+  "rerun": true,
+  "rerun_reason": "elevated timing 0.40 s/step vs expected ~0.22",
+  "runtime_seconds": 429.68961625,
+  "word_size": 64
+}

@@ -23,6 +23,7 @@ function main(args=ARGS)
     threshold = parse(Float64, get(kv, "threshold", "1e-12"))
     numiter_lanczos = parse(Int, get(kv, "numiter_lanczos", "25"))
     site = parse(Int, get(kv, "site", string(mid_site(L))))
+    truncation_mode = Symbol(lowercase(get(kv, "truncation_mode", "during")))
 
     # Default: 4 BUG variants + TDVP baselines (all compared to qutip for accuracy).
     methods_str = get(kv, "methods", "FIXED,ADAPTIVE,DOUBLEFIXED,DOUBLEADAPTIVE,SINGLE_SITE_TDVP,TWO_SITE_TDVP")
@@ -51,6 +52,7 @@ function main(args=ARGS)
             _, z, _ = run_method_expect_z_site(m;
                 L=L, J=J, g=g, dt=dt, steps=steps, initial_state=initial_state, site=site,
                 max_bond_dim=bd, threshold=threshold, numiter_lanczos=numiter_lanczos,
+                truncation_mode=truncation_mode,
             )
             push!(errs[m], rms_error(z, z_ref; skip=2))
             push!(ymin[m], min_abs_error(z, z_ref; skip=2))
