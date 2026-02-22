@@ -19,38 +19,51 @@ export build_hamiltonian, build_initial_state, model_label
 Build an MPO Hamiltonian using the existing `MPOModule` constructors.
 
 Supported `model_name` values:
-- `"tfim"` / `"ising"` : calls `init_ising(N, J, g)`
-- `"general"`          : calls `init_general_hamiltonian(N, Jxx, Jyy, Jzz, hx, hy, hz)`
+- `"tfim"` / `"ising"`          : calls `init_ising(N, J, g)`
+- `"general"`                   : calls `init_general_hamiltonian(N, Jxx, Jyy, Jzz, hx, hy, hz)`
+- `"haldane_shastry"` / `"hs"` : calls `init_haldane_shastry(N; J, pbc)`
 """
 function build_hamiltonian(model_name::AbstractString, N::Int;
                            J::Float64=1.0, g::Float64=1.05,
                            Jxx::Float64=0.0, Jyy::Float64=0.0, Jzz::Float64=0.0,
-                           hx::Float64=0.0, hy::Float64=0.0, hz::Float64=0.0)
+                           hx::Float64=0.0, hy::Float64=0.0, hz::Float64=0.0,
+                           pbc::Bool=true)
     m = lowercase(strip(model_name))
     if m in ("tfim", "ising")
         return MPOMod.init_ising(N, J, g)
     elseif m == "general"
         return MPOMod.init_general_hamiltonian(N, Jxx, Jyy, Jzz, hx, hy, hz)
+    elseif m in ("haldane_shastry", "hs")
+        return MPOMod.init_haldane_shastry(N; J=J, pbc=pbc)
     else
-        error("Unsupported model_name=$model_name (supported: tfim, general)")
+        error("Unsupported model_name=$model_name (supported: tfim, general, haldane_shastry)")
     end
 end
 
 """
-    build_initial_state(model_name, N) -> MPS
+    build_initial_state(model_name, N; state="") -> MPS
 
-Return a product-state MPS matching the model convention:
-- TFIM  → |+>^⊗N
-- general (XXZ+hz) → Néel |0101…>
+Return a product-state MPS. When `state` is non-empty it overrides the model
+default; otherwise the model convention is used:
+- TFIM                 → |+⟩^⊗N  (`"x+"`)
+- general (XXZ+hz)     → Néel     (`"Neel"`)
+- haldane_shastry / hs → Néel     (`"Neel"`)  or any MPS-supported state
 """
-function build_initial_state(model_name::AbstractString, N::Int)
+function build_initial_state(model_name::AbstractString, N::Int; state::String="")
     m = lowercase(strip(model_name))
+    s = isempty(state) ? _default_state(m) : state
+    return MPSMod.MPS(N; state=s)
+end
+
+function _default_state(m::AbstractString)
     if m in ("tfim", "ising")
-        return MPSMod.MPS(N; state="x+")
+        return "x+"
     elseif m == "general"
-        return MPSMod.MPS(N; state="Neel")
+        return "Neel"
+    elseif m in ("haldane_shastry", "hs")
+        return "Neel"
     else
-        error("Unsupported model_name=$model_name for initial state")
+        error("No default initial state for model $m")
     end
 end
 
@@ -65,6 +78,8 @@ function model_label(model_name::AbstractString)
         return "tfim"
     elseif m == "general"
         return "xxz"
+    elseif m in ("haldane_shastry", "hs")
+        return "hs"
     else
         return m
     end

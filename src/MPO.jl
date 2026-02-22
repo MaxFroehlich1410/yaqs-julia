@@ -7,6 +7,7 @@ using ..MPSModule
 using ..GateLibrary
 
 export MPO, contract_mpo_mps, expect_mpo, contract_mpo_mpo, init_ising, init_general_hamiltonian
+export init_haldane_shastry, validate_hs_mpo
 export orthogonalize!, truncate!
 export apply_zipup!
 export apply_variational!, mpo_from_two_qubit_gate_matrix
@@ -1107,6 +1108,195 @@ function contract_mpo_mpo(a::MPO, b::MPO)
     end
     
     return MPO(L, new_tensors, a.phys_dims, 0)
+end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Haldane–Shastry Model
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    init_haldane_shastry(N; J=1.0, pbc=true) -> MPO{ComplexF64}
+
+Construct the MPO for the Haldane–Shastry (HS) spin-1/2 chain:
+
+    H = J · Σ_{i<j} J_{ij} (S_i · S_j),    S_α = σ_α / 2
+
+Couplings for **periodic boundary conditions** (canonical HS model on a ring):
+
+    J_{ij} = (π/N)² / sin²(π(j−i)/N)
+
+Couplings for **open boundary conditions** (1/r² model):
+
+    J_{ij} = 1 / (j−i)²
+
+The MPO is built by the finite-state-machine (FSM) construction.
+Bond dimension at the bond between sites k and k+1: `3k + 2`  (≤ 3N−1 at the center bond).
+
+# Arguments
+- `N`   : chain length (number of sites)
+- `J`   : overall energy scale (default `1.0`)
+- `pbc` : `true` = periodic HS on a ring (canonical); `false` = open 1/r² chain
+
+# Layout
+Returned `MPO` uses the standard repo layout `(Left_Bond, Phys_Out, Phys_In, Right_Bond)`.
+"""
+function init_haldane_shastry(N::Int; J::Real=1.0, pbc::Bool=true)
+    @assert N >= 1 "Chain length must be positive"
+
+    Sx = ComplexF64[0 1; 1 0] .* 0.5
+    Sy = ComplexF64[0 -im; im 0] .* 0.5
+    Sz = ComplexF64[1 0; 0 -1] .* 0.5
+    I2 = ComplexF64[1 0; 0 1]
+    S_ops = (Sx, Sy, Sz)  # α = 1,2,3
+
+    # Upper-triangle coupling matrix (J[i,j] for i < j)
+    Jmat = zeros(Float64, N, N)
+    for i in 1:N, j in (i + 1):N
+        Jmat[i, j] = if pbc
+            Float64(J) * (π / N)^2 / sin(π * (j - i) / N)^2
+        else
+            Float64(J) / (j - i)^2
+        end
+    end
+
+    phys_dims = fill(2, N)
+    tensors   = Vector{Array{ComplexF64, 4}}(undef, N)
+
+    # ── Trivial N=1 case (no pairs → H = 0) ─────────────────────────────────
+    if N == 1
+        tensors[1] = zeros(ComplexF64, 1, 2, 2, 1)
+        return MPO(1, tensors, phys_dims, 0)
+    end
+
+    # ── FSM construction ──────────────────────────────────────────────────────
+    #
+    # Virtual bond between sites k and k+1 carries states:
+    #   index 1              : |I⟩   (identity flowing left-to-right)
+    #   index 1+(i-1)*3+α   : |(i,α)⟩ for i=1..k, α=1,2,3  (S^α was started at site i)
+    #   index 3k+2          : |out⟩  (completed terms accumulate here)
+    # Bond dimension = 3k + 2.
+    #
+    # W-matrix non-zero blocks at site k:
+    #   (a)  |I⟩_L        → |I⟩_R              : I
+    #   (b)  |I⟩_L        → |(k,α)⟩_R          : S^α          (start at k)
+    #   (c)  |(i,α)⟩_L    → |(i,α)⟩_R  (i<k)  : I            (pass through)
+    #   (d)  |(i,α)⟩_L    → |out⟩_R    (i<k)  : J_{i,k}·S^α  (complete at k)
+    #   (e)  |out⟩_L      → |out⟩_R            : I            (collect output)
+    #
+    # Left boundary (k=1):   only (a) and (b); Dr=5, Dl=1
+    # Right boundary (k=N):  only (d') completions and (e'); Dr=1
+    # ─────────────────────────────────────────────────────────────────────────
+
+    for k in 1:N
+        Dl = (k == 1) ? 1 : 3 * (k - 1) + 2
+        Dr = (k == N) ? 1 : 3 * k + 2
+
+        W = zeros(ComplexF64, Dl, 2, 2, Dr)
+
+        if k == 1
+            # (a) |I⟩ → |I⟩
+            W[1, :, :, 1] .= I2
+            # (b) |I⟩ → |(1,α)⟩  for α = 1,2,3
+            for α in 1:3
+                W[1, :, :, 1 + α] .= S_ops[α]
+            end
+            # |out⟩ column remains zero (no output from site 1 alone)
+
+        elseif k == N
+            # (d') |(i,α)⟩_L → output  for i=1..N-1
+            for i in 1:(N - 1), α in 1:3
+                l = 1 + (i - 1) * 3 + α
+                W[l, :, :, 1] .+= Jmat[i, N] .* S_ops[α]
+            end
+            # (e') |out⟩_L → output
+            W[Dl, :, :, 1] .= I2
+
+        else
+            # (a) |I⟩ → |I⟩
+            W[1, :, :, 1] .= I2
+            # (b) |I⟩ → |(k,α)⟩  for α = 1,2,3
+            for α in 1:3
+                r = 1 + (k - 1) * 3 + α
+                W[1, :, :, r] .= S_ops[α]
+            end
+            # (c) |(i,α)⟩ → |(i,α)⟩  for i < k
+            for i in 1:(k - 1), α in 1:3
+                lr = 1 + (i - 1) * 3 + α
+                W[lr, :, :, lr] .= I2
+            end
+            # (d) |(i,α)⟩ → |out⟩  for i < k
+            for i in 1:(k - 1), α in 1:3
+                l = 1 + (i - 1) * 3 + α
+                W[l, :, :, Dr] .+= Jmat[i, k] .* S_ops[α]
+            end
+            # (e) |out⟩ → |out⟩
+            W[Dl, :, :, Dr] .= I2
+        end
+
+        tensors[k] = W
+    end
+
+    return MPO(N, tensors, phys_dims, 0)
+end
+
+"""
+    validate_hs_mpo(N; J=1.0, pbc=true, tol=1e-10) -> Bool
+
+Validate the HS MPO against a brute-force dense Hamiltonian for small `N`
+(recommended N ≤ 10, i.e. dim ≤ 1024).
+
+Builds the dense HS matrix column-by-column via `contract_mpo_mps` + `to_vec`
+(both using the **LSB-first** convention of the repo: site 1 = bit 0), then
+compares with the analytically constructed dense matrix in the same convention.
+
+Returns `true` if the relative Frobenius-norm error is below `tol`.
+"""
+function validate_hs_mpo(N::Int; J::Real=1.0, pbc::Bool=true, tol::Real=1e-10)
+    @assert 1 <= N <= 12 "validate_hs_mpo: choose N ≤ 12 to keep dim = 2^N manageable"
+
+    mpo = init_haldane_shastry(N; J=J, pbc=pbc)
+
+    Sx = ComplexF64[0 1; 1 0] .* 0.5
+    Sy = ComplexF64[0 -im; im 0] .* 0.5
+    Sz = ComplexF64[1 0; 0 -1] .* 0.5
+    I2 = ComplexF64[1 0; 0 1]
+    S_ops = (Sx, Sy, Sz)
+
+    d = 2^N
+
+    # ── Dense HS Hamiltonian (LSB convention: site k = bit k-1) ────────────────
+    # kron product from site N (outermost / MSB in kron) to site 1 (innermost / LSB)
+    # gives: state index = Σ_k s_k · 2^(k-1)  consistent with MPS to_vec.
+    H_dense = zeros(ComplexF64, d, d)
+    for i in 1:N, j in (i + 1):N
+        Jij = pbc ? Float64(J) * (π / N)^2 / sin(π * (j - i) / N)^2 :
+                    Float64(J) / (j - i)^2
+        for S in S_ops
+            acc = ones(ComplexF64, 1, 1)
+            for k in N:-1:1
+                acc = kron(acc, (k == i || k == j) ? S : I2)
+            end
+            H_dense .+= Jij .* acc
+        end
+    end
+
+    # ── MPO matrix (column-by-column) ─────────────────────────────────────────
+    H_mpo_mat = zeros(ComplexF64, d, d)
+    for col in 0:(d - 1)
+        # digits(col, base=2, pad=N) = [bit0, bit1, ..., bit_{N-1}] (LSB first)
+        # basis_str[k] = s_k = bit(k-1) of col  →  site k
+        basis_str = join(digits(col, base=2, pad=N))
+        ket  = MPSModule.MPS(N; state="basis", basis_string=basis_str)
+        Hket = contract_mpo_mps(mpo, ket)
+        H_mpo_mat[:, col + 1] .= MPSModule.to_vec(Hket)
+    end
+
+    err = norm(H_mpo_mat - H_dense) / max(1.0, norm(H_dense))
+    if err >= tol
+        @warn "validate_hs_mpo (N=$N, J=$J, pbc=$pbc): relative Frobenius error = $err ≥ tol = $tol  [FAILED]"
+    end
+    return err < tol
 end
 
 end # module

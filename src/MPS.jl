@@ -10,6 +10,7 @@ export MPS, check_if_valid_mps, check_canonical_form, pad_bond_dimension!
 export write_max_bond_dim, to_vec
 export shift_orthogonality_center!, normalize!, truncate!
 export scalar_product, norm, local_expect, local_expect_two_site, single_shot_measure, measure_single_shot, measure_shots, project_onto_bitstring, evaluate_all_local_expectations
+export two_site_correlator, connected_czz
 
 # --- Constants & Types ---
 
@@ -780,6 +781,142 @@ function to_vec(mps::MPS{T}) where T
         v = reshape(v_new, l, p_old * p_new, r_new)
     end
     return vec(v)
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# General two-site correlator & connected C_zz
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    two_site_correlator(mps, opA, opB, sA, sB) -> ComplexF64
+
+Compute `⟨ψ | opA_{sA} opB_{sB} | ψ⟩` for two sites `sA < sB`.
+
+**Algorithm** (mixed-canonical contraction):
+
+1. Shift the orthogonality center to `sA`.  
+   After this shift, sites `1..sA-1` are left-canonical and sites `sA+1..N` are
+   right-canonical, so the left environment at `sA` is the identity matrix and
+   the right environment at `sB` is also the identity.
+
+2. Sweep from `sA` to `sB` with the transfer-matrix recurrence:
+
+       E_new[b', k'] = Σ_{b,k,p,q}  E[b,k]  ⋅  A*[b,p,b']  ⋅  op[p,q]  ⋅  A[k,q,k']
+
+   where `op = opA` at `sA`, `opB` at `sB`, and `I` in between.
+
+3. Return `tr(E)` — the trace contracts against the right-canonical environment.
+
+**Note:** this mutates `mps.orth_center` (side-effect of `shift_orthogonality_center!`).
+The physical state is unchanged.
+
+# Arguments
+- `mps`  : MPS state (modified in-place: orth_center shifted to `sA`)
+- `opA`  : operator at site `sA`  (d × d matrix, d = physical dimension)
+- `opB`  : operator at site `sB`  (d × d matrix)
+- `sA`   : left site  (1-indexed), must satisfy `1 ≤ sA < sB ≤ mps.length`
+- `sB`   : right site (1-indexed)
+"""
+function two_site_correlator(mps::MPS{T},
+                              opA::AbstractMatrix,
+                              opB::AbstractMatrix,
+                              sA::Int,
+                              sB::Int) where T
+    @assert 1 <= sA < sB <= mps.length "two_site_correlator: need 1 ≤ sA < sB ≤ N"
+
+    shift_orthogonality_center!(mps, sA)
+
+    # Left environment at sA is I_{χL × χL} (left-canonical sites 1..sA-1)
+    chi_L = size(mps.tensors[sA], 1)
+    E = Matrix{ComplexF64}(I, chi_L, chi_L)
+
+    opA_c = ComplexF64.(opA)
+    opB_c = ComplexF64.(opB)
+
+    for k in sA:sB
+        A = mps.tensors[k]          # (L, d, R)
+        d = size(A, 2)
+        op = if k == sA
+            opA_c
+        elseif k == sB
+            opB_c
+        else
+            Matrix{ComplexF64}(I, d, d)
+        end
+
+        # E_new[b', k'] = Σ_{b,k,p,q}  E[b,k]  ⋅  conj(A)[b,p,b']  ⋅  op[p,q]  ⋅  A[k,q,k']
+        @tensor E_new[bp, kp] := E[b, k] * conj(A[b, p, bp]) * op[p, q] * A[k, q, kp]
+        E = Array(E_new)
+    end
+
+    # Right environment from sB+1..N is I (right-canonical). Result = tr(E).
+    return tr(E)
+end
+
+"""
+    connected_czz(mps, Sz_op, j, xs; periodic=false) -> Vector{ComplexF64}
+
+Compute the connected spin–spin correlator
+
+    C_zz(j+x, j; t) = ⟨S_{j+x}^z S_j^z⟩ − ⟨S_{j+x}^z⟩⟨S_j^z⟩
+
+for each displacement `x` in `xs`, using reference site `j`.
+
+Here `S^z = Sz_op` (typically `(1/2)σ^z`).
+
+For `x = 0`:
+
+    C_zz(j,j) = ⟨(S^z_j)²⟩ − ⟨S^z_j⟩²  =  1/4 − ⟨S^z_j⟩²   (spin-1/2)
+
+The single-site expectations `⟨S^z_i⟩` are computed in a single left-to-right
+sweep via `evaluate_all_local_expectations` (O(N·χ³)), then two-site correlators
+are added for each `x`.
+
+# Arguments
+- `mps`      : MPS state (mutated: orth_center may change)
+- `Sz_op`    : `S^z` operator matrix (2×2, e.g. `0.5*Z`)
+- `j`        : reference site (1-indexed)
+- `xs`       : displacements (can be positive, negative, or zero)
+- `periodic` : if `true`, site indices are wrapped modulo `N`
+
+# Returns
+`Vector{ComplexF64}` of length `length(xs)`.  Imaginary parts should be ≈ 0
+for Hermitian observables.
+"""
+function connected_czz(mps::MPS{T},
+                        Sz_op::AbstractMatrix,
+                        j::Int,
+                        xs::AbstractVector{Int};
+                        periodic::Bool=false) where T
+    N   = mps.length
+    Sz  = ComplexF64.(Sz_op)
+
+    # Single-site ⟨S^z_k⟩ for all k in one sweep
+    Sz_ops = [Sz for _ in 1:N]
+    Sz_all = evaluate_all_local_expectations(mps, Sz_ops)  # Vector{ComplexF64}
+
+    results = zeros(ComplexF64, length(xs))
+    Sz_j    = Sz_all[j]
+
+    for (ki, x) in enumerate(xs)
+        i = if periodic
+            mod1(j + x, N)
+        else
+            j + x
+        end
+
+        if i == j
+            # C_zz(j,j) = ⟨(S^z)²⟩ - ⟨S^z⟩²;  for spin-1/2: ⟨(S^z)²⟩ = 1/4
+            results[ki] = 0.25 - Sz_j^2
+        elseif 1 <= i <= N
+            si, sj = minmax(i, j)   # si ≤ sj
+            SzSz        = two_site_correlator(mps, Sz, Sz, si, sj)
+            results[ki] = SzSz - Sz_all[i] * Sz_j
+        end
+        # Out-of-range i (OBC, i < 1 or i > N): leave 0
+    end
+
+    return results
 end
 
 end # module

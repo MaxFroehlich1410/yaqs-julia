@@ -11,7 +11,7 @@ Usage:
 
 CLI flags (all optional):
     --exp=EXP_NAME       Run only this experiment (exp01_order, exp02_trunc, exp03_pareto)
-    --model=MODEL        Run only this model (tfim, xxz)
+    --model=MODEL        Run only this model: tfim | xxz | hs
     --T=VALUE            Run only this final time
     --pairing=PAIRING    Run only this pairing (fixed, adaptive)
     --N=VALUE            Override system size N (default: from each config file).
@@ -21,6 +21,13 @@ CLI flags (all optional):
                            N=12 → dim=4096,   trivial
                            N=14 → dim=16384,  ~10 GB RAM, ~5–30 min first run
                            N≥16 → requires >64 GB RAM; not recommended on a Mac
+
+Haldane–Shastry specific flags (only used when --model=hs):
+    --hs_J=<float>       Overall coupling strength J   (default: 1.0)
+    --hs_pbc=<bool>      Periodic boundary conditions  (default: true)
+    --hs_init=<str>      Initial state: neel | wall     (default: neel)
+                           neel = |↑↓↑↓…⟩  (Sz=0, fast entanglement growth)
+                           wall = |↑…↑↓…↓⟩  (domain wall, linear growth)
 """
 
 # Point PythonCall to system Python to avoid CondaPkg/pixi hangs.
@@ -90,8 +97,8 @@ end
 # ─────────────────────────────────────────────────────────────────────
 
 struct ModelConfig
-    name::String            # "tfim" or "general"
-    label::String           # "tfim" or "xxz"
+    name::String            # "tfim", "general", or "haldane_shastry"
+    label::String           # "tfim", "xxz", or "hs"
     initial_state::String
     H_params::NamedTuple
 end
@@ -99,10 +106,12 @@ end
 function load_model_configs(cfg::Dict)
     models = ModelConfig[]
     for (key, mcfg) in cfg["models"]
-        name = mcfg["name"]
+        name       = mcfg["name"]
         init_state = mcfg["initial_state"]
         if name in ("tfim", "ising")
             hp = (J=Float64(mcfg["J"]), g=Float64(mcfg["g"]))
+        elseif name in ("haldane_shastry", "hs")
+            hp = (J=Float64(mcfg["J"]), pbc=Bool(mcfg["pbc"]))
         else
             hp = (Jxx=Float64(mcfg["Jxx"]), Jyy=Float64(mcfg["Jyy"]),
                   Jzz=Float64(mcfg["Jzz"]),
@@ -115,12 +124,66 @@ function load_model_configs(cfg::Dict)
 end
 
 # ─────────────────────────────────────────────────────────────────────
+# Haldane–Shastry model config (built from CLI, not from TOML)
+# ─────────────────────────────────────────────────────────────────────
+
+"""
+    _make_hs_config(cli) -> ModelConfig
+
+Build a `ModelConfig` for the Haldane–Shastry model from CLI flags.
+Recognised flags: --hs_J, --hs_pbc, --hs_init.
+"""
+function _make_hs_config(cli::Dict)
+    J    = parse(Float64, get(cli, "hs_J",   "1.0"))
+    pbc  = !(get(cli, "hs_pbc", "true") in ("false", "0"))
+    init = get(cli, "hs_init", "neel")
+    @assert init in ("neel", "wall") "--hs_init must be 'neel' or 'wall' (got '$init')"
+    # MPS state string: "Neel" (capital N) for neel, "wall" for domain wall
+    mps_state = (init == "neel") ? "Neel" : "wall"
+    return ModelConfig("haldane_shastry", "hs", mps_state, (J=J, pbc=pbc))
+end
+
+# ─────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────
+
+"""
+    _filter_or_inject_models!(models, cli) -> models
+
+Apply the `--model` CLI filter.  For `--model=hs` the model is not present in
+any TOML config, so we inject a `ModelConfig` built from the `--hs_*` flags
+instead of filtering the loaded list.
+"""
+function _filter_or_inject_models!(models::Vector{ModelConfig}, cli::Dict)
+    haskey(cli, "model") || return models
+    if cli["model"] == "hs"
+        resize!(models, 0)
+        push!(models, _make_hs_config(cli))
+    else
+        filter!(m -> m.label == cli["model"], models)
+    end
+    return models
+end
+
+"""
+    _ref_init_state(mc) -> String
+
+Return the initial-state string to pass to `compute_or_load_reference`.
+For TFIM/XXZ this is empty (uses model default). For HS, pass through the
+configured state verbatim so MPS and dense reference use the same initializer.
+"""
+function _ref_init_state(mc::ModelConfig)
+    if mc.name in ("haldane_shastry", "hs")
+        return mc.initial_state
+    end
+    return ""   # use model default for TFIM / XXZ
+end
 
 function build_H(mc::ModelConfig, N::Int)
     if mc.name in ("tfim", "ising")
         return build_hamiltonian(mc.name, N; J=mc.H_params.J, g=mc.H_params.g)
+    elseif mc.name in ("haldane_shastry", "hs")
+        return build_hamiltonian(mc.name, N; J=mc.H_params.J, pbc=mc.H_params.pbc)
     else
         return build_hamiltonian(mc.name, N;
                                 Jxx=mc.H_params.Jxx, Jyy=mc.H_params.Jyy,
@@ -280,13 +343,8 @@ function run_and_record!(;
         "timestamp" => ts_now,
     )
     merge!(meta, machine_info())
-    if mc.name in ("tfim", "ising")
-        meta["J"] = mc.H_params.J
-        meta["g"] = mc.H_params.g
-    else
-        for k in keys(mc.H_params)
-            meta[string(k)] = mc.H_params[k]
-        end
+    for k in keys(mc.H_params)
+        meta[string(k)] = mc.H_params[k]
     end
     save_metadata(joinpath(run_dir, "metadata.json"), meta)
 
@@ -320,7 +378,7 @@ end
 # EXPERIMENT 1: Order verification
 # ─────────────────────────────────────────────────────────────────────
 
-function run_exp01_order(cli::Dict, git_sha::String)
+function run_exp01_order(cli::Dict, git_sha::String, run_root::String)
     cfg = TOML.parsefile(joinpath(@__DIR__, "configs", "exp01_order.toml"))
     glob = cfg["global"]
     N = haskey(cli, "N") ? parse(Int, cli["N"]) : Int(glob["N"])
@@ -332,11 +390,8 @@ function run_exp01_order(cli::Dict, git_sha::String)
     tmode = Symbol(glob["truncation_mode"])
 
     models = load_model_configs(cfg)
+    _filter_or_inject_models!(models, cli)
 
-    # Filter by CLI
-    if haskey(cli, "model")
-        filter!(m -> m.label == cli["model"], models)
-    end
     if haskey(cli, "T")
         T_list = [parse(Float64, cli["T"])]
     end
@@ -363,7 +418,7 @@ function run_exp01_order(cli::Dict, git_sha::String)
     for mc in models
         H = build_H(mc, N)
         for T in T_list
-            exp_dir = joinpath(@__DIR__, "results", "exp01_order_N$(N)", mc.label, "T_$(T)")
+            exp_dir = joinpath(run_root, "exp01_order_N$(N)", mc.label, "T_$(T)")
             mkpath(exp_dir)
             manifest_path = joinpath(exp_dir, "run_manifest.csv")
             run_ctr = Ref(0)
@@ -373,7 +428,8 @@ function run_exp01_order(cli::Dict, git_sha::String)
 
             # Compute reference once per (model, T) on a minimal 2-point grid
             ref = compute_or_load_reference(mc.name, N, T, [0.0, T], mc.H_params;
-                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"))
+                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"),
+                    initial_state=_ref_init_state(mc))
 
             # Pairing A: fixed (1TDVP vs double fixed BUG)
             if !haskey(cli, "pairing") || cli["pairing"] == "fixed"
@@ -452,7 +508,7 @@ end
 # EXPERIMENT 2: Truncation sensitivity
 # ─────────────────────────────────────────────────────────────────────
 
-function run_exp02_trunc(cli::Dict, git_sha::String)
+function run_exp02_trunc(cli::Dict, git_sha::String, run_root::String)
     cfg = TOML.parsefile(joinpath(@__DIR__, "configs", "exp02_trunc.toml"))
     glob = cfg["global"]
     N = haskey(cli, "N") ? parse(Int, cli["N"]) : Int(glob["N"])
@@ -464,9 +520,8 @@ function run_exp02_trunc(cli::Dict, git_sha::String)
     tmode = Symbol(glob["truncation_mode"])
 
     models = load_model_configs(cfg)
-    if haskey(cli, "model")
-        filter!(m -> m.label == cli["model"], models)
-    end
+    _filter_or_inject_models!(models, cli)
+
     if haskey(cli, "T")
         T_list = [parse(Float64, cli["T"])]
     end
@@ -495,7 +550,7 @@ function run_exp02_trunc(cli::Dict, git_sha::String)
     for mc in models
         H = build_H(mc, N)
         for T in T_list
-            exp_dir = joinpath(@__DIR__, "results", "exp02_trunc_N$(N)", mc.label, "T_$(T)")
+            exp_dir = joinpath(run_root, "exp02_trunc_N$(N)", mc.label, "T_$(T)")
             mkpath(exp_dir)
             manifest_path = joinpath(exp_dir, "run_manifest.csv")
             run_ctr = Ref(0)
@@ -505,7 +560,8 @@ function run_exp02_trunc(cli::Dict, git_sha::String)
 
             obs_grid = make_obs_grid(T, dt_small, n_pts)
             ref = compute_or_load_reference(mc.name, N, T, [0.0, T], mc.H_params;
-                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"))
+                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"),
+                    initial_state=_ref_init_state(mc))
 
             # Pairing A: adaptive — sweep SVD thresholds
             if !haskey(cli, "pairing") || cli["pairing"] == "adaptive"
@@ -602,7 +658,7 @@ function compute_pareto_flags(rows::Vector{ManifestRow})
     return is_pareto
 end
 
-function run_exp03_pareto(cli::Dict, git_sha::String)
+function run_exp03_pareto(cli::Dict, git_sha::String, run_root::String)
     cfg = TOML.parsefile(joinpath(@__DIR__, "configs", "exp03_pareto.toml"))
     glob = cfg["global"]
     N = haskey(cli, "N") ? parse(Int, cli["N"]) : Int(glob["N"])
@@ -613,9 +669,8 @@ function run_exp03_pareto(cli::Dict, git_sha::String)
     tmode = Symbol(glob["truncation_mode"])
 
     models = load_model_configs(cfg)
-    if haskey(cli, "model")
-        filter!(m -> m.label == cli["model"], models)
-    end
+    _filter_or_inject_models!(models, cli)
+
     if haskey(cli, "T")
         T_list = [parse(Float64, cli["T"])]
     end
@@ -646,7 +701,7 @@ function run_exp03_pareto(cli::Dict, git_sha::String)
     for mc in models
         H = build_H(mc, N)
         for T in T_list
-            exp_dir = joinpath(@__DIR__, "results", "exp03_pareto_N$(N)", mc.label, "T_$(T)")
+            exp_dir = joinpath(run_root, "exp03_pareto_N$(N)", mc.label, "T_$(T)")
             mkpath(exp_dir)
             manifest_path = joinpath(exp_dir, "run_manifest.csv")
             run_ctr = Ref(0)
@@ -658,7 +713,8 @@ function run_exp03_pareto(cli::Dict, git_sha::String)
 
             # Single reference per (model, T) — only need final-time values
             ref = compute_or_load_reference(mc.name, N, T, [0.0, T], mc.H_params;
-                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"))
+                    cache_dir=joinpath(@__DIR__, "results", "reference_cache"),
+                    initial_state=_ref_init_state(mc))
 
             # Pairing A: adaptive
             if !haskey(cli, "pairing") || cli["pairing"] == "adaptive"
@@ -777,15 +833,30 @@ function main(args=ARGS)
 
     exp_filter = get(cli, "exp", "all")
 
+    # ── Per-invocation output directory ────────────────────────────────
+    # Each run gets its own dated folder so nothing is ever overwritten.
+    # Format: results/YYYY-MM-DD_HH-MM-SS_git<sha>/
+    # The shared reference cache sits one level up (results/reference_cache/)
+    # and is never timestamped — it is keyed by content and safe to share.
+    ts_str    = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    run_label = "$(ts_str)_git$(git_sha)"
+    run_root  = joinpath(@__DIR__, "results", run_label)
+    mkpath(run_root)
+
     @printf("═══════════════════════════════════════════════════\n")
     @printf("  YAQS-Julia Benchmark Suite\n")
     @printf("  %s  git:%s\n", Dates.format(now(), "yyyy-mm-dd HH:MM:SS"), git_sha)
+    hs_info = (get(cli, "model", "") == "hs") ?
+        @sprintf("  HS params: J=%s pbc=%s init=%s\n",
+                 get(cli, "hs_J", "1.0"), get(cli, "hs_pbc", "true"), get(cli, "hs_init", "neel")) : ""
     @printf("  Filter: exp=%s model=%s T=%s pairing=%s N=%s\n",
             exp_filter,
             get(cli, "model", "all"),
             get(cli, "T", "all"),
             get(cli, "pairing", "all"),
             get(cli, "N", "from_config"))
+    isempty(hs_info) || print(hs_info)
+    @printf("  Output root: %s\n", run_root)
     @printf("═══════════════════════════════════════════════════\n\n")
     flush(stdout)
 
@@ -794,24 +865,25 @@ function main(args=ARGS)
     if exp_filter in ("all", "exp01_order")
         @printf("\n▶ EXPERIMENT 1: Order verification\n")
         flush(stdout)
-        run_exp01_order(cli, git_sha)
+        run_exp01_order(cli, git_sha, run_root)
     end
 
     if exp_filter in ("all", "exp02_trunc")
         @printf("\n▶ EXPERIMENT 2: Truncation sensitivity\n")
         flush(stdout)
-        run_exp02_trunc(cli, git_sha)
+        run_exp02_trunc(cli, git_sha, run_root)
     end
 
     if exp_filter in ("all", "exp03_pareto")
         @printf("\n▶ EXPERIMENT 3: Pareto (runtime vs error)\n")
         flush(stdout)
-        run_exp03_pareto(cli, git_sha)
+        run_exp03_pareto(cli, git_sha, run_root)
     end
 
     elapsed = time() - t_total
     @printf("\n═══════════════════════════════════════════════════\n")
     @printf("  All done. Total wall time: %.1f s (%.1f min)\n", elapsed, elapsed/60)
+    @printf("  Results saved to: %s\n", run_root)
     @printf("═══════════════════════════════════════════════════\n")
     flush(stdout)
 end

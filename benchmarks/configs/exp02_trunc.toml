@@ -39,3 +39,9 @@ Jzz = 1.0
 hx = 0.0
 hy = 0.0
 hz = 0.3
+
+[models.hs]
+name = "haldane_shastry"
+initial_state = "Neel"
+J = 1.0
+pbc = true

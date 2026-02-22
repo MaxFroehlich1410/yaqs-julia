@@ -43,34 +43,35 @@ const _σy = ComplexF64[0 -im; im 0]
 const _σz = ComplexF64[1 0; 0 -1]
 const _I2 = ComplexF64[1 0; 0 1]
 
+"""Kronecker product in LSB convention (site 1 = bit 0)."""
+function _kron_lsb(ops::NTuple{K,Matrix{ComplexF64}}) where K
+    acc = ones(ComplexF64, 1, 1)
+    for s in K:-1:1
+        acc = kron(acc, ops[s])
+    end
+    return acc
+end
+
 """Build operator `op` acting on site `i` in an N-qubit Hilbert space."""
 function _full_op(N::Int, op::Matrix{ComplexF64}, site::Int)
     @assert 1 <= site <= N
-    acc = (site == 1) ? copy(op) : copy(_I2)
-    for s in 2:N
-        acc = kron(acc, s == site ? op : _I2)
-    end
-    return acc
+    ops = ntuple(s -> (s == site ? op : _I2), N)
+    return _kron_lsb(ops)
 end
 
 """Build two-body operator op_A ⊗ op_B on sites (i, i+1)."""
 function _full_two_body(N::Int, opA::Matrix{ComplexF64}, opB::Matrix{ComplexF64}, i::Int)
     @assert 1 <= i < N
-    acc = if i == 1
-        kron(opA, opB)
-    else
-        copy(_I2)
-    end
-    for s in (i == 1 ? 3 : 2):N
-        if s == i
-            acc = kron(acc, opA)
-        elseif s == i + 1
-            acc = kron(acc, opB)
-        else
-            acc = kron(acc, _I2)
-        end
-    end
-    return acc
+    ops = ntuple(s -> (s == i ? opA : s == i + 1 ? opB : _I2), N)
+    return _kron_lsb(ops)
+end
+
+"""Build two-body operator opA on site i, opB on site j (arbitrary i < j)."""
+function _full_two_body_arb(N::Int, opA::Matrix{ComplexF64}, opB::Matrix{ComplexF64},
+                             i::Int, j::Int)
+    @assert 1 <= i < j <= N
+    ops = ntuple(s -> (s == i ? opA : s == j ? opB : _I2), N)
+    return _kron_lsb(ops)
 end
 
 """Build dense TFIM Hamiltonian: H = -J Σ Z_i Z_{i+1} - g Σ X_i"""
@@ -104,6 +105,31 @@ function _dense_general(N::Int; Jxx::Float64=0.0, Jyy::Float64=0.0, Jzz::Float64
     return Hermitian(H)
 end
 
+"""
+Build dense Haldane–Shastry Hamiltonian:
+  H = J Σ_{i<j} J_{ij} (S_i·S_j),  S^α = σ^α/2
+  J_{ij} = (π/N)² / sin²(π(j−i)/N)   (PBC)
+  J_{ij} = 1/(j−i)²                   (OBC)
+Uses the same basis convention as `MPSModule.to_vec` (site 1 = bit 0 / LSB).
+"""
+function _dense_hs(N::Int; J::Float64=1.0, pbc::Bool=true)
+    dim = 2^N
+    H   = zeros(ComplexF64, dim, dim)
+    Sx  = ComplexF64[0 0.5; 0.5 0]
+    Sy  = ComplexF64[0 -0.5im; 0.5im 0]
+    Sz  = ComplexF64[0.5 0; 0 -0.5]
+    for i in 1:N, j in (i + 1):N
+        Jij = pbc ? J * (π / N)^2 / sin(π * (j - i) / N)^2 :
+                    J / (j - i)^2
+        iszero(Jij) && continue
+        for S in (Sx, Sy, Sz)
+            ops = ntuple(k -> (k == i || k == j) ? S : _I2, N)
+            H .+= Jij .* _kron_lsb(ops)
+        end
+    end
+    return Hermitian(H)
+end
+
 """Build initial state as dense vector."""
 function _dense_initial_state(N::Int, state::AbstractString)
     if state == "x+"
@@ -122,6 +148,20 @@ function _dense_initial_state(N::Int, state::AbstractString)
     elseif state == "zeros"
         v = zeros(ComplexF64, 2^N)
         v[1] = 1.0
+        return v
+    elseif state == "neel"
+        # |↑↓↑↓…⟩  (odd sites ↑, even sites ↓)
+        # LSB: site i = bit (i-1).  Even sites get bit (i-1) set.
+        v   = zeros(ComplexF64, 2^N)
+        idx = sum(iseven(i) ? 2^(i - 1) : 0 for i in 1:N)
+        v[idx + 1] = 1.0
+        return v
+    elseif state == "wall"
+        # |↑…↑↓…↓⟩  domain wall at centre
+        # LSB: last ⌊N/2⌋ sites (i > N÷2) are ↓ → set bit (i-1).
+        v   = zeros(ComplexF64, 2^N)
+        idx = sum(i > N ÷ 2 ? 2^(i - 1) : 0 for i in 1:N)
+        v[idx + 1] = 1.0
         return v
     else
         error("Unsupported initial state for reference: $state")
@@ -143,7 +183,7 @@ end
 
 Fill `out[i] = ⟨ψt|Z_i|ψt⟩` for each site `i ∈ 1:N` by iterating over
 the 2^N basis states and accumulating ±|ψ_x|² according to the value of
-bit (N-i) of the basis-state index `x`.
+bit (i-1) of the basis-state index `x`.
 
 Memory: O(1) extra beyond `ψt` — no Z_i matrices are allocated.
 """
@@ -154,8 +194,8 @@ function _z_expect_into!(out::AbstractVector{Float64}, ψt::Vector{ComplexF64}, 
         p = abs2(ψt[x + 1])
         iszero(p) && continue
         for i in 1:N
-            # bit (N-i) of x: 0 → Z eigenvalue +1, 1 → Z eigenvalue -1
-            out[i] += ifelse(iszero((x >> (N - i)) & 1), p, -p)
+            # bit (i-1) of x: 0 → Z eigenvalue +1, 1 → Z eigenvalue -1
+            out[i] += ifelse(iszero((x >> (i - 1)) & 1), p, -p)
         end
     end
     return out
@@ -163,22 +203,28 @@ end
 
 # ── Cache ────────────────────────────────────────────────────────────
 
-function _cache_path(cache_dir::String, model_name::String, N::Int, T::Float64, n_points::Int)
-    label = "ref_$(model_name)_N$(N)_T$(replace(string(T), "." => "p"))_pts$(n_points).jls"
+function _cache_path(cache_dir::String, model_name::String, N::Int, T::Float64,
+                     n_points::Int, init_state::String="")
+    suffix = isempty(init_state) ? "" : "_$(init_state)"
+    label  = "ref_$(model_name)_N$(N)_T$(replace(string(T), "." => "p"))_pts$(n_points)_lsb$(suffix).jls"
     return joinpath(cache_dir, label)
 end
 
 """
     compute_or_load_reference(model_name, N, T, t_grid, H_params;
-                              cache_dir="benchmarks/results/reference_cache") -> ReferenceData
+                              cache_dir, initial_state) -> ReferenceData
 
 Compute exact reference via dense matrix exponentiation, or load from cache.
+
+`initial_state` overrides the per-model default ("x+" for TFIM, "Neel" for general/HS).
+Supported values: `"x+"`, `"Neel"`, `"neel"`, `"wall"`, `"zeros"`.
 """
 function compute_or_load_reference(model_name::AbstractString, N::Int, T::Float64,
                                    t_grid::AbstractVector{Float64}, H_params::NamedTuple;
-                                   cache_dir::String="benchmarks/results/reference_cache")
+                                   cache_dir::String="benchmarks/results/reference_cache",
+                                   initial_state::String="")
     mkpath(cache_dir)
-    cpath = _cache_path(cache_dir, model_name, N, T, length(t_grid))
+    cpath = _cache_path(cache_dir, model_name, N, T, length(t_grid), initial_state)
 
     if isfile(cpath)
         @printf("[reference] loading cached: %s\n", cpath)
@@ -202,6 +248,8 @@ function compute_or_load_reference(model_name::AbstractString, N::Int, T::Float6
             Jzz=get(H_params, :Jzz, 0.0),
             hx=get(H_params, :hx, 0.0), hy=get(H_params, :hy, 0.0),
             hz=get(H_params, :hz, 0.0))
+    elseif m in ("haldane_shastry", "hs")
+        _dense_hs(N; J=get(H_params, :J, 1.0), pbc=get(H_params, :pbc, true))
     else
         error("Unsupported model_name=$model_name for reference")
     end
@@ -219,11 +267,17 @@ function compute_or_load_reference(model_name::AbstractString, N::Int, T::Float6
     @printf("done\n")
     flush(stdout)
 
-    # Initial state
-    init_str = if m in ("tfim", "ising")
+    # Initial state — use caller-supplied value, otherwise model default
+    init_str = if !isempty(initial_state)
+        initial_state
+    elseif m in ("tfim", "ising")
         "x+"
     elseif m == "general"
         "Neel"
+    elseif m in ("haldane_shastry", "hs")
+        "Neel"
+    else
+        error("No default initial state for model $m; pass initial_state= explicitly")
     end
     ψ0 = _dense_initial_state(N, init_str)
 
@@ -253,7 +307,7 @@ function compute_or_load_reference(model_name::AbstractString, N::Int, T::Float6
         energy[ti]    = E_mean
 
         # Compute ⟨Z_i⟩ via O(N·dim) bit-manipulation — no Z_i matrices needed.
-        # Site i (1-indexed) occupies bit position (N-i) in the 0-indexed basis index.
+        # Site i (1-indexed) occupies bit position (i-1) in the 0-indexed basis index.
         # Z_i eigenvalue: +1 if that bit is 0, -1 if it is 1.
         _z_expect_into!(@view(z_expect[:, ti]), ψt, N)
 
