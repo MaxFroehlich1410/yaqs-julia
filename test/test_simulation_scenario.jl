@@ -1,14 +1,28 @@
+# End-to-end circuit TJM simulation scenario with threaded trajectory aggregation.
+#
+# This file runs a moderately sized circuit Ising circuit with noise over many trajectories and
+# aggregates observable estimates manually in a threaded loop. It primarily serves as a regression
+# and integration test for:
+# - `run_circuit_tjm` returning per-trajectory observable samples
+# - result-shape consistency across trajectories
+# - thread-safe accumulation using a lock and post-run sanity checks (bounds \([-1, 1]\))
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines a single scenario-style `@testset` that exercises threaded accumulation logic.
 using Test
 using LinearAlgebra
 using Yaqs
 using Yaqs.GateLibrary
 using Yaqs.MPSModule
-using Yaqs.DigitalTJM
+using Yaqs.CircuitTJM
 using Yaqs.SimulationConfigs
 using Yaqs.CircuitLibrary
 using Yaqs.NoiseModule
 
-@testset "Digital TJM Simulation - 6 Qubit Ising with Noise" begin
+@testset "Circuit TJM Simulation - 6 Qubit Ising with Noise" begin
 
     # 1. Parameters
     L = 6
@@ -58,10 +72,10 @@ using Yaqs.NoiseModule
     
     Threads.@threads for traj in 1:num_traj
         # Run one trajectory
-        # We need a fresh copy of psi_init for each trajectory inside run_digital_tjm (it does deepcopy)
+        # We need a fresh copy of psi_init for each trajectory inside run_circuit_tjm (it does deepcopy)
         # So passing psi_init is fine.
         
-        _, traj_res = run_digital_tjm(psi_init, circ, nm, sim_params)
+        _, traj_res = run_circuit_tjm(psi_init, circ, nm, sim_params)
         
         lock(lck)
         try

@@ -1,3 +1,16 @@
+# Unit tests for stochastic unraveling utilities (`Yaqs.StochasticProcessModule`).
+#
+# These tests cover:
+# - the `StochasticProcess` wrapper type and noise-model attachment
+# - stochastic weight calculation (`calculate_stochastic_factor`)
+# - construction of candidate jump distributions for local 1-site/2-site and long-range processes
+# - the `stochastic_process!` execution path and post-step normalization invariants
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating stochastic-process bookkeeping and sampling logic.
 using Test
 using LinearAlgebra
 using Statistics
@@ -12,6 +25,17 @@ using Yaqs.SimulationConfigs
 using Yaqs.DissipationModule
 
 @testset "Stochastic Process Refactored" begin
+
+    @testset "StochasticProcess wrapper type" begin
+        L = 2
+        H = MPO(L; identity=true)
+        proc_list = [Dict("name" => "lowering", "sites" => [1], "strength" => 0.1)]
+        noise = NoiseModel(proc_list, L)
+
+        sp = StochasticProcess(H, noise)
+        @test sp isa StochasticProcessModule.StochasticProcess
+        @test sp.noise_model === noise
+    end
 
     @testset "Stochastic Factor" begin
         L = 2

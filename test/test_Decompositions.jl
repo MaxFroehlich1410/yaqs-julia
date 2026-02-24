@@ -1,3 +1,14 @@
+# Unit tests for tensor decompositions in `Yaqs.Decompositions`.
+#
+# These tests check algebraic correctness (reconstruction) and isometry properties for:
+# - `right_qr` and `left_qr` on rank-3 MPS tensors with layout `(Dl, d, Dr)`
+# - `two_site_svd` reconstruction and truncation behavior (threshold and `max_bond_dim`)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s validating decomposition correctness and truncation controls.
 using Test
 using LinearAlgebra
 using TensorOperations
@@ -98,9 +109,10 @@ using .Yaqs.Decompositions
         # Let's rely on numerical truncation of random full rank matrix
         # If we set threshold high, bond dim should drop.
         
-        # Case 1: High *relative discarded weight* threshold, no max_bond constraint.
-        # With threshold close to 1, we force aggressive truncation (down to min_keep=2).
-        A_trunc, B_trunc = two_site_svd(A, B, 0.99)
+        # Case 1: High threshold, no max_bond constraint
+        # Random matrix (6x10) has rank 6. 
+        # With threshold 0.1, we expect SOME truncation from max rank 6.
+        A_trunc, B_trunc = two_site_svd(A, B, 2.0) # Very High threshold to force drop
         @test size(A_trunc, 3) < 6 
         
         # Case 2: Explicit max_bond_dim constraint

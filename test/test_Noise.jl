@@ -1,3 +1,15 @@
+# Unit tests for noise model parsing and unraveling (`Yaqs.NoiseModule`).
+#
+# These tests validate:
+# - parsing of noise-process dictionaries into typed noise processes
+# - unraveling modes such as `projector` and `unitary_2pt` for local Pauli noise
+# - construction of long-range noise processes represented as MPOs
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s covering noise model construction and basic invariants.
 using Test
 using LinearAlgebra
 using StaticArrays

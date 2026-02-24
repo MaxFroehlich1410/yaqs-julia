@@ -11,6 +11,18 @@ using ..Timing: @t
 
 export apply_dissipation
 
+"""
+Check whether a local noise process is Pauli-type.
+
+This matches the process name against supported Pauli and crosstalk Pauli channels to determine
+whether the dissipation can be applied as a simple scalar decay.
+
+Args:
+    proc (LocalNoiseProcess): Noise process to classify.
+
+Returns:
+    Bool: `true` if the process is Pauli-type, otherwise `false`.
+"""
 function is_pauli(proc::LocalNoiseProcess)
     return proc.name in Set([
         "pauli_x", "pauli_y", "pauli_z",
@@ -20,19 +32,50 @@ function is_pauli(proc::LocalNoiseProcess)
     ])
 end
 
+"""
+Check whether a local noise process acts on adjacent sites.
+
+This returns true when the process has two sites and their indices differ by exactly one.
+
+Args:
+    proc (LocalNoiseProcess): Noise process to classify.
+
+Returns:
+    Bool: `true` if the process targets adjacent sites, otherwise `false`.
+"""
 function is_adjacent(proc::LocalNoiseProcess)
     return length(proc.sites) == 2 && abs(proc.sites[2] - proc.sites[1]) == 1
 end
 
+"""
+Check whether a noise process is long-range.
+
+This returns true when the process acts on two sites that are separated by more than one bond.
+
+Args:
+    proc (AbstractNoiseProcess): Noise process to classify.
+
+Returns:
+    Bool: `true` if the process is long-range, otherwise `false`.
+"""
 function is_longrange(proc::AbstractNoiseProcess)
     return length(proc.sites) == 2 && abs(proc.sites[2] - proc.sites[1]) > 1
 end
 
 """
-    apply_dissipation(mps::MPS, noise_model::NoiseModel, dt::Float64, sim_params)
+Apply dissipative evolution to an MPS using a noise model.
 
-Apply dissipation to the MPS using the Trotterized non-unitary operators from the noise model.
-Sweeps Right-to-Left, applying 1-site and 2-site operators and shifting the orthogonality center.
+This performs a right-to-left sweep, applying one-site and two-site non-unitary operators derived
+from the noise model, and shifts the orthogonality center as it progresses.
+
+Args:
+    mps (MPS): State to update in-place.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to skip dissipation.
+    dt (Float64): Time step for the dissipative evolution.
+    sim_params: Simulation configuration with truncation settings.
+
+Returns:
+    Nothing: The MPS is updated in-place.
 """
 function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothing}, dt::Float64, sim_params) where T
     # 1. Check if noise is present
@@ -158,6 +201,26 @@ function apply_dissipation(mps::MPS{T}, noise_model::Union{NoiseModel{T}, Nothin
     end
 end
 
+"""
+Handle scalar-only long-range dissipation updates for a site.
+
+This applies scalar decay factors for long-range noise processes, handling paired projector channels
+and other supported long-range process types.
+
+Args:
+    mps: MPS state to update in-place.
+    proc: Noise process being handled.
+    i: Site index currently being processed.
+    processed_set: Set tracking already-processed projector pairs.
+    processes_here: Collection of processes active at the current site.
+    dt: Time step for the dissipative evolution.
+
+Returns:
+    Nothing: The MPS tensor at site `i` is scaled in-place.
+
+Raises:
+    ErrorException: If a projector pair is incomplete or the process type is unsupported.
+"""
 function handle_longrange_scalar!(mps, proc, i, processed_set, processes_here, dt)
     nm = proc.name
     

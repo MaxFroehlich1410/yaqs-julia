@@ -1,3 +1,14 @@
+# Regression test comparing truncation behavior to a Python reference implementation.
+#
+# This file constructs a 2-site MPS with controlled singular values and verifies that Julia's
+# `truncate!` keeps the same bond dimension as the reference Python logic for a range of thresholds.
+# If the Python package is available via PythonCall, it also runs a direct side-by-side comparison.
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines a `@testset` that validates truncation thresholds and (optionally) Python parity.
 using Test
 using Yaqs
 using LinearAlgebra

@@ -11,6 +11,20 @@ from qiskit_aer.noise.errors import PauliLindbladError
 
 @dataclass
 class BenchmarkConfig:
+    """Store benchmark configuration for Qiskit simulations.
+
+    This holds basic circuit sizing and sampling parameters used across Qiskit-based benchmarks.
+    It can be passed between helper functions to keep simulation settings consistent.
+
+    Args:
+        num_qubits (int): Number of qubits in the circuit.
+        num_layers (int): Number of circuit layers.
+        shots (int): Number of shots to simulate.
+        seed (Optional[int]): Optional RNG seed for reproducibility.
+
+    Returns:
+        BenchmarkConfig: Configuration container with the provided values.
+    """
     num_qubits: int
     num_layers: int
     shots: int
@@ -30,18 +44,30 @@ def collect_expectations_and_mps_bond_dims(
     mps_options: Optional[Dict[str, Any]] = None,
     observable_basis: str = "Z",
 ) -> Dict[str, Any]:
-    """
-    Collect both expectation values (Z/X/Y) and per-shot MPS bond-dimension stats with a single Aer run.
+    """Collect expectation values and MPS bond-dimension stats in one Aer run.
 
-    Builds one layered circuit and inserts both save_expectation_value (for specified Pauli on each qubit)
-    and save_matrix_product_state(pershot=True) after each layer. Then runs once and parses both.
+    This builds a layered circuit, inserts per-shot expectation saves and per-shot MPS saves after
+    each layer, then runs a single Aer simulation and parses both outputs.
 
     Args:
-        observable_basis: "Z", "X", or "Y" - which Pauli observable to measure
-    
-    Returns a dict with keys:
-    - "expvals": np.ndarray (num_qubits, num_layers + 1 if include_initial else num_layers)
-    - "bonds": dict with per-shot/per-layer max bond dims and aggregates
+        init_circuit (QuantumCircuit): Circuit that prepares the initial state.
+        trotter_step (QuantumCircuit): Circuit for one Trotter step.
+        num_qubits (int): Number of qubits in the circuit.
+        num_layers (int): Number of layers to simulate.
+        noise_model (QiskitNoiseModel): Qiskit noise model to apply.
+        shots (int): Number of shots to simulate.
+        seed (Optional[int]): RNG seed for reproducibility.
+        method (str): Aer simulation method.
+        include_initial (bool): Whether to include the initial state as t=0.
+        mps_options (Optional[Dict[str, Any]]): Aer MPS simulator options.
+        observable_basis (str): Pauli basis to measure ("Z", "X", or "Y").
+
+    Returns:
+        Dict[str, Any]: Dictionary with expectation values, variances, and bond statistics.
+
+    Raises:
+        ValueError: If `num_layers`, `num_qubits`, or `observable_basis` are invalid.
+        RuntimeError: If per-shot MPS data is missing or malformed.
     """
     if num_layers <= 0:
         raise ValueError("num_layers must be >= 1")
@@ -123,6 +149,23 @@ def collect_expectations_and_mps_bond_dims(
 
 
 def run_qiskit_exact(num_qubits: int, num_layers: int, init_circuit, trotter_step, noise_model: Optional[QiskitNoiseModel], method = "density_matrix", observable_basis: str = "Z") -> np.ndarray:
+    """Run an exact Qiskit simulation for layered circuits.
+
+    This composes the initial circuit with 1..N Trotter steps and evaluates the observable basis
+    at each layer using the exact simulator backend.
+
+    Args:
+        num_qubits (int): Number of qubits in the circuit.
+        num_layers (int): Number of layers to simulate.
+        init_circuit (QuantumCircuit): Circuit that prepares the initial state.
+        trotter_step (QuantumCircuit): Circuit for one Trotter step.
+        noise_model (Optional[QiskitNoiseModel]): Noise model to apply.
+        method (str): Aer simulation method (e.g., "density_matrix").
+        observable_basis (str): Pauli basis to measure ("Z", "X", or "Y").
+
+    Returns:
+        np.ndarray: Expectation values of shape (num_qubits, num_layers).
+    """
     from .qiskit_noisy_sim import qiskit_noisy_simulator
 
     baseline = [[] for _ in range(num_qubits)]
@@ -151,12 +194,26 @@ def run_qiskit_mps(
     mps_options: Optional[Dict[str, Any]] = None,
     observable_basis: str = "Z",
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
-    """
-    Run Qiskit MPS on a layered circuit and return expectation values and bond stats.
+    """Run Qiskit MPS simulation and return expectations and bond stats.
+
+    This delegates to the combined collection routine and returns per-layer expectation values,
+    bond statistics, and per-layer variances.
+
+    Args:
+        num_qubits (int): Number of qubits in the circuit.
+        num_layers (int): Number of layers to simulate.
+        init_circuit (QuantumCircuit): Circuit that prepares the initial state.
+        trotter_step (QuantumCircuit): Circuit for one Trotter step.
+        noise_model (QiskitNoiseModel): Noise model to apply.
+        num_traj (int): Number of trajectories/shots to simulate.
+        seed (Optional[int]): RNG seed for reproducibility.
+        method (str): Aer simulation method.
+        mps_options (Optional[Dict[str, Any]]): Aer MPS simulator options.
+        observable_basis (str): Pauli basis to measure ("Z", "X", or "Y").
 
     Returns:
-      - expvals: np.ndarray shape (num_qubits, num_layers)
-      - bonds: dict with per-shot/per-layer max bond dims and aggregates
+        Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]: Expectation values, bond stats, and
+        variances.
     """
     combined = collect_expectations_and_mps_bond_dims(
         init_circuit,
@@ -181,15 +238,32 @@ def run_qiskit_mps(
 
 
 def _save_label(layer_index: int) -> str:
+    """Build the Aer save label for a given layer index.
+
+    This generates a stable label name used to store per-layer MPS snapshots in Aer results.
+
+    Args:
+        layer_index (int): Zero-based layer index.
+
+    Returns:
+        str: Save label for the layer.
+    """
     return f"mps_t{layer_index+1}"
 
 
 
 
 def _extract_max_bond_dim_from_saved_mps_state(state_shot: Any) -> int:
-    """
-    Given one "shot" of a saved MPS state (tuple of (site_tensors, lambdas)),
-    return the maximum bond dimension across all bonds.
+    """Extract the maximum bond dimension from a saved MPS snapshot.
+
+    This parses a single per-shot MPS state tuple `(site_tensors, lambdas)` and returns the maximum
+    bond dimension, falling back to 1 for unexpected structures.
+
+    Args:
+        state_shot (Any): Per-shot MPS state object from Aer results.
+
+    Returns:
+        int: Maximum bond dimension for the shot.
     """
     try:
         _, lambdas = state_shot

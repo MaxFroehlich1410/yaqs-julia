@@ -1,7 +1,20 @@
+# Unit tests for predefined circuit constructors (`Yaqs.CircuitLibrary`).
+#
+# These tests validate that high-level circuit generators produce circuits with:
+# - correct qubit counts and basic structural properties (presence/placement of expected gates)
+# - expected coupling patterns for 1D/2D Ising and Fermi-Hubbard constructors
+# - determinism of random-circuit constructors when using a fixed seed
+# - basic coverage for additional helpers (QAOA layers, brickwork frames, long-range layers)
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s that sanity-check circuit generators and their gate lists.
 using Test
 using Yaqs
 using Yaqs.CircuitLibrary
-using Yaqs.DigitalTJM
+using Yaqs.CircuitTJM
 using Yaqs.GateLibrary
 
 @testset "CircuitLibrary Tests" begin
@@ -128,5 +141,48 @@ using Yaqs.GateLibrary
             if g.op isa CZGate; has_cz = true; end
         end
         @test has_h && has_sdg && has_cz
+    end
+
+    @testset "2D Heisenberg Circuit" begin
+        rows, cols = 2, 2
+        circ = create_2d_heisenberg_circuit(rows, cols, 1.0, 1.0, 1.0, 0.2, 0.1, 1)
+        @test circ.num_qubits == rows * cols
+        # Should contain some two-qubit couplings
+        found_2q = any(g -> (g.op isa RxxGate || g.op isa RyyGate || g.op isa RzzGate), circ.gates)
+        @test found_2q
+    end
+
+    @testset "Random Nearest-Neighbour Circuit" begin
+        n = 5
+        layers = 3
+        c1 = nearest_neighbour_random_circuit(n, layers, 123)
+        @test c1.num_qubits == n
+        @test length(c1.gates) > 0
+        # Basic sanity: gates act on valid sites and have arity 1 or 2.
+        for g in c1.gates
+            @test length(g.sites) == 1 || length(g.sites) == 2
+            @test all(1 .<= g.sites .<= n)
+        end
+    end
+
+    @testset "XY Trotter Longrange Layer" begin
+        circ = xy_trotter_layer_longrange(6, 0.1)
+        @test circ.num_qubits == 6
+        # Should contain at least one two-qubit gate
+        @test any(g -> length(g.sites) == 2, circ.gates)
+    end
+
+    @testset "Clifford / Echo / Brickwork constructors" begin
+        circ1 = create_clifford_cz_frame_circuit(4, 1)
+        @test circ1.num_qubits == 4
+        @test any(g -> g.op isa CZGate, circ1.gates)
+
+        circ2 = create_echoed_xx_pi_over_2(4, 1)
+        @test circ2.num_qubits == 4
+        @test any(g -> g.op isa RxxGate, circ2.gates)
+
+        circ3 = create_rzz_pi_over_2_brickwork(4, 1)
+        @test circ3.num_qubits == 4
+        @test any(g -> g.op isa RzzGate, circ3.gates)
     end
 end

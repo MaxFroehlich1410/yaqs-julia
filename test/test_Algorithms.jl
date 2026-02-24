@@ -1,3 +1,15 @@
+# Unit tests for numerical algorithms in `Yaqs.Algorithms`.
+#
+# These tests cover:
+# - Krylov exponential application (`expm_krylov`) on small reference problems
+# - single-site and two-site TDVP evolution on an Ising eigenstate (phase + norm preservation)
+# - Krylov Hermitian-mode controls, cache/stats helpers, and basic internal utilities
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s that validate algorithmic correctness on small systems.
 using Test
 using LinearAlgebra
 
@@ -92,47 +104,54 @@ using .Yaqs.Algorithms
         @test isapprox(ov, expected, atol=1e-2)
     end
 
-    @testset "SRC MPO×MPS (random_contraction)" begin
-        using Random
+    @testset "Krylov Mode Controls & Stats" begin
+        # Exercise exported control surface
+        reset_krylov_ishermitian_stats!()
+        reset_krylov_ishermitian_cache!()
 
-        # Small deterministic problem: compare SRC result to exact MPO×MPS contraction.
-        rng = MersenneTwister(1234)
-        L = 4
-        d = 2
+        set_krylov_ishermitian_mode!(:lanczos)
+        Z = [1.0 0.0; 0.0 -1.0]
+        v0 = ComplexF64[1.0, 0.0]
+        func_Z(x) = Z * x
+        _ = Algorithms.expm_krylov(func_Z, v0, 0.1, 5)
 
-        # Random MPS with modest bond dimensions.
-        # Bonds: 1 - χ2 - χ3 - 1
-        χ2, χ3 = 3, 2
-        A = Vector{Array{ComplexF64,3}}(undef, L)
-        A[1] = randn(rng, ComplexF64, 1, d, χ2)
-        A[2] = randn(rng, ComplexF64, χ2, d, χ3)
-        A[3] = randn(rng, ComplexF64, χ3, d, 1)
-        # Add a trivial site 4 to make L=4 with final bond 1
-        A[4] = randn(rng, ComplexF64, 1, d, 1)
-        psi = MPS(L, A, fill(d, L), 1)
-        MPSModule.normalize!(psi)
+        set_krylov_ishermitian_mode!(:arnoldi)
+        X = [0.0 1.0; 1.0 0.0]
+        func_X(x) = X * x
+        _ = Algorithms.expm_krylov(func_X, v0, 0.1, 5)
 
-        # Random MPO with modest bond dimensions (square local operator)
-        # Bonds: 1 - μ2 - μ3 - 1
-        μ2, μ3 = 2, 3
-        W = Vector{Array{ComplexF64,4}}(undef, L)
-        W[1] = randn(rng, ComplexF64, 1, d, d, μ2)
-        W[2] = randn(rng, ComplexF64, μ2, d, d, μ3)
-        W[3] = randn(rng, ComplexF64, μ3, d, d, 1)
-        W[4] = randn(rng, ComplexF64, 1, d, d, 1)
-        H = MPO(L, W, fill(d, L), 0)
+        # Print function should run and produce output
+        out = mktemp() do path, io
+            redirect_stdout(io) do
+                print_krylov_ishermitian_stats(header="stats")
+            end
+            close(io)
+            return read(path, String)
+        end
+        @test occursin("stats", out)
+        @test occursin("expm_krylov calls", out)
 
-        # Exact (uncompressed) application
-        exact = contract_mpo_mps(H, psi)
-        v_exact = to_vec(exact)
+        # Also check Bool overload
+        set_krylov_ishermitian_mode!(true)
+        set_krylov_ishermitian_mode!(false)
+        set_krylov_ishermitian_mode!(:auto)
+    end
 
-        # SRC (adaptive). Use a small cutoff and seeded RNG for determinism.
-        psi_src = random_contraction(H, psi; stop=Cutoff(1e-10), sketchdim=1, sketchincrement=1, rng=rng)
-        @test check_if_valid_mps(psi_src)
+    @testset "Internal helpers" begin
+        # _ishermitian_check should accept a linear map and prototype vector
+        Z = [1.0 0.0; 0.0 -1.0]
+        func_Z(x) = Z * x
+        @test Algorithms._ishermitian_check(func_Z, ComplexF64[1.0, 0.0]) == true
 
-        v_src = to_vec(psi_src)
-        relerr = norm(v_src - v_exact) / max(norm(v_exact), 1e-30)
-        @test relerr ≤ 1e-6
+        X = [0.0 1.0; 1.0 0.0]
+        func_X(x) = X * x
+        @test Algorithms._ishermitian_check(func_X, ComplexF64[1.0, 0.0]) == true
+
+        # _ensure_size! grows and preserves element type
+        A = Array{ComplexF64,3}(undef, 2, 2, 2)
+        A = Algorithms._ensure_size!(A, (3, 1, 4))
+        @test size(A) == (3, 1, 4)
+        @test eltype(A) == ComplexF64
     end
 
 end

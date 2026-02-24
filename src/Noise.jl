@@ -10,8 +10,34 @@ export NoiseModel, AbstractNoiseProcess, LocalNoiseProcess, MPONoiseProcess
 
 const C128 = ComplexF64
 
+"""
+Abstract supertype for noise processes acting on an MPS/MPO.
+
+This provides a common interface for local and MPO-based noise processes with a shared element type.
+
+Args:
+    None
+
+Returns:
+    AbstractNoiseProcess{T}: Abstract noise process type.
+"""
 abstract type AbstractNoiseProcess{T} end
 
+"""
+Represent a local noise process acting on one or two sites.
+
+This stores the process name, target sites, strength, and the local operator matrix used for the
+dissipative or stochastic updates.
+
+Args:
+    name (String): Noise process name.
+    sites (Vector{Int}): Target site indices.
+    strength (Float64): Noise strength parameter.
+    matrix (AbstractMatrix{T}): Local operator matrix.
+
+Returns:
+    LocalNoiseProcess{T}: Local noise process description.
+"""
 struct LocalNoiseProcess{T, M<:AbstractMatrix{T}} <: AbstractNoiseProcess{T}
     name::String
     sites::Vector{Int}
@@ -19,6 +45,22 @@ struct LocalNoiseProcess{T, M<:AbstractMatrix{T}} <: AbstractNoiseProcess{T}
     matrix::M
 end
 
+"""
+Represent a noise process specified by an MPO.
+
+This stores an MPO describing the jump operator, along with optional local factors for faster
+application when the MPO factorizes into a tensor product.
+
+Args:
+    name (String): Noise process name.
+    sites (Vector{Int}): Target site indices.
+    strength (Float64): Noise strength parameter.
+    mpo (MPO{T}): MPO representation of the noise operator.
+    factors (Vector{Matrix{T}}): Optional local factor matrices.
+
+Returns:
+    MPONoiseProcess{T}: MPO-based noise process description.
+"""
 struct MPONoiseProcess{T} <: AbstractNoiseProcess{T}
     name::String
     sites::Vector{Int}
@@ -27,17 +69,58 @@ struct MPONoiseProcess{T} <: AbstractNoiseProcess{T}
     factors::Vector{Matrix{T}} # Optional: Stores local factors for optimization if jump is a tensor product
 end
 
+"""
+Construct an MPO-based noise process without explicit factors.
+
+This convenience constructor initializes the `factors` field to an empty vector for backward
+compatibility or when local factors are not available.
+
+Args:
+    name (String): Noise process name.
+    sites (Vector{Int}): Target site indices.
+    strength (Float64): Noise strength parameter.
+    mpo (MPO{T}): MPO representation of the noise operator.
+
+Returns:
+    MPONoiseProcess{T}: MPO-based noise process description.
+"""
 # Constructor for backward compatibility or when factors are not available
 function MPONoiseProcess(name::String, sites::Vector{Int}, strength::Float64, mpo::MPO{T}) where T
     return MPONoiseProcess(name, sites, strength, mpo, Vector{Matrix{T}}())
 end
 
+"""
+Container for a collection of noise processes.
+
+This bundles local and MPO-based noise processes under a single model used in simulations.
+
+Args:
+    processes (Vector{AbstractNoiseProcess{T}}): Noise processes included in the model.
+
+Returns:
+    NoiseModel{T}: Noise model container.
+"""
 struct NoiseModel{T}
     processes::Vector{AbstractNoiseProcess{T}}
 end
 
 # --- Operator Retrieval ---
 
+"""
+Retrieve a local operator matrix by name.
+
+This maps a string identifier to a 2x2 or 4x4 operator matrix used in noise process construction,
+including Pauli and crosstalk operators.
+
+Args:
+    name (String): Operator identifier.
+
+Returns:
+    AbstractMatrix: Operator matrix corresponding to the name.
+
+Raises:
+    ErrorException: If the operator name is unknown.
+"""
 function get_operator(name::String)
     if name == "pauli_x" return matrix(XGate()) end
     if name == "pauli_y" return matrix(YGate()) end
@@ -60,6 +143,20 @@ function get_operator(name::String)
     error("Unknown operator: $name")
 end
 
+"""
+Retrieve a single-qubit Pauli matrix by character code.
+
+This maps `'x'`, `'y'`, or `'z'` to the corresponding Pauli operator matrix.
+
+Args:
+    c (Char): Pauli identifier character.
+
+Returns:
+    AbstractMatrix: Pauli matrix corresponding to the identifier.
+
+Raises:
+    ErrorException: If the character is not recognized.
+"""
 function get_pauli(c::Char)
     if c == 'x' return matrix(XGate()) end
     if c == 'y' return matrix(YGate()) end
@@ -70,10 +167,25 @@ end
 # --- MPO Construction Helpers (Long Range) ---
 
 """
-    build_mpo_phys(L, i, j, sigma, tau, a, b)
+Construct a long-range MPO for a two-site operator term.
 
-Constructs an MPO for O = a*I + b*(sigma_i ⊗ tau_j).
-Returns an MPO object with layout (Left, Out, In, Right).
+This builds an MPO for `O = a * I + b * (sigma_i ⊗ tau_j)` with identity tensors elsewhere using
+the `(Left, Out, In, Right)` MPO layout.
+
+Args:
+    L (Int): Number of sites.
+    i (Int): Left site index (1-based).
+    j (Int): Right site index (1-based).
+    sigma (AbstractMatrix): Operator for site `i`.
+    tau (AbstractMatrix): Operator for site `j`.
+    a (Number): Identity coefficient.
+    b (Number): Two-site operator coefficient.
+
+Returns:
+    MPO: MPO representing the long-range operator.
+
+Raises:
+    AssertionError: If `i` and `j` are not within bounds or ordered.
 """
 function build_mpo_phys(L::Int, i::Int, j::Int, sigma::AbstractMatrix, tau::AbstractMatrix, a::Number, b::Number)
     # Note: Python i, j are 0-based. Julia 1-based.
@@ -131,6 +243,21 @@ end
 
 # --- Unraveling Expansions ---
 
+"""
+Expand a projector noise process into +/- local channels.
+
+This appends two LocalNoiseProcess entries corresponding to `(I ± P)` with half strength, matching
+the projector-channel decomposition used in the stochastic unraveling.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name` and `sites`.
+    P (AbstractMatrix): Projector-defining operator matrix.
+    gamma (Float64): Noise strength parameter.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+"""
 function add_projector_expansion!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, P::AbstractMatrix, gamma::Float64)
     dim = size(P, 1)
     Id = Matrix{C128}(I, dim, dim)
@@ -153,6 +280,21 @@ function add_projector_expansion!(procs::Vector{AbstractNoiseProcess{C128}}, pro
     end
 end
 
+"""
+Expand a long-range projector process into MPO-based +/- channels.
+
+This constructs MPOs for `(I ± P)` over a long-range pair of sites and appends two MPONoiseProcess
+entries with half strength.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name`, `sites`, and optional `factors`.
+    L (Int): Total number of sites.
+    gamma (Float64): Noise strength parameter.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+"""
 function add_projector_expansion_longrange!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, L::Int, gamma::Float64)
     i, j = sort(proc_info["sites"]) # These are likely 1-based in Julia usage?
     # We assume input dictionaries use 1-based indexing if coming from Julia, 
@@ -183,6 +325,25 @@ function add_projector_expansion_longrange!(procs::Vector{AbstractNoiseProcess{C
     end
 end
 
+"""
+Expand a two-point unitary noise process into +/- local channels.
+
+This constructs local unitary operators `exp(±i θ0 P)` and appends two LocalNoiseProcess entries
+with strengths derived from `gamma` and `theta0`.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name` and `sites`.
+    P (AbstractMatrix): Generator operator matrix.
+    gamma (Float64): Noise strength parameter.
+    theta0 (Float64): Rotation angle used in the decomposition.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+
+Raises:
+    AssertionError: If `theta0` is too small to define a stable decomposition.
+"""
 function add_unitary_2pt_expansion!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, P::AbstractMatrix, gamma::Float64, theta0::Float64)
     s_val = sin(theta0)^2
     @assert s_val > 0 "theta0 too small"
@@ -197,6 +358,22 @@ function add_unitary_2pt_expansion!(procs::Vector{AbstractNoiseProcess{C128}}, p
     end
 end
 
+"""
+Expand a long-range two-point unitary process into MPO channels.
+
+This builds MPOs for `a I + b P` with coefficients derived from `theta0` and appends two
+MPONoiseProcess entries with strengths derived from `gamma`.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name`, `sites`, and optional `factors`.
+    L (Int): Total number of sites.
+    gamma (Float64): Noise strength parameter.
+    theta0 (Float64): Rotation angle used in the decomposition.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+"""
 function add_unitary_2pt_expansion_longrange!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, L::Int, gamma::Float64, theta0::Float64)
     i, j = sort(proc_info["sites"])
     
@@ -225,6 +402,27 @@ function add_unitary_2pt_expansion_longrange!(procs::Vector{AbstractNoiseProcess
     end
 end
 
+"""
+Expand a Gaussian-distributed unitary noise process into local channels.
+
+This discretizes a Gaussian distribution over rotation angles and appends LocalNoiseProcess entries
+with weights normalized to match the target noise strength.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name`, `sites`, and optional parameters.
+    P (AbstractMatrix): Generator operator matrix.
+    gamma (Float64): Noise strength parameter.
+    sigma (Float64): Standard deviation of the angle distribution.
+    gauss_M (Int): Number of discretization points.
+    gauss_k (Float64): Range multiplier for the angle grid.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+
+Raises:
+    AssertionError: If the Gaussian weight normalization is ill-conditioned.
+"""
 function add_unitary_gauss_expansion!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, P::AbstractMatrix, gamma::Float64, sigma::Float64, gauss_M::Int, gauss_k::Float64)
     M = get(proc_info, "M", gauss_M)
     theta_max = get(proc_info, "theta_max", gauss_k * sigma)
@@ -254,6 +452,24 @@ function add_unitary_gauss_expansion!(procs::Vector{AbstractNoiseProcess{C128}},
     end
 end
 
+"""
+Expand a Gaussian-distributed unitary noise process into MPO channels.
+
+This discretizes a Gaussian distribution over rotation angles and constructs MPOs for each angle,
+appending MPONoiseProcess entries with normalized weights.
+
+Args:
+    procs (Vector{AbstractNoiseProcess{C128}}): Output vector to append processes to.
+    proc_info (Dict): Process metadata including `name`, `sites`, and optional `factors`.
+    L (Int): Total number of sites.
+    gamma (Float64): Noise strength parameter.
+    sigma (Float64): Standard deviation of the angle distribution.
+    gauss_M (Int): Number of discretization points.
+    gauss_k (Float64): Range multiplier for the angle grid.
+
+Returns:
+    Nothing: Processes are appended to `procs` in-place.
+"""
 function add_unitary_gauss_expansion_longrange!(procs::Vector{AbstractNoiseProcess{C128}}, proc_info::Dict, L::Int, gamma::Float64, sigma::Float64, gauss_M::Int, gauss_k::Float64)
     i, j = sort(proc_info["sites"])
     
@@ -296,6 +512,24 @@ end
 
 # --- Main Constructor ---
 
+"""
+Build a NoiseModel from process metadata dictionaries.
+
+This parses process definitions, expands composite channels (projector/unitary/gaussian), and
+returns a NoiseModel containing the resulting local or MPO noise processes.
+
+Args:
+    processes_info (Vector{Dict{String, Any}}): Process definition dictionaries.
+    num_qubits (Int): Total number of qubits in the system.
+    theta0 (Float64): Base rotation angle for unitary two-point channels.
+    dt (Union{Float64, Nothing}): Optional time step for rate conversion.
+    sigma (Float64): Standard deviation for Gaussian unitary channels.
+    gauss_M (Int): Number of discretization points for Gaussian channels.
+    gauss_k (Float64): Range multiplier for Gaussian angle grid.
+
+Returns:
+    NoiseModel{ComplexF64}: Constructed noise model with expanded processes.
+"""
 function NoiseModel(processes_info::Vector{Dict{String, Any}}, num_qubits::Int; 
                    theta0::Float64=pi/2, dt::Union{Float64, Nothing}=nothing,
                    sigma::Float64=1.0, gauss_M::Int=11, gauss_k::Float64=4.0)
@@ -419,6 +653,18 @@ function NoiseModel(processes_info::Vector{Dict{String, Any}}, num_qubits::Int;
     return NoiseModel(final_processes)
 end
 
+"""
+Resolve an operator matrix from a process dictionary.
+
+This returns the explicit matrix if provided, otherwise derives the operator from the process name,
+including crosstalk naming conventions.
+
+Args:
+    proc (Dict): Process definition dictionary.
+
+Returns:
+    AbstractMatrix: Operator matrix for the process.
+"""
 function get_operator_from_proc(proc::Dict)
     if haskey(proc, "matrix")
         return proc["matrix"]

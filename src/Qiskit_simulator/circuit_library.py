@@ -28,10 +28,10 @@ from .circuit_library_utils import add_random_single_qubit_rotation
 def create_ising_circuit(
     L: int, J: float, g: float, dt: float, timesteps: int, *, periodic: bool = False
 ) -> QuantumCircuit:
-    """Ising Trotter circuit with optional periodic boundary conditions.
+    """Create a 1D Ising Trotter circuit.
 
-    Create a quantum circuit for simulating the Ising model. When periodic is True,
-    a long-range rzz gate is added between the last and first qubits in each timestep.
+    This builds a layered circuit with RX rotations and RZZ interactions, optionally including a
+    periodic boundary interaction between the last and first qubits.
 
     Args:
         L (int): Number of qubits in the circuit.
@@ -39,11 +39,10 @@ def create_ising_circuit(
         g (float): Transverse field strength.
         dt (float): Time step for the simulation.
         timesteps (int): Number of time steps to simulate.
-        periodic (bool, optional): If True, add a long-range gate between qubits 0 and L-1.
-                                   Defaults to False.
+        periodic (bool): Whether to add a periodic boundary interaction.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the Ising model evolution.
+        QuantumCircuit: Circuit representing the Ising evolution.
     """
     # Angle on X rotation
     alpha = -2 * dt * g
@@ -82,7 +81,10 @@ def create_ising_circuit(
 def create_2d_ising_circuit(
     num_rows: int, num_cols: int, J: float, g: float, dt: float, timesteps: int
 ) -> QuantumCircuit:
-    """2D Ising Trotter circuit on a rectangular grid using a snaking MPS ordering.
+    """Create a 2D Ising Trotter circuit with snaking ordering.
+
+    This maps a rectangular grid to a 1D snaking order, applies RX rotations, and inserts RZZ
+    interactions along horizontal and vertical bonds for each Trotter step.
 
     Args:
         num_rows (int): Number of rows in the qubit grid.
@@ -93,13 +95,25 @@ def create_2d_ising_circuit(
         timesteps (int): Number of Trotter steps.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the 2D Ising model evolution with MPS-friendly ordering.
+        QuantumCircuit: Circuit representing the 2D Ising evolution.
     """
     total_qubits = num_rows * num_cols
     circ = QuantumCircuit(total_qubits)
 
     # Define a helper function to compute the snaking index.
     def site_index(row: int, col: int) -> int:
+        """Map 2D grid coordinates to a snaking 1D index.
+
+        This maps rows alternately left-to-right and right-to-left to produce an MPS-friendly
+        ordering for a 2D grid.
+
+        Args:
+            row (int): Row index (0-based).
+            col (int): Column index (0-based).
+
+        Returns:
+            int: Linear index in snaking order.
+        """
         # For even rows, map left-to-right; for odd rows, map right-to-left.
         if row % 2 == 0:
             return row * num_cols + col
@@ -153,9 +167,10 @@ def create_2d_ising_circuit(
 def create_heisenberg_circuit(
     L: int, Jx: float, Jy: float, Jz: float, h: float, dt: float, timesteps: int, *, periodic: bool = False
 ) -> QuantumCircuit:
-    """Heisenberg Trotter circuit.
+    """Create a 1D Heisenberg Trotter circuit.
 
-    Create a quantum circuit for simulating the Heisenberg model.
+    This builds a layered circuit with RZ field rotations and alternating RZZ, RXX, and RYY
+    interactions, optionally including periodic boundary couplings.
 
     Args:
         L (int): Number of qubits (sites) in the circuit.
@@ -165,10 +180,10 @@ def create_heisenberg_circuit(
         h (float): Magnetic field strength.
         dt (float): Time step for the simulation.
         timesteps (int): Number of time steps to simulate.
-        periodic: Whether to apply periodic boundary conditions.
+        periodic (bool): Whether to apply periodic boundary conditions.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the Heisenberg model evolution.
+        QuantumCircuit: Circuit representing the Heisenberg evolution.
     """
     theta_xx = -2 * dt * Jx
     theta_yy = -2 * dt * Jy
@@ -229,7 +244,10 @@ def create_heisenberg_circuit(
 def create_2d_heisenberg_circuit(
     num_rows: int, num_cols: int, Jx: float, Jy: float, Jz: float, h: float, dt: float, timesteps: int
 ) -> QuantumCircuit:
-    """2D Heisenberg Trotter circuit on a rectangular grid using a snaking MPS ordering.
+    """Create a 2D Heisenberg Trotter circuit with snaking ordering.
+
+    This maps a rectangular grid to a 1D snaking order, applies RZ field rotations, and inserts
+    RZZ, RXX, and RYY interactions along horizontal and vertical bonds.
 
     Args:
         num_rows (int): Number of rows in the qubit grid.
@@ -242,8 +260,7 @@ def create_2d_heisenberg_circuit(
         timesteps (int): Number of Trotter steps.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the 2D Heisenberg model evolution
-                       with MPS-friendly ordering.
+        QuantumCircuit: Circuit representing the 2D Heisenberg evolution.
     """
     total_qubits = num_rows * num_cols
     circ = QuantumCircuit(total_qubits)
@@ -352,11 +369,10 @@ def create_2d_heisenberg_circuit(
 def create_1d_fermi_hubbard_circuit(
     L: int, u: float, t: float, mu: float, num_trotter_steps: int, dt: float, timesteps: int
 ) -> QuantumCircuit:
-    """1D Fermi-Hubbard Trotter circuit.
+    """Create a 1D Fermi-Hubbard Trotter circuit.
 
-    Create a quantum circuit for simulating the Fermi-Hubbard model defined by its
-    Hamiltonian:
-    H = -1/2 mu (I-Z) + 1/4 u (I-Z) (I-Z) - 1/2 t (XX + YY)
+    This builds a circuit for the Fermi-Hubbard Hamiltonian using interleaved spin registers and
+    applies chemical potential, onsite interaction, and kinetic hopping terms per Trotter step.
 
     Args:
         L (int): Number of sites in the model.
@@ -368,7 +384,7 @@ def create_1d_fermi_hubbard_circuit(
         timesteps (int): Number of time steps to simulate.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the 1D Fermi-Hubbard model evolution.
+        QuantumCircuit: Circuit representing the 1D Fermi-Hubbard evolution.
     """
     n = num_trotter_steps
 
@@ -377,20 +393,47 @@ def create_1d_fermi_hubbard_circuit(
     circ = QuantumCircuit(spin_up, spin_down)
 
     def chemical_potential_term() -> None:
-        """Add the time evolution of the chemical potential term."""
+        """Append the chemical potential term for one sub-step.
+
+        This applies phase gates to all spin-up and spin-down qubits using the current Trotter angle.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         theta = mu * dt / (2 * n)
         for j in range(L):
             circ.p(theta=theta, qubit=spin_up[j])
             circ.p(theta=theta, qubit=spin_down[j])
 
     def onsite_interaction_term() -> None:
-        """Add the time evolution of the onsite interaction term."""
+        """Append the onsite interaction term for one sub-step.
+
+        This applies controlled-phase gates between corresponding spin-up and spin-down sites.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         theta = -u * dt / (2 * n)
         for j in range(L):
             circ.cp(theta=theta, control_qubit=spin_up[j], target_qubit=spin_down[j])
 
     def kinetic_hopping_term() -> None:
-        """Add the time evolution of the kinetic hopping term."""
+        """Append the kinetic hopping term for one sub-step.
+
+        This applies RXX and RYY gates on alternating bonds for both spin registers.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         theta = -dt * t / n
         for j in range(L - 1):
             if j % 2 == 0:
@@ -416,7 +459,10 @@ def create_1d_fermi_hubbard_circuit(
 
 
 def lookup_qiskit_ordering(particle: int, spin: str) -> int:
-    """Looks up the Qiskit mapping from a 2D lattice to a 1D qubit-line.
+    """Map a particle index and spin to Qiskit qubit ordering.
+
+    This implements the interleaved ordering used for Fermi-Hubbard circuits, mapping spin-up and
+    spin-down particles to consecutive qubit indices.
 
     Args:
         particle (int): The index of the particle in the physical lattice.
@@ -426,7 +472,7 @@ def lookup_qiskit_ordering(particle: int, spin: str) -> int:
         int: The index in the 1D qubit-line.
 
     Raises:
-        ValueError: If spin is neither '↑' nor '↓.
+        ValueError: If spin is neither '↑' nor '↓'.
     """
     if spin == "↑":
         spin_val = 0
@@ -440,22 +486,24 @@ def lookup_qiskit_ordering(particle: int, spin: str) -> int:
 
 
 def add_long_range_interaction(circ: QuantumCircuit, i: int, j: int, outer_op: str, alpha: float) -> None:
-    """Add long-range interaction.
+    """Add a decomposed long-range interaction between two qubits.
 
-    Add a long range interaction between qubit i and j that is decomposed into two-qubit gates.
+    This inserts basis changes and CNOT ladders to implement a long-range XX or YY interaction
+    between qubits `i` and `j`.
 
     Args:
-        circ (QuantumCircuit): The quantum circuit to which the long range interaction should be applied.
-        i (int): Index of the first qubit
-        j (int): Index of the second qubit
-        outer_op (str): Selects if the outer matrix is a Pauli X or Y matrix
-                        outer_op=X: X_i ⊗ Z_{i+1} ⊗ ... ⊗ Z_{j-1} ⊗ X_j
-                        outer_op=Y: Y_i ⊗ Z_{i+1} ⊗ ... ⊗ Y_{j-1} ⊗ X_j
+        circ (QuantumCircuit): Circuit to modify.
+        i (int): Index of the first qubit.
+        j (int): Index of the second qubit.
+        outer_op (str): Outer operator, 'X' or 'Y'.
         alpha (float): Phase of the exponent.
 
+    Returns:
+        None: The circuit is modified in-place.
+
     Raises:
-        IndexError: If i is greater than or equal to j (assumption i < j is violated).
-        ValueError: If outer_op is not 'X' or 'Y'.
+        IndexError: If `i` is greater than or equal to `j`.
+        ValueError: If `outer_op` is not 'X' or 'Y'.
     """
     if i >= j:
         msg = "Assumption i < j violated."
@@ -497,17 +545,19 @@ def add_long_range_interaction(circ: QuantumCircuit, i: int, j: int, outer_op: s
 
 
 def add_hopping_term(circ: QuantumCircuit, i: int, j: int, alpha: float) -> None:
-    """Add a hopping term to the circuit.
+    """Add a hopping term between two sites.
 
-    Adds a hopping operator of the form
-    exp(-i*(X_i ⊗ Z_{i+1} ⊗ ... ⊗ Z_{j-1} ⊗ X_j + Y_i ⊗ Z_{i+1} ⊗ ... ⊗ Z_{j-1} ⊗ Y_j))
-    to the circuit.
+    This composes long-range XX and YY interactions to implement a hopping operator between qubits
+    `i` and `j`.
 
     Args:
-        circ (QuantumCircuit): The quantum circuit to which the hopping term should be applied.
+        circ (QuantumCircuit): The quantum circuit to modify.
         i (int): Index of the first qubit.
         j (int): Index of the second qubit.
         alpha (float): Phase of the exponent.
+
+    Returns:
+        None: The circuit is modified in-place.
     """
     circ_xx = QuantumCircuit(circ.num_qubits)
     circ_yy = QuantumCircuit(circ.num_qubits)
@@ -520,11 +570,10 @@ def add_hopping_term(circ: QuantumCircuit, i: int, j: int, alpha: float) -> None
 def create_2d_fermi_hubbard_circuit(
     Lx: int, Ly: int, u: float, t: float, mu: float, num_trotter_steps: int, dt: float, timesteps: int
 ) -> QuantumCircuit:
-    """2D Fermi-Hubbard Trotter circuit.
+    """Create a 2D Fermi-Hubbard Trotter circuit with interleaved ordering.
 
-    Create a quantum circuit for simulating the 2D Fermi-Hubbard model defined by its
-    Hamiltonian:
-    H = -1/2 mu (I-Z) + 1/4 u (I-Z) (I-Z) - 1/2 t (XZ...ZX + YZ...ZY)
+    This builds a circuit for a 2D lattice using interleaved spin ordering and applies chemical
+    potential, onsite interaction, and kinetic hopping terms per Trotter step.
 
     Args:
         Lx (int): Number of columns in the grid lattice.
@@ -537,7 +586,7 @@ def create_2d_fermi_hubbard_circuit(
         timesteps (int): Number of time steps to simulate.
 
     Returns:
-        QuantumCircuit: A quantum circuit representing the 2D Fermi-Hubbard model evolution.
+        QuantumCircuit: Circuit representing the 2D Fermi-Hubbard evolution.
     """
     n = num_trotter_steps
     num_sites = Lx * Ly
@@ -546,7 +595,16 @@ def create_2d_fermi_hubbard_circuit(
     circ = QuantumCircuit(num_qubits)
 
     def chemical_potential_term() -> None:
-        """Add the time evolution of the chemical potential term."""
+        """Append the chemical potential term for one sub-step.
+
+        This applies phase gates to all sites using the interleaved ordering.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         theta = -mu * dt / (2 * n)
         for j in range(num_sites):
             q_up = lookup_qiskit_ordering(j, "↑")
@@ -555,7 +613,16 @@ def create_2d_fermi_hubbard_circuit(
             circ.p(theta=theta, qubit=q_down)
 
     def onsite_interaction_term() -> None:
-        """Add the time evolution of the onsite interaction term."""
+        """Append the onsite interaction term for one sub-step.
+
+        This applies controlled-phase gates between up and down spins at each site.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         theta = -u * dt / (2 * n)
         for j in range(num_sites):
             q_up = lookup_qiskit_ordering(j, "↑")
@@ -563,7 +630,16 @@ def create_2d_fermi_hubbard_circuit(
             circ.cp(theta=theta, control_qubit=q_up, target_qubit=q_down)
 
     def kinetic_hopping_term() -> None:
-        """Add the time evolution of the kinetic hopping term."""
+        """Append the kinetic hopping term for one sub-step.
+
+        This applies hopping interactions along horizontal and vertical bonds for both spin sectors.
+
+        Args:
+            None
+
+        Returns:
+            None: The circuit is modified in-place.
+        """
         alpha = t * dt / n
 
         def horizontal_odd() -> None:
@@ -639,13 +715,18 @@ def nearest_neighbour_random_circuit(
     layers: int,
     seed: int = 42,
 ) -> QuantumCircuit:
-    """Creates a random circuit with single and two-qubit nearest-neighbor gates.
+    """Create a random nearest-neighbor circuit with alternating entanglers.
 
-    Gates are sampled following the prescription in https://arxiv.org/abs/2002.07730.
+    This samples single-qubit rotations and nearest-neighbor CZ/CX gates layer by layer following
+    the prescription in https://arxiv.org/abs/2002.07730.
+
+    Args:
+        n_qubits (int): Number of qubits in the circuit.
+        layers (int): Number of layers to apply.
+        seed (int): RNG seed for reproducibility.
 
     Returns:
-        A `QuantumCircuit` on `n_qubits` implementing `layers` of alternating
-        random single-qubit rotations and nearest-neighbor CZ/CX entanglers.
+        QuantumCircuit: Random nearest-neighbor circuit.
     """
     rng = np.random.default_rng(seed)
     qc = QuantumCircuit(n_qubits)

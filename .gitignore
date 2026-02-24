@@ -1,0 +1,45 @@
+## OS / editor junk
+.DS_Store
+.AppleDouble
+.LSOverride
+
+*.code-workspace
+.vscode/
+.idea/
+
+## Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+## Jupyter / Pluto artifacts
+.ipynb_checkpoints/
+*pluto backup*.jl
+
+## Generated outputs (never track)
+results/
+output/
+outputs/
+
+## Experiment data directories (keep on external storage, not in repo)
+00_safety_checks_full_algorithms/
+02_server_exp/
+03_Nature_review_checks/
+04_BUG_exps/
+05_Python_BUG_exps/
+
+## Common result / data artifacts (usually generated)
+*.pkl
+*.npz
+*.npy
+*.h5
+*.hdf5
+*.jld2
+*.mat
+*.csv
+*.tsv
+*.log
+*.png
+
+## Large binary artifacts
+*.whl
+!01_PaperExps/qiskit_ibm_runtime-0.43.1-py3-none-any.whl

@@ -13,10 +13,18 @@ using ..Decompositions
 export initialize, step_through, sample, analog_tjm_1, analog_tjm_2
 
 """
-    initialize(state, noise_model, sim_params)
+Prepare the initial sampling MPS for analog TJM trajectories.
 
-Prepare the initial sampling MPS Phi(0) by applying a half time step of dissipation
-followed by a stochastic process step.
+This applies a half-step of dissipation followed by a full-step stochastic process to produce
+the initial sampling state Phi(0). The input state is updated in-place and returned for chaining.
+
+Args:
+    state (MPS): State to initialize in-place.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to skip noise.
+    sim_params (TimeEvolutionConfig): Simulation parameters including the time step.
+
+Returns:
+    MPS: The initialized sampling state.
 """
 function initialize(state::MPS{T}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
     dt = sim_params.dt
@@ -33,9 +41,19 @@ function initialize(state::MPS{T}, noise_model::Union{NoiseModel{T}, Nothing}, s
 end
 
 """
-    step_through(state, hamiltonian, noise_model, sim_params)
+Advance the sampling state by one analog TJM step.
 
-Perform a single time step evolution: TDVP -> Dissipation -> Stochastic Process.
+This performs coherent evolution via TDVP, applies dissipation, and then applies the stochastic
+process when a noise model is present. The input state is updated in-place.
+
+Args:
+    state (MPS): State to evolve in-place.
+    hamiltonian (MPO): Hamiltonian MPO for coherent evolution.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to skip noise.
+    sim_params (TimeEvolutionConfig): Simulation parameters including time step.
+
+Returns:
+    MPS: The evolved state.
 """
 function step_through(state::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{NoiseModel{T}, Nothing}, sim_params::TimeEvolutionConfig) where T
     dt = sim_params.dt
@@ -55,9 +73,21 @@ function step_through(state::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{Noi
 end
 
 """
-    sample(phi, hamiltonian, noise_model, sim_params, results, j)
+Sample observables from a noisy evolution of the sampling state.
 
-Evolve a copy of the sampling MPS, apply dissipation/noise, and measure.
+This deep-copies the sampling MPS, performs a TDVP evolution and dissipation/noise step, then
+measures the configured observables into the results array.
+
+Args:
+    phi (MPS): Sampling state to copy and evolve.
+    hamiltonian (MPO): Hamiltonian MPO for coherent evolution.
+    noise_model (Union{NoiseModel, Nothing}): Noise model or `nothing` to skip noise.
+    sim_params (TimeEvolutionConfig): Simulation parameters including observables.
+    results (Matrix{Float64}): Output array to store observable values.
+    j (Int): Time index at which to store results.
+
+Returns:
+    Nothing: Results are written into `results`.
 """
 function sample(phi::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{NoiseModel{T}, Nothing}, 
                 sim_params::TimeEvolutionConfig, results::Matrix{Float64}, j::Int) where T
@@ -80,6 +110,21 @@ function sample(phi::MPS{T}, hamiltonian::MPO{T}, noise_model::Union{NoiseModel{
     end
 end
 
+"""
+Evaluate observables at a specific time index.
+
+This computes the real part of each observable expectation value and stores it into the provided
+results matrix at the given time index.
+
+Args:
+    psi (MPS): State whose observables are evaluated.
+    sim_params (TimeEvolutionConfig): Simulation parameters containing observables.
+    results (Matrix{Float64}): Output matrix storing observable values.
+    time_idx (Int): Column index to write results into.
+
+Returns:
+    Nothing: Results are written into `results`.
+"""
 function evaluate_observables!(psi::MPS, sim_params::TimeEvolutionConfig, results::Matrix{Float64}, time_idx::Int)
     for (i, obs) in enumerate(sim_params.observables)
         val = real(expect(psi, obs))
@@ -87,6 +132,20 @@ function evaluate_observables!(psi::MPS, sim_params::TimeEvolutionConfig, result
     end
 end
 
+"""
+Evaluate observables for single-column results.
+
+This computes the real part of each observable expectation value and stores it in the first column
+of the results matrix, used when only the final timestep is sampled.
+
+Args:
+    psi (MPS): State whose observables are evaluated.
+    sim_params (TimeEvolutionConfig): Simulation parameters containing observables.
+    results (Matrix{Float64}): Output matrix storing observable values.
+
+Returns:
+    Nothing: Results are written into `results`.
+"""
 function evaluate_observables!(psi::MPS, sim_params::TimeEvolutionConfig, results::Matrix{Float64})
     # For single-column results (no time index)
     for (i, obs) in enumerate(sim_params.observables)
@@ -96,10 +155,16 @@ function evaluate_observables!(psi::MPS, sim_params::TimeEvolutionConfig, result
 end
 
 """
-    analog_tjm_2(args)
+Run a single analog TJM trajectory using second-order splitting.
 
-Run a single trajectory using 2nd order TJM.
-args: (traj_idx, initial_state, noise_model, sim_params, hamiltonian)
+This initializes the sampling state, evolves it through time with second-order updates, and records
+observables at the requested timesteps. It is designed for use in parallel trajectory sampling.
+
+Args:
+    args: Tuple `(traj_idx, initial_state, noise_model, sim_params, hamiltonian)`.
+
+Returns:
+    Matrix{Float64}: Observable values for the trajectory.
 """
 function analog_tjm_2(args)
     (traj_idx, initial_state, noise_model, sim_params, hamiltonian) = args
@@ -137,9 +202,16 @@ function analog_tjm_2(args)
 end
 
 """
-    analog_tjm_1(args)
+Run a single analog TJM trajectory using first-order splitting.
 
-Run a single trajectory using 1st order TJM.
+This evolves the state through time with one-site updates and applies dissipation and stochastic
+process steps as configured, recording observables at requested timesteps.
+
+Args:
+    args: Tuple `(traj_idx, initial_state, noise_model, sim_params, hamiltonian)`.
+
+Returns:
+    Matrix{Float64}: Observable values for the trajectory.
 """
 function analog_tjm_1(args)
     (traj_idx, initial_state, noise_model, sim_params, hamiltonian) = args

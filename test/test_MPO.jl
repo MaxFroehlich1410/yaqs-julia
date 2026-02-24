@@ -1,3 +1,17 @@
+# Unit tests for the Matrix Product Operator implementation (`Yaqs.MPOModule`).
+#
+# These tests validate:
+# - MPO initialization (identity and zero operator) and basic tensor shapes `(Dl, d_out, d_in, Dr)`
+# - MPO×MPS and MPO×MPO contractions against dense-reference expectations on small systems
+# - construction of common Hamiltonians (e.g. Ising) and energy expectations on simple product states
+# - orthogonalization and truncation routines (bond dimension control and numerical stability)
+# - algebraic operations like MPO addition and multiplication
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Defines `@testset`s for MPO correctness, contractions, and compression behavior.
 using Test
 using LinearAlgebra
 using Yaqs
@@ -21,6 +35,20 @@ using Yaqs.GateLibrary
         mpo_zero = MPO(L; identity=false)
         T1 = mpo_zero.tensors[1]
         @test sum(abs.(T1)) == 0.0
+    end
+
+    @testset "MPO x MPS (contract_mpo_mps)" begin
+        L = 3
+        W = MPO(L; identity=true)
+        psi = MPS(L; state="random")
+
+        psi2 = contract_mpo_mps(W, psi)
+        @test psi2 isa MPS
+        @test psi2.length == L
+
+        v1 = MPSModule.to_vec(psi)
+        v2 = MPSModule.to_vec(psi2)
+        @test isapprox(v1, v2; atol=1e-10)
     end
     
     @testset "Ising Model" begin

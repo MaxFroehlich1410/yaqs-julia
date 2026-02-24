@@ -1,3 +1,15 @@
+# Standalone TDVP benchmark script (not part of the default `Pkg.test()` run).
+#
+# This script benchmarks:
+# - exact dense evolution vs. single-site TDVP vs. two-site TDVP
+# on a small set of reference models (Ising ferro, Ising disordered, Heisenberg), and writes a CSV
+# (`tdvp_benchmark_results.csv`) with time-series expectation values at selected sites.
+#
+# Args:
+#     None
+#
+# Returns:
+#     Nothing: Runs the benchmark immediately when executed as a script and writes results to disk.
 using LinearAlgebra
 using Printf
 
