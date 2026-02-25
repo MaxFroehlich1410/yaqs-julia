@@ -17,8 +17,11 @@ __pycache__/
 
 ## Generated outputs (never track)
 results/
+figures/
 output/
 outputs/
+_smoke_exp_runs/
+_smoke_exp_runs2/
 
 ## Experiment data directories (keep on external storage, not in repo)
 00_safety_checks_full_algorithms/
@@ -38,6 +41,10 @@ outputs/
 *.tsv
 *.log
 *.png
+
+## Local CondaPkg / pixi solver state (platform-specific)
+.CondaPkg/
+.pixi/
 
 ## Large binary artifacts
 *.whl

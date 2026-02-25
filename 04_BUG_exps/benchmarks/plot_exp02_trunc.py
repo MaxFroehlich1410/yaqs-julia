@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Plot Experiment 2 — Truncation sensitivity (XXZ only).
+Plot Experiment 2 — Truncation sensitivity (HS + XXZ).
 
-Layout: 1 row x 2 columns:
-  (a) Infidelity vs SVD threshold  (adaptive: 2-TDVP vs BUG2)
-  (b) Infidelity vs chi            (fixed:    1-TDVP vs BUG2_fixed)
+Layout: 2 rows x 2 columns:
+  Row 1 (HS):  (a) Infidelity vs SVD threshold, (b) Infidelity vs chi
+  Row 2 (XXZ): (c) Infidelity vs SVD threshold, (d) Infidelity vs chi
 
 Usage:
     python benchmarks/plot_exp02_trunc.py [--T 1.0]
@@ -105,22 +105,7 @@ def load_manifest(model: str, T: float, n_sites: int | None, run_label: str | No
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--T", type=float, default=1.0)
-    ap.add_argument("--N", type=int, default=None,
-                    help="Optional system size N to select exp02_trunc_N<N>.")
-    ap.add_argument("--run", type=str, default=None,
-                    help="Optional timestamped run folder under benchmarks/results/.")
-    args = ap.parse_args()
-    T = args.T
-    os.makedirs(FIGURES_DIR, exist_ok=True)
-
-    df_all = load_manifest("xxz", T, args.N, args.run)
-    if df_all.empty:
-        sys.exit("No XXZ data found.")
-    print(f"  xxz T={T}: {len(df_all)} rows total")
-
+def _plot_model_row(ax_a, ax_b, df_all: pd.DataFrame, model_label: str, tags: tuple[str, str]):
     df_adapt = df_all[df_all["method"].isin(["2TDVP", "BUG2_adaptive"])].copy()
     df_fixed = df_all[df_all["method"].isin(["1TDVP", "BUG2_fixed"])].copy()
 
@@ -128,24 +113,9 @@ def main():
     df_adapt = df_adapt.drop_duplicates(subset=["method", "svd_threshold"], keep="last")
     df_fixed = df_fixed.drop_duplicates(subset=["method", "chi_fixed"], keep="last")
 
-    print(f"    adaptive rows: {len(df_adapt)}")
-    print(f"    fixed rows:    {len(df_fixed)}")
+    print(f"    {model_label}: adaptive rows={len(df_adapt)}, fixed rows={len(df_fixed)}")
 
-    # Publication style (matching exp01 plots)
-    plt.rcParams.update({
-        "font.family": "serif", "font.size": 8.5,
-        "axes.labelsize": 10, "axes.titlesize": 10,
-        "legend.fontsize": 8.5, "xtick.labelsize": 7.5,
-        "ytick.labelsize": 7.5, "figure.dpi": 150,
-        "savefig.dpi": 300, "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.05,
-    })
-
-    fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(5.8, 2.8))
-    fig.subplots_adjust(left=0.12, right=0.97, top=0.88, bottom=0.18,
-                        wspace=0.38)
-
-    # ── Panel (a): Infidelity vs SVD threshold (adaptive) ────────────
+    # ── Panel (a/c): Infidelity vs SVD threshold (adaptive) ─────────
     for meth, sty in STYLE_ADAPTIVE.items():
         sub = df_adapt[df_adapt["method"] == meth].sort_values("svd_threshold")
         if sub.empty:
@@ -158,16 +128,13 @@ def main():
     ax_a.set_ylabel("Infidelity")
     ax_a.invert_xaxis()
     ax_a.grid(True, which="major", ls=":", lw=0.4, alpha=0.5)
-    ax_a.set_title("Adaptive truncation", fontsize=10, pad=8)
-
-    ax_a.text(0.04, 0.96, "(a)", transform=ax_a.transAxes,
+    ax_a.set_title(f"{model_label} — adaptive truncation", fontsize=10, pad=8)
+    ax_a.text(0.04, 0.96, tags[0], transform=ax_a.transAxes,
               fontsize=10, fontweight="bold", va="top", ha="left")
-
-    # Legend for panel (a) — lower left where data has plateaued
     ax_a.legend(loc="lower left", fontsize=7.5, framealpha=0.9,
                 edgecolor="0.7", handlelength=1.8)
 
-    # ── Panel (b): Infidelity vs chi (fixed) ─────────────────────────
+    # ── Panel (b/d): Infidelity vs chi (fixed) ──────────────────────
     for meth, sty in STYLE_FIXED.items():
         sub = df_fixed[df_fixed["method"] == meth].sort_values("chi_fixed")
         if sub.empty:
@@ -178,28 +145,59 @@ def main():
     ax_b.set_xlabel(r"Bond dimension $\chi$")
     ax_b.set_ylabel("Infidelity")
     ax_b.grid(True, which="major", ls=":", lw=0.4, alpha=0.5)
-    ax_b.set_title("Fixed truncation", fontsize=10, pad=8)
-
-    # Set x-ticks to actual chi values
-    chi_vals = sorted(df_fixed["chi_fixed"].unique())
-    ax_b.set_xticks(chi_vals)
-    ax_b.set_xticklabels([str(int(c)) for c in chi_vals])
-
-    ax_b.text(0.04, 0.96, "(b)", transform=ax_b.transAxes,
+    ax_b.set_title(f"{model_label} — fixed truncation", fontsize=10, pad=8)
+    ax_b.text(0.04, 0.96, tags[1], transform=ax_b.transAxes,
               fontsize=10, fontweight="bold", va="top", ha="left")
 
-    # Legend for panel (b)
+    if not df_fixed.empty:
+        chi_vals = sorted(df_fixed["chi_fixed"].unique())
+        ax_b.set_xticks(chi_vals)
+        ax_b.set_xticklabels([str(int(c)) for c in chi_vals])
+        ax_b.axhline(MACHINE_EPS, color="0.6", ls=":", lw=0.6, zorder=1)
+        ax_b.text(chi_vals[0], MACHINE_EPS * 5, r"machine $\varepsilon$",
+                  fontsize=6.5, color="0.5", ha="left", va="bottom")
+
     ax_b.legend(loc="center left", fontsize=7.5, framealpha=0.9,
                 edgecolor="0.7", handlelength=1.8,
                 bbox_to_anchor=(0.22, 0.5))
 
-    # Machine epsilon floor annotation on panel (b)
-    ax_b.axhline(MACHINE_EPS, color="0.6", ls=":", lw=0.6, zorder=1)
-    ax_b.text(chi_vals[0], MACHINE_EPS * 5, r"machine $\varepsilon$",
-              fontsize=6.5, color="0.5", ha="left", va="bottom")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--T", type=float, default=1.0)
+    ap.add_argument("--N", type=int, default=None,
+                    help="Optional system size N to select exp02_trunc_N<N>.")
+    ap.add_argument("--run", type=str, default=None,
+                    help="Optional timestamped run folder under benchmarks/results/.")
+    args = ap.parse_args()
+    T = args.T
+    os.makedirs(FIGURES_DIR, exist_ok=True)
+
+    df_hs = load_manifest("hs", T, args.N, args.run)
+    df_xxz = load_manifest("xxz", T, args.N, args.run)
+    print(f"  hs  T={T}: {len(df_hs)} rows total")
+    print(f"  xxz T={T}: {len(df_xxz)} rows total")
+    if df_hs.empty and df_xxz.empty:
+        sys.exit("No HS/XXZ data found.")
+
+    # Publication style (matching exp01 plots)
+    plt.rcParams.update({
+        "font.family": "serif", "font.size": 8.5,
+        "axes.labelsize": 10, "axes.titlesize": 10,
+        "legend.fontsize": 8.5, "xtick.labelsize": 7.5,
+        "ytick.labelsize": 7.5, "figure.dpi": 150,
+        "savefig.dpi": 300, "savefig.bbox": "tight",
+        "savefig.pad_inches": 0.05,
+    })
+
+    fig, axes = plt.subplots(2, 2, figsize=(7.2, 5.0))
+    fig.subplots_adjust(left=0.10, right=0.98, top=0.93, bottom=0.10,
+                        hspace=0.45, wspace=0.35)
+    _plot_model_row(axes[0, 0], axes[0, 1], df_hs, "HS", ("(a)", "(b)"))
+    _plot_model_row(axes[1, 0], axes[1, 1], df_xxz, "XXZ", ("(c)", "(d)"))
 
     # Save
-    stem = f"exp02_trunc_xxz_T{T}"
+    stem = f"exp02_trunc_hs_xxz_T{T}"
     for ext in ("pdf", "png"):
         out = os.path.join(FIGURES_DIR, f"{stem}.{ext}")
         fig.savefig(out)
