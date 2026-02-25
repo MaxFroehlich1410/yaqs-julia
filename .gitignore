@@ -24,8 +24,7 @@ outputs/
 00_safety_checks_full_algorithms/
 02_server_exp/
 03_Nature_review_checks/
-04_BUG_exps/
-05_Python_BUG_exps/
+
 
 ## Common result / data artifacts (usually generated)
 *.pkl

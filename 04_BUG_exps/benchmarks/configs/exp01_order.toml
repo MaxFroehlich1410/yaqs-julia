@@ -1,0 +1,53 @@
+# Experiment 01: Order verification (error vs dt)
+# Shows 2nd-order convergence until truncation/projection floor.
+
+[global]
+N = 12
+numiter_lanczos = 25
+adaptive_pad = 4
+truncation_mode = "during"
+obs_grid_points = 101
+
+# dt values to sweep (all <= 0.01)
+dt_list = [0.01, 0.005, 0.0025, 0.00125]
+
+# Final times
+T_list = [1.0, 5.0]
+
+[pairing_fixed]
+# 1TDVP vs double fixed BUG
+methods = ["single_site_tdvp", "fixed_bug_second_order"]
+pairing = "fixed"
+chi_fixed = 64
+trunc_mode = "fixed"
+
+[pairing_adaptive]
+# 2TDVP vs double adaptive BUG
+methods = ["two_site_tdvp", "bug_second_order"]
+pairing = "adaptive"
+svd_threshold = 1e-12
+trunc_mode = "adaptive"
+# Safety cap high enough to not bind for N=12
+max_bond_dim_cap = 512
+
+[models.tfim]
+name = "tfim"
+initial_state = "x+"
+J = 1.0
+g = 1.05
+
+[models.xxz]
+name = "general"
+initial_state = "Neel"
+Jxx = 1.0
+Jyy = 1.0
+Jzz = 1.0
+hx = 0.0
+hy = 0.0
+hz = 0.3
+
+[models.hs]
+name = "haldane_shastry"
+initial_state = "Neel"
+J = 1.0
+pbc = true
