@@ -6,6 +6,10 @@
 *.code-workspace
 .vscode/
 .idea/
+.cursor/
+
+## CondaPkg environment (generated, platform-specific)
+.CondaPkg/
 
 ## Python bytecode / caches
 __pycache__/
@@ -34,4 +38,3 @@ outputs/
 
 ## Large binary artifacts
 *.whl
-!01_PaperExps/qiskit_ibm_runtime-0.43.1-py3-none-any.whl

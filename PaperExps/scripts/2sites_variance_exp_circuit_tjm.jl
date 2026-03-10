@@ -2,13 +2,11 @@
 """
 2-qubit variance experiment (Julia / Yaqs CircuitTJM).
 
-Replicates the intent of `01_PaperExps/2sites_variance_exp.py`:
-
-- Two qubits, repeated "identity layer" (implemented as `RxxGate(0.0)` so the
-  CircuitTJM noise hook is exercised every layer).
-- Sparse Pauli-Lindblad noise on {X⊗I, I⊗X, X⊗X} with equal rates γ.
-- Compare simulated trajectory variance of ⟨Z₁⟩, ⟨Z₂⟩ against closed-form formulas
-  for different unravelings:
+Two qubits, repeated "identity layer" (implemented as `RxxGate(0.0)` so the
+CircuitTJM noise hook is exercised every layer).
+Sparse Pauli-Lindblad noise on {X⊗I, I⊗X, X⊗X} with equal rates γ.
+Compare simulated trajectory variance of ⟨Z₁⟩, ⟨Z₂⟩ against closed-form formulas
+for different unravelings:
   - standard
   - projector
   - unitary_2pt (two-point law) with s = E[sin²θ] = 1/3
@@ -16,7 +14,7 @@ Replicates the intent of `01_PaperExps/2sites_variance_exp.py`:
 
 Run (from repo root):
 
-    julia --project=. 01_PaperExps/2sites_variance_exp_digitaltjm.jl
+    julia --project=. PaperExps/scripts/2sites_variance_exp_circuit_tjm.jl
 
 This script uses PythonCall+matplotlib for plotting (no extra Julia plotting deps).
 """
@@ -507,13 +505,13 @@ function main()
     if _getbool(argd, "help", false)
         println("""
 Usage:
-  julia --project=. 01_PaperExps/2sites_variance_exp_digitaltjm.jl [options]
+  julia --project=. PaperExps/scripts/2sites_variance_exp_circuit_tjm.jl [options]
 
 Options:
   --traj N        number of trajectories (default: 10)
   --layers N      number of layers (default: 150)
   --dt DT         time step per layer (default: 1.0)
-  --plot-out PATH save plot to PATH (default: 01_PaperExps/variance_comparison_digitaltjm.png)
+  --plot-out PATH save plot to PATH (default: PaperExps/scripts/variance_comparison_digitaltjm.png)
   --no-plot       do not attempt matplotlib plotting
 
 Notes:
