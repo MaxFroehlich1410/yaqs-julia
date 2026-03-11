@@ -17,10 +17,10 @@ CLI flags (all optional):
     --N=VALUE            Override system size N (default: from each config file).
                          Results go into exp0X_YYYYYY_N<N>/ subdirectories so that
                          different N values never share a results folder.
-                         Feasibility note (exact reference uses full diagonalization):
-                           N=12 → dim=4096,   trivial
-                           N=14 → dim=16384,  ~10 GB RAM, ~5–30 min first run
-                           N≥16 → requires >64 GB RAM; not recommended on a Mac
+                         Feasibility note (exact reference uses Krylov propagation):
+                           N ≤ 20 — full-space Krylov, practical
+                           N ≤ 24 — sector Krylov (XXZ/HS), feasible if sector dim moderate
+                           N ≥ 25 — even storing the state vector is prohibitive
 
 Haldane–Shastry specific flags (only used when --model=hs):
     --hs_J=<float>       Overall coupling strength J   (default: 1.0)
@@ -29,19 +29,6 @@ Haldane–Shastry specific flags (only used when --model=hs):
                            neel = |↑↓↑↓…⟩  (Sz=0, fast entanglement growth)
                            wall = |↑…↑↓…↓⟩  (domain wall, linear growth)
 """
-
-# Point PythonCall to system Python to avoid CondaPkg/pixi hangs.
-# The benchmark suite itself uses pure-Julia exact references and does NOT need Python.
-ENV["JULIA_CONDAPKG_BACKEND"] = "System"
-if !haskey(ENV, "JULIA_PYTHONCALL_EXE")
-    # Try to find system python3
-    try
-        py = strip(read(`which python3`, String))
-        if !isempty(py) && isfile(py)
-            ENV["JULIA_PYTHONCALL_EXE"] = py
-        end
-    catch; end
-end
 
 using Printf
 using Dates
@@ -368,10 +355,12 @@ existing spacing (e.g. 8 for exp02, 16 for exp03).
 """
 function _extended_chi_list(base_chi::Vector{Int}, N::Int)::Vector{Int}
     chi_max = 2^(N ÷ 2)
-    chi_max <= base_chi[end] && return base_chi
-    step  = base_chi[end] - base_chi[end-1]
-    extra = collect((base_chi[end] + step):step:chi_max)
-    return vcat(base_chi, extra)
+    filtered = filter(<=(chi_max), base_chi)
+    isempty(filtered) && return [chi_max]
+    filtered[end] == chi_max && return filtered
+    step = length(filtered) >= 2 ? filtered[end] - filtered[end-1] : filtered[end]
+    extra = collect((filtered[end] + step):step:chi_max)
+    return vcat(filtered, extra)
 end
 
 # ─────────────────────────────────────────────────────────────────────

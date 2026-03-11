@@ -5,7 +5,7 @@
 End-to-end benchmark for the Haldane–Shastry (HS) spin-1/2 chain.
 Runs three simulations and compares them:
 
-  1. Exact reference via full eigendecomposition of the dense Hamiltonian.
+  1. Exact reference via matrix-free Krylov propagation (KrylovKit.exponentiate).
   2. MPS time evolution with two-site TDVP (2TDVP).
   3. MPS time evolution with second-order adaptive BUG.
 
@@ -40,20 +40,10 @@ Operator convention (consistent across MPO, MPS, and exact reference):
   C_zz(j+x, j; t) = ⟨S^z_{j+x} S^z_j⟩ − ⟨S^z_{j+x}⟩⟨S^z_j⟩  (connected)
 """
 
-# ── Environment ────────────────────────────────────────────────────────────────
-ENV["JULIA_CONDAPKG_BACKEND"] = "System"
-if !haskey(ENV, "JULIA_PYTHONCALL_EXE")
-    try
-        py = strip(read(`which python3`, String))
-        if !isempty(py) && isfile(py)
-            ENV["JULIA_PYTHONCALL_EXE"] = py
-        end
-    catch; end
-end
-
 using Printf
 using LinearAlgebra
 using Serialization
+using KrylovKit
 
 using Yaqs
 const MPSMod  = Yaqs.MPSModule
@@ -62,6 +52,13 @@ const Algo    = Yaqs.Algorithms
 const BUGMod  = Yaqs.BUGModule
 const Cfg     = Yaqs.SimulationConfigs
 const GL      = Yaqs.GateLibrary
+
+include("utils_reference.jl")
+using .BenchmarkReference: HaldaneShastryOperator, SectorHaldaneShastryOperator,
+                           MagnetizationSector, KrylovConfig,
+                           _hs_pair_couplings, _initial_state_hamming_weight,
+                           _initial_state_basis_index,
+                           _build_initial_state_full, _build_initial_state_sector
 
 # ── CLI parsing ────────────────────────────────────────────────────────────────
 
@@ -147,69 +144,19 @@ if do_validate
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 2.  Exact dense reference (eigendecomposition)
+# 2.  Exact reference via matrix-free Krylov propagation
 # ═══════════════════════════════════════════════════════════════════════════════
-#
-# Dense H uses LSB convention: state index = Σ_k s_k·2^(k−1) with site 1 = bit 0.
-# This matches the MPS `to_vec` convention.
 
-@printf "[2/5] Building dense reference (N=%d, dim=%d)… " N 2^N
+@printf "[2/5] Exact Krylov reference (N=%d, dim=%d)… " N 2^N
 flush(stdout)
 t0 = time_ns()
 
-const _I2 = ComplexF64[1 0; 0 1]
-const _Sx = ComplexF64[0 0.5; 0.5 0]
-const _Sy = ComplexF64[0 -0.5im; 0.5im 0]
-const _Sz = ComplexF64[0.5 0; 0 -0.5]
-
-function _kron_lsb(ops::NTuple{K,Matrix{ComplexF64}}) where K
-    # kron from site N down to site 1 gives site 1 = bit 0 (LSB)
-    acc = ones(ComplexF64, 1, 1)
-    for k in K:-1:1
-        acc = kron(acc, ops[k])
-    end
-    return acc
-end
-
-function _build_dense_hs(N::Int; J::Real=1.0, pbc::Bool=true)
-    dim = 2^N
-    H   = zeros(ComplexF64, dim, dim)
-    S_ops_vec = (_Sx, _Sy, _Sz)
-    for i in 1:N, j in (i + 1):N
-        Jij = pbc ? Float64(J) * (π / N)^2 / sin(π * (j - i) / N)^2 :
-                    Float64(J) / (j - i)^2
-        iszero(Jij) && continue
-        for S in S_ops_vec
-            ops = ntuple(k -> (k == i || k == j) ? S : _I2, N)
-            H .+= Jij .* _kron_lsb(ops)
-        end
-    end
-    return Hermitian(H)
-end
-
-H_dense = _build_dense_hs(N; J=J, pbc=true)
-elapsed_ms = (time_ns() - t0) / 1e6
-@printf "done (%.1f ms)\n" elapsed_ms
-flush(stdout)
-
-@printf "    Diagonalizing %dx%d Hermitian matrix… " 2^N 2^N
-flush(stdout)
-t0 = time_ns()
-F_eig   = eigen(H_dense)
-E_eig   = real.(F_eig.values)
-V_eig   = F_eig.vectors
-elapsed_ms = (time_ns() - t0) / 1e6
-@printf "done (%.1f ms)   E_gs = %.6f\n\n" elapsed_ms E_eig[1]
-flush(stdout)
-
-# Initial state (same convention used for both dense reference and MPS)
+# Initial state (same convention for both exact reference and MPS)
 # LSB: site k = bit (k-1);  '0'=↑ (spin up), '1'=↓ (spin down).
 function _make_init_state(init::String, N_::Int, j_ref_::Int)
     bits = if init == "neel"
-        # |↑↓↑↓…⟩  — Sz=0 sector, fastest entanglement growth
         [isodd(k) ? '0' : '1' for k in 1:N_]
     elseif init == "wall"
-        # |↑…↑↓…↓⟩  domain wall at centre — Sz=0, linear entanglement growth
         [k <= N_ ÷ 2 ? '0' : '1' for k in 1:N_]
     else  # spin_flip
         b = fill('0', N_)
@@ -217,62 +164,146 @@ function _make_init_state(init::String, N_::Int, j_ref_::Int)
         b
     end
     str = String(bits)
-    # Dense vector index (1-based): Σ_k bit(k) * 2^(k-1)  +  1
     idx = sum(parse(Int, bits[k]) * 2^(k - 1) for k in 1:N_) + 1
     return str, idx
 end
 
 _init_str_dense, _init_idx_dense = _make_init_state(init_state, N, j_ref)
-psi0_dense = zeros(ComplexF64, 2^N)
-psi0_dense[_init_idx_dense] = 1.0
-c0 = V_eig' * psi0_dense
-@printf "    Initial state: %s  (basis string: %s)\n" init_state _init_str_dense
 
-# Precompute diagonal Sz operators (LSB convention, site k = bit k-1)
-function _sz_diag_lsb(site::Int, N::Int)
-    d   = 2^N
-    out = zeros(Float64, d)
-    @inbounds for x in 0:(d - 1)
-        bit       = (x >> (site - 1)) & 1
-        out[x + 1] = 0.5 * (1 - 2 * bit)   # +0.5 if ↑, −0.5 if ↓
-    end
-    return out
+# Build Krylov operator (sector-aware when possible)
+_hw = _initial_state_hamming_weight(N, init_state == "neel" ? "Neel" :
+                                         init_state == "wall" ? "wall" : "zeros")
+# spin_flip has 1 down-spin — handle it
+if init_state == "spin_flip"
+    _hw = 1
 end
 
-sz_diags = [_sz_diag_lsb(k, N) for k in 1:N]
+_use_sector = (_hw >= 0)
+_pairs = _hs_pair_couplings(N; J=J, pbc=true)
+_cfg = KrylovConfig(krylovdim=30, maxiter=100, tol=1e-13)
 
-# ── Exact time evolution & C_zz collection ────────────────────────────────────
+local H_krylov, psi0_krylov, _sector
+
+if _use_sector
+    _sector = MagnetizationSector(N, _hw)
+    H_krylov = SectorHaldaneShastryOperator(N, _sector, _pairs)
+    # Build sector initial state
+    full_idx_0based = _init_idx_dense - 1
+    psi0_krylov = zeros(ComplexF64, _sector.dim)
+    k = _sector.full_to_sector[full_idx_0based + 1]
+    @assert k > 0 "State not in sector"
+    psi0_krylov[k] = 1.0
+    @printf "\n    sector mode: n_down=%d  sector_dim=%d  (full_dim=%d)\n" _hw _sector.dim (1 << N)
+else
+    _sector = nothing
+    H_krylov = HaldaneShastryOperator(N; J=J, pbc=true)
+    psi0_krylov = zeros(ComplexF64, 1 << N)
+    psi0_krylov[_init_idx_dense] = 1.0
+end
+
+elapsed_ms = (time_ns() - t0) / 1e6
+@printf "    Krylov operator built (%.1f ms)\n" elapsed_ms
+flush(stdout)
+
+@printf "    Initial state: %s  (basis string: %s)\n" init_state _init_str_dense
+
+# ── Exact time evolution & C_zz collection via Krylov ──────────────────────────
 n_t   = length(t_grid)
 xs    = collect(0:(N - 1))
-xs_vec = xs   # alias for plotting
+xs_vec = xs
 
 C_zz_exact   = zeros(Float64, n_t, N)
 sz_exact_all = zeros(Float64, n_t, N)
 
-@printf "[2/5] Exact time evolution (%d snapshots)… " n_t
+@printf "[2/5] Exact Krylov time evolution (%d snapshots)… " n_t
 flush(stdout)
 t0 = time_ns()
 
-for (ti, t) in enumerate(t_grid)
-    phases = exp.((-im) .* E_eig .* t)
-    psi_t  = V_eig * (c0 .* phases)
-    prob   = abs2.(psi_t)
-
-    for k in 1:N
-        sz_exact_all[ti, k] = dot(sz_diags[k], prob)
-    end
-
-    sz_j = sz_exact_all[ti, j_ref]
-    for (xi, x) in enumerate(xs)
-        i_wrap = mod1(j_ref + x, N)
-        if i_wrap == j_ref
-            sz2                = dot(abs2.(sz_diags[j_ref]), prob)
-            C_zz_exact[ti, xi] = sz2 - sz_j^2
-        else
-            szsz               = dot(sz_diags[i_wrap] .* sz_diags[j_ref], prob)
-            C_zz_exact[ti, xi] = szsz - sz_exact_all[ti, i_wrap] * sz_j
+# Helper to compute ⟨S^z_k⟩ from a state vector
+function _compute_sz_from_psi!(sz_out::AbstractVector{Float64},
+                                psi::AbstractVector{ComplexF64},
+                                N_::Int,
+                                sector::Union{Nothing,MagnetizationSector})
+    fill!(sz_out, 0.0)
+    if sector === nothing
+        @inbounds for x in 0:((1 << N_) - 1)
+            p = abs2(psi[x + 1])
+            iszero(p) && continue
+            for k in 1:N_
+                bit = (x >> (k - 1)) & 1
+                sz_out[k] += 0.5 * (1 - 2 * bit) * p
+            end
+        end
+    else
+        @inbounds for idx in 1:sector.dim
+            s = sector.states[idx]
+            p = abs2(psi[idx])
+            iszero(p) && continue
+            for k in 1:N_
+                bit = (s >> (k - 1)) & 1
+                sz_out[k] += 0.5 * (1 - 2 * bit) * p
+            end
         end
     end
+    return sz_out
+end
+
+# Helper to compute C_zz at one time from probability vector
+function _compute_czz_from_psi!(czz_out::AbstractVector{Float64},
+                                 sz_all::AbstractVector{Float64},
+                                 psi::AbstractVector{ComplexF64},
+                                 N_::Int, j_ref_::Int, xs_::AbstractVector{Int},
+                                 sector::Union{Nothing,MagnetizationSector})
+    for (xi, x) in enumerate(xs_)
+        i_wrap = mod1(j_ref_ + x, N_)
+        szsz_sum = 0.0
+        if sector === nothing
+            @inbounds for s in 0:((1 << N_) - 1)
+                p = abs2(psi[s + 1])
+                iszero(p) && continue
+                bi = (s >> (i_wrap - 1)) & 1
+                bj = (s >> (j_ref_ - 1)) & 1
+                szi = 0.5 * (1 - 2 * bi)
+                szj = 0.5 * (1 - 2 * bj)
+                szsz_sum += szi * szj * p
+            end
+        else
+            @inbounds for idx in 1:sector.dim
+                s = sector.states[idx]
+                p = abs2(psi[idx])
+                iszero(p) && continue
+                bi = (s >> (i_wrap - 1)) & 1
+                bj = (s >> (j_ref_ - 1)) & 1
+                szi = 0.5 * (1 - 2 * bi)
+                szj = 0.5 * (1 - 2 * bj)
+                szsz_sum += szi * szj * p
+            end
+        end
+        czz_out[xi] = szsz_sum - sz_all[i_wrap] * sz_all[j_ref_]
+    end
+    return czz_out
+end
+
+# Incremental Krylov propagation
+psi_current = copy(psi0_krylov)
+t_current = 0.0
+sz_buf = zeros(Float64, N)
+czz_buf = zeros(Float64, N)
+
+for (ti, t) in enumerate(t_grid)
+    Δt = t - t_current
+    if Δt > 1e-15
+        psi_current, info = exponentiate(H_krylov, -im * Δt, psi_current;
+                                          krylovdim=_cfg.krylovdim,
+                                          maxiter=_cfg.maxiter,
+                                          tol=_cfg.tol,
+                                          ishermitian=true)
+        t_current = t
+    end
+    _compute_sz_from_psi!(sz_buf, psi_current, N, _sector)
+    sz_exact_all[ti, :] .= sz_buf
+    _compute_czz_from_psi!(czz_buf, sz_buf, psi_current, N, j_ref, xs, _sector)
+    C_zz_exact[ti, :] .= czz_buf
 end
 
 elapsed_ms = (time_ns() - t0) / 1e6
@@ -286,11 +317,8 @@ flush(stdout)
 const Sz_mat  = ComplexF64.(0.5 .* Matrix(GL.matrix(GL.ZGate())))  # S^z = (1/2)σ^z
 const Z_ops   = [Sz_mat for _ in 1:N]
 
-# Reuse the same initial-state string computed for the dense reference
 const _init_str = _init_str_dense
-
-# Observation schedule
-const obs_at_step = round.(Int, t_grid ./ dt)   # length n_t
+const obs_at_step = round.(Int, t_grid ./ dt)
 
 function _run_mps_method(
         method_name::String,
@@ -300,10 +328,8 @@ function _run_mps_method(
         t_grid_::Vector{Float64}, sz_mat::Matrix{ComplexF64},
         N_::Int, obs_at_step_::Vector{Int})
 
-    # Fresh MPS
     psi = MPSMod.MPS(N_; state="basis", basis_string=init_str)
 
-    # Config
     cfg = Cfg.TimeEvolutionConfig(
         Cfg.Observable[], dt_val;
         dt=dt_val,
@@ -312,13 +338,10 @@ function _run_mps_method(
         sample_timesteps=false,
     )
 
-    # Pad initial bond dimension
     MPSMod.pad_bond_dimension!(psi, min(4, chi); noise_scale=1e-10)
 
     n_t_  = length(t_grid_)
-    N_obs = length(xs_vec_)
     C_zz  = zeros(ComplexF64, n_t_, N_)
-    z_ops = [sz_mat for _ in 1:N_]
 
     function measure!(idx)
         czz = MPSMod.connected_czz(psi, sz_mat, j_ref_, xs_vec_; periodic=true)
@@ -400,8 +423,8 @@ function _error_stats(C_approx, C_ref)
     max_err  = maximum(abs_diff)
     mean_err = sum(abs_diff) / length(abs_diff)
     rel_err  = norm(diff) / max(1e-14, norm(C_ref))
-    err_t    = vec(maximum(abs_diff, dims=2))   # max over x at each t
-    err_x    = vec(maximum(abs_diff, dims=1))   # max over t at each x
+    err_t    = vec(maximum(abs_diff, dims=2))
+    err_x    = vec(maximum(abs_diff, dims=1))
     return (; abs_diff, max_err, mean_err, rel_err, err_t, err_x)
 end
 
@@ -472,7 +495,7 @@ if do_plot
             cmap="RdBu_r", vmin=-vmax, vmax=vmax)
         fig1.colorbar(im_e, ax=axes1[0]).set_label(raw"$C_{zz}$")
         axes1[0].set_xlabel("t"); axes1[0].set_ylabel("x")
-        axes1[0].set_title("Exact")
+        axes1[0].set_title("Exact (Krylov)")
 
         im_t = axes1[1].imshow(_jl2py(C_zz_tdvp'),
             aspect="auto", origin="lower", extent=ext,
@@ -520,7 +543,6 @@ if do_plot
         axes2[1].set_xlabel("t"); axes2[1].set_ylabel("x")
         axes2[1].set_title("BUG error  (max=$(round(stats_bug.max_err; sigdigits=2)))")
 
-        # Line cuts at evenly spaced time points
         n_cuts  = min(5, n_t)
         cut_idx = round.(Int, LinRange(1, n_t, n_cuts))
         colors  = ["tab:blue", "tab:orange", "tab:green", "tab:red", "tab:purple"]

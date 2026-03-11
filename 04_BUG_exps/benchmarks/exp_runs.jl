@@ -3,30 +3,11 @@ module BUGExpRuns
 using Printf
 using DelimitedFiles
 
-# ------------------------------------------------------------------------------
-# Python / QuTiP startup note (macOS / OpenMP):
-# Importing QuTiP can hang or take a very long time if OpenMP / BLAS tries to
-# spawn many threads during library initialization. We defensively set the common
-# thread env vars to 1 *unless the user already set them*.
-# This must happen before the first Python/QuTiP import.
-# ------------------------------------------------------------------------------
-if !haskey(ENV, "OMP_NUM_THREADS")
-    ENV["OMP_NUM_THREADS"] = "1"
-end
-if !haskey(ENV, "OPENBLAS_NUM_THREADS")
-    ENV["OPENBLAS_NUM_THREADS"] = "1"
-end
-if !haskey(ENV, "MKL_NUM_THREADS")
-    ENV["MKL_NUM_THREADS"] = "1"
-end
-if !haskey(ENV, "VECLIB_MAXIMUM_THREADS")
-    ENV["VECLIB_MAXIMUM_THREADS"] = "1"
-end
-
-using PythonCall
-
 include("exp_util.jl")
 using .BUGExpUtil
+
+include("utils_reference.jl")
+using .BenchmarkReference
 
 export main
 
@@ -64,7 +45,7 @@ function main(args=ARGS)
     L = parse(Int, get(kv, "L", "8"))
     tag = get(kv, "tag", "")
     model = get(kv, "model", "tfim")
-    reference = lowercase(get(kv, "reference", "qutip")) # qutip|none
+    reference = lowercase(get(kv, "reference", "exact")) # exact|none
     plot = lowercase(get(kv, "plot", "true")) in ("true", "1", "yes", "y")
 
     # Common / model-specific parameters
@@ -98,27 +79,41 @@ function main(args=ARGS)
     # Default: compare only the methods we care about:
     # - TDVP baselines (single-site + two-site)
     # - BUG 2nd order (fixed-bond + adaptive-bond)
-    # (All optionally compared to qutip for accuracy.)
+    # (All optionally compared to exact Krylov reference for accuracy.)
     methods_str = get(kv, "methods", "DOUBLEFIXED,DOUBLEADAPTIVE,SINGLE_SITE_TDVP,TWO_SITE_TDVP")
     methods = split(methods_str, ",")
 
     runtimes = Dict{String, Float64}()
     times_ref = collect(0:dt:(steps * dt))
     z_ref = nothing
-    if reference == "qutip"
+    if reference == "exact"
         t_ref0 = time()
-        times_ref, zq = qutip_expect_z_site(L;
-            model=model,
-            J=J, g=g, Delta=Delta, gamma=gamma,
-            Jxx=Jxx, Jyy=Jyy, Jzz=Jzz, hx=hx, hy=hy, hz=hz,
-            dt=dt, steps=steps, initial_state=initial_state, site=site
-        )
-        z_ref = zq
-        runtimes["qutip"] = time() - t_ref0
+        m_lower = lowercase(strip(model))
+        H_params = if m_lower in ("tfim", "ising")
+            (J=J, g=g)
+        elseif m_lower in ("heisenberg", "xxx")
+            (Jxx=J, Jyy=J, Jzz=J, hx=hx, hy=hy, hz=hz)
+        elseif m_lower in ("xx",)
+            (Jxx=J, Jyy=J, Jzz=0.0, hx=hx, hy=hy, hz=hz)
+        elseif m_lower in ("xy",)
+            (Jxx=J*(1+gamma), Jyy=J*(1-gamma), Jzz=0.0, hx=hx, hy=hy, hz=hz)
+        elseif m_lower in ("xxz",)
+            (Jxx=J, Jyy=J, Jzz=Delta*J, hx=hx, hy=hy, hz=hz)
+        elseif m_lower in ("general",)
+            (Jxx=Jxx, Jyy=Jyy, Jzz=Jzz, hx=hx, hy=hy, hz=hz)
+        else
+            error("Unsupported model=$model for exact reference")
+        end
+        ref_model = m_lower in ("tfim", "ising") ? "tfim" : "general"
+        ref_data = compute_or_load_reference(ref_model, L, steps*dt, times_ref, H_params;
+            cache_dir=joinpath(@__DIR__, "results", "reference_cache"),
+            initial_state=initial_state)
+        z_ref = ref_data.z_expect[site, :]
+        runtimes["exact"] = time() - t_ref0
     elseif reference == "none"
         # no reference
     else
-        error("Unsupported reference=$reference (supported: qutip, none)")
+        error("Unsupported reference=$reference (supported: exact, none)")
     end
 
     # Run each method and collect results.
@@ -166,15 +161,17 @@ function main(args=ARGS)
     end
 
     label_with_time(k::AbstractString) = @sprintf("%s %.2f s", k, runtimes[k])
-    qutip_label = (reference == "qutip") ? @sprintf("exact (qutip) %.2f s", runtimes["qutip"]) : ""
+    exact_label = (reference == "exact") ? @sprintf("exact (Krylov) %.2f s", runtimes["exact"]) : ""
 
     if plot
-        # Force non-interactive backend (avoids GUI/event-loop hangs on macOS/headless runs).
+        PythonCall = Base.require(Base.PkgId(Base.UUID("6099a3de-0909-46bc-b1f4-468b9a2dfc0d"), "PythonCall"))
+        pyimport = PythonCall.pyimport
+        pyconvert = PythonCall.pyconvert
         mpl = pyimport("matplotlib")
         mpl.use("Agg")
         plt = pyimport("matplotlib.pyplot")
         builtins = pyimport("builtins")
-        nrows = (reference == "qutip") ? 4 : 3
+        nrows = (reference == "exact") ? 4 : 3
         fig, axes = plt.subplots(nrows, 1, figsize=(12, (nrows == 4 ? 14 : 11)))
 
         function maybe_add_legend(ax)
@@ -187,8 +184,8 @@ function main(args=ARGS)
 
         # 1) ⟨Z⟩ vs time: fixed family (1TDVP + BUG2nd fixed) + exact
         ax = axes[0]
-        if reference == "qutip"
-            ax.plot(times_ref, z_ref, "-", color="black", linewidth=2.0, alpha=0.85, label=qutip_label)
+        if reference == "exact"
+            ax.plot(times_ref, z_ref, "-", color="black", linewidth=2.0, alpha=0.85, label=exact_label)
         end
         for m in fixed_methods
             haskey(results, m) || continue
@@ -203,8 +200,8 @@ function main(args=ARGS)
 
         # 2) ⟨Z⟩ vs time: adaptive family (2TDVP + BUG2nd adaptive) + exact
         ax2 = axes[1]
-        if reference == "qutip"
-            ax2.plot(times_ref, z_ref, "-", color="black", linewidth=2.0, alpha=0.85, label=qutip_label)
+        if reference == "exact"
+            ax2.plot(times_ref, z_ref, "-", color="black", linewidth=2.0, alpha=0.85, label=exact_label)
         end
         for m in adaptive_methods
             haskey(results, m) || continue
@@ -228,8 +225,8 @@ function main(args=ARGS)
         ax_bd.grid(true, alpha=0.3)
         maybe_add_legend(ax_bd)
 
-        if reference == "qutip"
-            # 4) Squared error vs exact (qutip): all methods
+        if reference == "exact"
+            # 4) Squared error vs exact: all methods
             ax3 = axes[3]
             for m in methods
                 haskey(results, m) || continue
@@ -238,7 +235,7 @@ function main(args=ARGS)
             end
             ax3.set_xlabel("Time")
             ax3.set_ylabel("|Δ⟨Z⟩|²")
-            ax3.set_title("Squared error vs exact (qutip): all methods")
+            ax3.set_title("Squared error vs exact (Krylov): all methods")
             ax3.set_yscale("log")
             ax3.grid(true, alpha=0.3)
             maybe_add_legend(ax3)
@@ -258,8 +255,8 @@ function main(args=ARGS)
     open(csvfile, "w") do io
         header = String[]
         push!(header, "t")
-        if reference == "qutip"
-            push!(header, "z_ref_qutip")
+        if reference == "exact"
+            push!(header, "z_ref_exact")
         end
         append!(header, keys_sorted)
         println(io, join(header, ","))
@@ -267,7 +264,7 @@ function main(args=ARGS)
         for idx in eachindex(times_ref)
             vals = String[]
             push!(vals, @sprintf("%.16g", times_ref[idx]))
-            if reference == "qutip"
+            if reference == "exact"
                 push!(vals, @sprintf("%.16g", z_ref[idx]))
             end
             for k in keys_sorted

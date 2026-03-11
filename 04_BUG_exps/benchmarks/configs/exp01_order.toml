@@ -18,7 +18,7 @@ T_list = [1.0, 5.0]
 # 1TDVP vs double fixed BUG
 methods = ["single_site_tdvp", "fixed_bug_second_order"]
 pairing = "fixed"
-chi_fixed = 64
+chi_fixed = 256
 trunc_mode = "fixed"
 
 [pairing_adaptive]
@@ -27,7 +27,6 @@ methods = ["two_site_tdvp", "bug_second_order"]
 pairing = "adaptive"
 svd_threshold = 1e-12
 trunc_mode = "adaptive"
-# Safety cap high enough to not bind for N=12
 max_bond_dim_cap = 512
 
 [models.tfim]
