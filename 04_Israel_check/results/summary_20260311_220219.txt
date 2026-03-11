@@ -1,0 +1,75 @@
+Israel Fidelity Check — Summary
+Generated: 2026-03-11T22:02:19.109
+========================================================================
+
+Circuit: 4q | Method: TEBD
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                0.74 s
+  Fidelity:               0.858987445745277
+  Fidelity loss:          0.141012554254723
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     9.59e-12
+  Max abs error:          1.87e+00
+  Mean abs error:         3.71e-04
+  Relative norm diff:     9.84e-05
+  Phase-aligned max err:  7.70e-02
+  Phase-aligned mean err: 3.26e-04
+  Consistent with expected: YES (deviation 9.59e-12)
+------------------------------------------------------------------------
+
+Circuit: 4q | Method: TDVP
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                0.33 s
+  Fidelity:               0.189935329430133
+  Fidelity loss:          0.810064670569867
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     6.69e-01
+  Max abs error:          1.38e+00
+  Mean abs error:         3.56e-04
+  Relative norm diff:     5.15e-01
+  Phase-aligned max err:  4.11e-01
+  Phase-aligned mean err: 3.38e-04
+  Consistent with expected: NO (deviation 6.69e-01)
+------------------------------------------------------------------------
+
+Circuit: 6q | Method: TEBD
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54671
+  Bit ordering:           reversed
+  Runtime:                614.95 s
+  Fidelity:               0.000273770123285
+  Fidelity loss:          0.999726229876715
+  Expected fidelity loss: 0.135164770738196
+  Absolute deviation:     8.65e-01
+  Max abs error:          9.11e-01
+  Mean abs error:         3.48e-04
+  Relative norm diff:     8.54e-01
+  Phase-aligned max err:  8.78e-01
+  Phase-aligned mean err: 3.48e-04
+  Consistent with expected: NO (deviation 8.65e-01)
+------------------------------------------------------------------------
+
+Circuit: 6q | Method: TDVP
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54671
+  Bit ordering:           reversed
+  Runtime:                0.22 s
+  Fidelity:               0.000000009046544
+  Fidelity loss:          0.999999990953456
+  Expected fidelity loss: 0.135164770738196
+  Absolute deviation:     8.65e-01
+  Max abs error:          8.95e-01
+  Mean abs error:         3.38e-04
+  Relative norm diff:     9.84e-01
+  Phase-aligned max err:  8.95e-01
+  Phase-aligned mean err: 3.39e-04
+  Consistent with expected: NO (deviation 8.65e-01)
+------------------------------------------------------------------------

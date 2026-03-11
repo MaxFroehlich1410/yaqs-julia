@@ -1,0 +1,21 @@
+Israel Fidelity Check — Summary
+Generated: 2026-03-11T22:52:37.325
+========================================================================
+
+Circuit: 6q | Method: TEBD
+  Max bond dim:           1024
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54671
+  Bit ordering:           reversed
+  Runtime:                1859.63 s
+  Fidelity:               0.000273738588997
+  Fidelity loss:          0.999726261411003
+  Expected fidelity loss: 0.135164770738196
+  Absolute deviation:     8.65e-01
+  Max abs error:          9.11e-01
+  Mean abs error:         3.48e-04
+  Relative norm diff:     8.54e-01
+  Phase-aligned max err:  8.78e-01
+  Phase-aligned mean err: 3.48e-04
+  Consistent with expected: NO (deviation 8.65e-01)
+------------------------------------------------------------------------

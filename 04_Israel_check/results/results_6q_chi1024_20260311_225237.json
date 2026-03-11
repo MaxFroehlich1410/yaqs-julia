@@ -1,0 +1,20 @@
+[
+  {
+    "circuit_label": "6q",
+    "method": "TEBD",
+    "max_bond_dim": 1024,
+    "truncation_threshold": 1.00e-12,
+    "num_bitstrings": 54671,
+    "detected_convention": "reversed",
+    "runtime_s": 1859.6299,
+    "fidelity": 2.73738588997042207e-04,
+    "fidelity_loss": 9.99726261411002959e-01,
+    "expected_fidelity_loss": 1.35164770738196327e-01,
+    "abs_deviation": 8.64561490672806632e-01,
+    "max_abs_error": 9.11064486371474413e-01,
+    "mean_abs_error": 3.48376620833624811e-04,
+    "relative_norm_diff": 8.54395378322360011e-01,
+    "phase_aligned_max_error": 8.77725275900819280e-01,
+    "phase_aligned_mean_error": 3.47607035270517512e-04
+  }
+]
