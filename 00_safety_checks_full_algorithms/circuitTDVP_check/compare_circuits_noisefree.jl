@@ -33,12 +33,12 @@ using .Yaqs.DigitalTJM: DigitalCircuit, add_gate!, run_digital_tjm
 CIRCUIT_NAME = "Heisenberg" 
 periodic = true
 
-longrange_mode = "TDVP" # "TEBD" or "TDVP"
+longrange_mode = "TEBD" # "TEBD" or "TDVP"
 local_mode = "TDVP" # "TEBD" or "TDVP"
 
 # System Parameters
-L = 10
-timesteps = 50
+L = 6
+timesteps = 10
 dt = 0.1
 num_traj = 1 # Deterministic
 
@@ -46,7 +46,8 @@ num_traj = 1 # Deterministic
 RUN_JULIA = true # New Default
 RUN_PYTHON_YAQS = false
 RUN_QISKIT_EXACT = true
-SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6, 10]
+RUN_QISKIT_MPS = true # Flag for Qiskit MPS
+SITES_TO_SAMPLE = [1, 2, 3, 4, 5, 6]
 
 MAX_BOND_DIM = 56
 
@@ -87,6 +88,34 @@ end
 println("Comparing Simulation: $CIRCUIT_NAME")
 println("L=$L, dt=$dt, steps=$timesteps, Initial=$INITIAL_STATE")
 println("Run Config: Julia=$RUN_JULIA, Python_YAQS=$RUN_PYTHON_YAQS, Qiskit_Exact=$RUN_QISKIT_EXACT")
+
+# ==============================================================================
+# 0. PYTHON PACKAGE PRELOAD (before Julia, so Qiskit load time doesn't appear as "hang")
+# ==============================================================================
+if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT || RUN_QISKIT_MPS
+    println("\n--- Loading Python packages (Qiskit, MQT-YAQS)... ---")
+    sys = pyimport("sys")
+    local_src = normpath(joinpath(@__DIR__, "../../src"))
+    mqt_src = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src"))
+    mqt_inner = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src/mqt/yaqs"))
+
+    paths = pyconvert(Vector{String}, sys.path)
+    if !(local_src in paths); sys.path.insert(0, local_src); end
+    if !(mqt_src in paths); sys.path.insert(0, mqt_src); end
+    if !(mqt_inner in paths); sys.path.insert(0, mqt_inner); end
+
+    qiskit = pyimport("qiskit")
+    mqt_circuit_lib = pyimport("mqt.yaqs.core.libraries.circuit_library")
+    local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
+    mqt_simulators = pyimport("mqt.yaqs.codex_experiments.worker_functions.qiskit_simulators")
+    if RUN_PYTHON_YAQS
+        mqt_sim = pyimport("mqt.yaqs.simulator")
+        mqt_networks = pyimport("mqt.yaqs.core.data_structures.networks")
+        mqt_params = pyimport("mqt.yaqs.core.data_structures.simulation_parameters")
+        mqt_gates = pyimport("mqt.yaqs.core.libraries.gate_library")
+    end
+    println("Python packages loaded.")
+end
 
 # ==============================================================================
 # 1. CIRCUIT SETUP
@@ -198,30 +227,9 @@ if RUN_JULIA
 end
 
 # ==============================================================================
-# 3. PYTHON SIMULATION SETUP
+# 3. PYTHON SIMULATION SETUP (build circuits; packages already loaded in §0)
 # ==============================================================================
-if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT
-    sys = pyimport("sys")
-    local_src = normpath(joinpath(@__DIR__, "../../src"))
-    # Adjusted to ../../../ because mqt-yaqs is a sibling of yaqs-julia
-    mqt_src = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src"))
-    mqt_inner = normpath(joinpath(@__DIR__, "../../../mqt-yaqs/src/mqt/yaqs"))
-
-    paths = pyconvert(Vector{String}, sys.path)
-    if !(local_src in paths); sys.path.insert(0, local_src); end
-    if !(mqt_src in paths); sys.path.insert(0, mqt_src); end
-    if !(mqt_inner in paths); sys.path.insert(0, mqt_inner); end
-
-    qiskit = pyimport("qiskit")
-    mqt_circuit_lib = pyimport("mqt.yaqs.core.libraries.circuit_library")
-    # Local Qiskit_simulator module for longrange_test_circuit
-    local_circuit_lib = pyimport("Qiskit_simulator.circuit_library")
-    mqt_simulators = pyimport("mqt.yaqs.codex_experiments.worker_functions.qiskit_simulators")
-    mqt_sim = pyimport("mqt.yaqs.simulator")
-    mqt_networks = pyimport("mqt.yaqs.core.data_structures.networks")
-    mqt_params = pyimport("mqt.yaqs.core.data_structures.simulation_parameters")
-    mqt_gates = pyimport("mqt.yaqs.core.libraries.gate_library")
-
+if RUN_PYTHON_YAQS || RUN_QISKIT_EXACT || RUN_QISKIT_MPS
     init_circuit = qiskit.QuantumCircuit(L)
 
     if INITIAL_STATE == "Neel"
@@ -272,7 +280,6 @@ end
 # ==============================================================================
 # 6. QISKIT MPS
 # ==============================================================================
-RUN_QISKIT_MPS = true # Flag for Qiskit MPS
 results_py_mps = nothing
 
 if RUN_QISKIT_MPS

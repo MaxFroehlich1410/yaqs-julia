@@ -1,0 +1,75 @@
+Israel Fidelity Check — Summary
+Generated: 2026-03-12T14:05:12.928
+========================================================================
+
+Circuit: 4q | Method: TEBD
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                1.23 s
+  Fidelity:               0.858987445745277
+  Fidelity loss:          0.141012554254723
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     9.59e-12
+  Max abs error:          1.87e+00
+  Mean abs error:         3.71e-04
+  Relative norm diff:     9.84e-05
+  Phase-aligned max err:  7.70e-02
+  Phase-aligned mean err: 3.26e-04
+  Consistent with expected: YES (deviation 9.59e-12)
+------------------------------------------------------------------------
+
+Circuit: 4q | Method: TEBD+TDVP_LR (sweeps=10, trunc=after_window, pad=4)
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                13173.36 s
+  Fidelity:               0.855114916323008
+  Fidelity loss:          0.144885083676992
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     3.87e-03
+  Max abs error:          1.86e+00
+  Mean abs error:         3.71e-04
+  Relative norm diff:     2.29e-03
+  Phase-aligned max err:  7.54e-02
+  Phase-aligned mean err: 3.26e-04
+  Consistent with expected: YES (deviation 3.87e-03)
+------------------------------------------------------------------------
+
+Circuit: 4q | Method: TEBD+BUG_LR
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                1.63 s
+  Fidelity:               0.858987445729121
+  Fidelity loss:          0.141012554270879
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     2.57e-11
+  Max abs error:          1.87e+00
+  Mean abs error:         3.71e-04
+  Relative norm diff:     9.84e-05
+  Phase-aligned max err:  7.70e-02
+  Phase-aligned mean err: 3.26e-04
+  Consistent with expected: YES (deviation 2.57e-11)
+------------------------------------------------------------------------
+
+Circuit: 4q | Method: TEBD+ZIPUP_LR
+  Max bond dim:           512
+  Truncation threshold:   1.00e-12
+  Num bitstrings:         54061
+  Bit ordering:           reversed
+  Runtime:                2.07 s
+  Fidelity:               0.858987445744553
+  Fidelity loss:          0.141012554255447
+  Expected fidelity loss: 0.141012554245138
+  Absolute deviation:     1.03e-11
+  Max abs error:          1.87e+00
+  Mean abs error:         3.71e-04
+  Relative norm diff:     9.84e-05
+  Phase-aligned max err:  7.70e-02
+  Phase-aligned mean err: 3.26e-04
+  Consistent with expected: YES (deviation 1.03e-11)
+------------------------------------------------------------------------

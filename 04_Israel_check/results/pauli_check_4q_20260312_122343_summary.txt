@@ -1,0 +1,33 @@
+PauliPropagation observable consistency check
+Generated: 2026-03-12T12:23:45.747
+Circuit label: 4q
+Qubits: 72
+Initial state: |0...0>
+Heisenberg propagation: true (PauliPropagation reverses Schr-order internally)
+Gate map: u(theta,phi,lambda)->Rz(phi)Ry(theta)Rz(lambda), cx->CNOT
+Observed qiskit op histogram: Dict("u" => 148, "cx" => 49)
+Chosen bitstring convention for reference amplitudes: native_inverted
+Convention MAE scores: Dict(:native_inverted => 0.3717021627021992, :native => 0.4134357720596747, :reversed => 0.38971913707160494, :reversed_inverted => 0.4067561430470179)
+Selected qubits: [1, 2, 4, 6, 21, 25, 26, 27, 28, 29, 30, 53]
+Selected 2q pairs: [(1, 2), (9, 10), (11, 12), (17, 18), (19, 20), (2, 54), (1, 53), (12, 46), (21, 41), (14, 34)]
+
+Error metrics (Reference vs PauliPropagation)
+  1q: MAE=5.770e-01  MAX=1.894e+00  RMSE=7.471e-01
+  2q: MAE=3.722e-01  MAX=1.940e+00  RMSE=6.345e-01
+  marginals: MAE=2.174e-01  MAX=8.977e-01  RMSE=3.253e-01
+
+Best-matching observables:
+  Y_2 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(0.000000e+00+0.000000e+00i) |err|=0.000e+00
+  X_21 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(0.000000e+00+0.000000e+00i) |err|=0.000e+00
+  Y_21 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(0.000000e+00+0.000000e+00i) |err|=0.000e+00
+  Y_26 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(0.000000e+00+0.000000e+00i) |err|=0.000e+00
+  Y_28 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(0.000000e+00+0.000000e+00i) |err|=0.000e+00
+
+Worst-matching observables:
+  ZZ_21_41 (2q): ref=(9.513961e-01+0.000000e+00i) pp=(-9.884594e-01+0.000000e+00i) |err|=1.940e+00
+  Z_6 (1q): ref=(9.999971e-01+0.000000e+00i) pp=(-8.938924e-01+0.000000e+00i) |err|=1.894e+00
+  Z_26 (1q): ref=(9.962378e-01+0.000000e+00i) pp=(-2.990779e-01+0.000000e+00i) |err|=1.295e+00
+  ZZ_19_20 (2q): ref=(9.999793e-01+0.000000e+00i) pp=(-1.540077e-01+0.000000e+00i) |err|=1.154e+00
+  ZZ_11_12 (2q): ref=(9.999787e-01+0.000000e+00i) pp=(-1.540077e-01+0.000000e+00i) |err|=1.154e+00
+
+Optional MPS comparison: skipped

@@ -1,0 +1,8 @@
+Non-Hermitian TDVP benchmark summary
+timestamp=2026-03-12T12:20:32
+N=10 J=1.0 g=0.7 gamma=0.2 dt=0.05 tmax=1.0 steps=20 krylov=arnoldi
+exact_runtime_seconds=6.653990983963013
+psi0_mps_dense_error=7.771561172376096e-16
+D=4 tdvp_runtime_seconds=1.814025 final_err_state=4.683573e-04 final_max_abs_err_z=5.788029e-06 final_norm_ref=4.349843e-01 final_norm_tdvp=4.349833e-01 init_err=7.771561e-16 nan_warnings=0
+D=8 tdvp_runtime_seconds=0.639022 final_err_state=4.590009e-06 final_max_abs_err_z=2.691166e-07 final_norm_ref=4.349843e-01 final_norm_tdvp=4.349842e-01 init_err=7.771561e-16 nan_warnings=0
+D=16 tdvp_runtime_seconds=0.668619 final_err_state=4.590009e-06 final_max_abs_err_z=2.691166e-07 final_norm_ref=4.349843e-01 final_norm_tdvp=4.349842e-01 init_err=7.771561e-16 nan_warnings=0

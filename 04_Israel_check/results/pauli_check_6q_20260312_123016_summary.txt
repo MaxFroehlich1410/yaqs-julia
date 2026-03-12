@@ -1,0 +1,33 @@
+PauliPropagation observable consistency check
+Generated: 2026-03-12T12:30:16.568
+Circuit label: 6q
+Qubits: 72
+Initial state: |0...0>
+Heisenberg propagation: true (PauliPropagation reverses Schr-order internally)
+Gate map: u(theta,phi,lambda)->Rz(phi)Ry(theta)Rz(lambda), cx->CNOT
+Observed qiskit op histogram: Dict("u" => 404, "cx" => 217)
+Chosen bitstring convention for reference amplitudes: reversed
+Convention MAE scores: Dict(:native_inverted => 0.3000941575346442, :native => 0.33111486972364795, :reversed => 0.29244373035914634, :reversed_inverted => 0.3208192326197751)
+Selected qubits: [1, 2, 3, 4, 13, 15, 28, 29, 31, 32, 33, 34]
+Selected 2q pairs: [(3, 4), (5, 6), (7, 8), (9, 10), (23, 24), (1, 43), (8, 45), (11, 46), (12, 46), (12, 45)]
+
+Error metrics (Reference vs PauliPropagation)
+  1q: MAE=4.109e-01  MAX=1.103e+00  RMSE=5.732e-01
+  2q: MAE=3.128e-01  MAX=1.036e+00  RMSE=4.648e-01
+  marginals: MAE=1.867e-01  MAX=8.528e-01  RMSE=2.900e-01
+
+Best-matching observables:
+  Y_29 (1q): ref=(0.000000e+00+0.000000e+00i) pp=(3.421665e-04+0.000000e+00i) |err|=3.422e-04
+  XX_23_24 (2q): ref=(0.000000e+00+0.000000e+00i) pp=(-5.799952e-03+0.000000e+00i) |err|=5.800e-03
+  YY_7_8 (2q): ref=(0.000000e+00+0.000000e+00i) pp=(-1.447553e-02+0.000000e+00i) |err|=1.448e-02
+  YY_23_24 (2q): ref=(0.000000e+00+0.000000e+00i) pp=(-2.095902e-02+0.000000e+00i) |err|=2.096e-02
+  XZ_11_46 (2q): ref=(0.000000e+00+0.000000e+00i) pp=(-2.295386e-02+0.000000e+00i) |err|=2.295e-02
+
+Worst-matching observables:
+  Z_13 (1q): ref=(9.747963e-01+0.000000e+00i) pp=(-1.277998e-01+0.000000e+00i) |err|=1.103e+00
+  Z_3 (1q): ref=(9.706273e-01+0.000000e+00i) pp=(-8.305281e-02+0.000000e+00i) |err|=1.054e+00
+  Z_32 (1q): ref=(-9.526949e-01+0.000000e+00i) pp=(8.883455e-02+0.000000e+00i) |err|=1.042e+00
+  Z_29 (1q): ref=(-9.569838e-01+0.000000e+00i) pp=(8.161740e-02+0.000000e+00i) |err|=1.039e+00
+  ZZ_11_46 (2q): ref=(-9.873306e-01+0.000000e+00i) pp=(4.856402e-02+0.000000e+00i) |err|=1.036e+00
+
+Optional MPS comparison: skipped
