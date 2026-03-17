@@ -1,0 +1,14 @@
+\BOOKMARK [1][-]{section.1}{Introduction}{}% 1
+\BOOKMARK [1][-]{section.2}{Methods}{}% 2
+\BOOKMARK [2][-]{subsection.2.1}{Simulator 1: Pauli Propagation \(exact\)}{section.2}% 3
+\BOOKMARK [2][-]{subsection.2.2}{Simulator 2: TEBD \(MPS-based\)}{section.2}% 4
+\BOOKMARK [2][-]{subsection.2.3}{Reference observables from target amplitudes}{section.2}% 5
+\BOOKMARK [2][-]{subsection.2.4}{Validation of the gate mapping}{section.2}% 6
+\BOOKMARK [1][-]{section.3}{Results}{}% 7
+\BOOKMARK [2][-]{subsection.3.1}{Pauli Propagation vs. TEBD on the 4q circuit}{section.3}% 8
+\BOOKMARK [2][-]{subsection.3.2}{Pauli Propagation vs. TEBD on the 6q circuit}{section.3}% 9
+\BOOKMARK [2][-]{subsection.3.3}{Circuit output vs. target state}{section.3}% 10
+\BOOKMARK [2][-]{subsection.3.4}{Fidelity bound}{section.3}% 11
+\BOOKMARK [2][-]{subsection.3.5}{Bitstring convention}{section.3}% 12
+\BOOKMARK [2][-]{subsection.3.6}{Single-qubit X/Y check on the 4q circuit}{section.3}% 13
+\BOOKMARK [1][-]{section.4}{Discussion}{}% 14

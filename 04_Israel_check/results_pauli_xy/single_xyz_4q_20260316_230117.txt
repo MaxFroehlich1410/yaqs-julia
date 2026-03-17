@@ -1,0 +1,32 @@
+Single-qubit X/Y/Z PauliPropagation cross-check
+Generated: 2026-03-16T23:01:18.099
+Circuit label: 4q
+Observed qiskit op histogram: Dict("u" => 148, "cx" => 49)
+Truncation: NONE (min_abs_coeff=0.0)
+Chosen amplitude convention: reversed
+Convention total-MAE scores: Dict(:native_inverted => 0.22224692294343007, :native => 0.44414887662703323, :reversed => 0.005154171564343039, :reversed_inverted => 0.6574236814315353)
+
+Per-family metrics:
+  X: MAE=2.625328e-16  MAX=1.888187e-15  RMSE=4.267042e-16  max|ref|=0.000000e+00  max|pp|=1.888187e-15  count(|ref|>1e-6)=0  count(|pp|>1e-6)=0
+  Y: MAE=2.108239e-16  MAX=1.384006e-15  RMSE=3.920593e-16  max|ref|=0.000000e+00  max|pp|=1.384006e-15  count(|ref|>1e-6)=0  count(|pp|>1e-6)=0
+  Z: MAE=1.546251e-02  MAX=4.755720e-02  RMSE=2.268540e-02  max|ref|=1.000000e+00  max|pp|=1.000000e+00  count(|ref|>1e-6)=72  count(|pp|>1e-6)=72
+
+Best-matching observables:
+  X_3: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  Y_3: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  X_5: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  Y_5: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  X_7: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  Y_7: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  X_8: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+  Y_8: ref=(0.000000e+00+0.000000e+00i)  pp=(0.000000e+00+0.000000e+00i)  |err|=0.000e+00
+
+Worst-matching observables:
+  Z_23: ref=(8.495750e-01+0.000000e+00i)  pp=(8.971322e-01+0.000000e+00i)  |err|=4.756e-02
+  Z_24: ref=(8.495750e-01+0.000000e+00i)  pp=(8.971322e-01+0.000000e+00i)  |err|=4.756e-02
+  Z_31: ref=(-9.526968e-01+0.000000e+00i)  pp=(-1.000000e+00+0.000000e+00i)  |err|=4.730e-02
+  Z_33: ref=(-9.526968e-01+0.000000e+00i)  pp=(-1.000000e+00+0.000000e+00i)  |err|=4.730e-02
+  Z_32: ref=(-9.526968e-01+0.000000e+00i)  pp=(-1.000000e+00+0.000000e+00i)  |err|=4.730e-02
+  Z_34: ref=(-9.526968e-01+0.000000e+00i)  pp=(-1.000000e+00+0.000000e+00i)  |err|=4.730e-02
+  Z_17: ref=(9.483681e-01+0.000000e+00i)  pp=(9.948041e-01+0.000000e+00i)  |err|=4.644e-02
+  Z_18: ref=(9.483681e-01+0.000000e+00i)  pp=(9.948041e-01+0.000000e+00i)  |err|=4.644e-02

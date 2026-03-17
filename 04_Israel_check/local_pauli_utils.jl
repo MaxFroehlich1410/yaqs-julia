@@ -52,9 +52,10 @@ function qiskit_to_pauli_propagation(qc::Py)
             λ = pyconvert(Float64, op.params[2])
 
             # Qiskit U(θ,φ,λ) = Rz(φ) Ry(θ) Rz(λ) up to global phase.
-            push!(circ, PauliRotation(:Z, q)); push!(params, φ)
-            push!(circ, PauliRotation(:Y, q)); push!(params, θ)
+            # The PP circuit list is in time order, so Rz(λ) is applied first.
             push!(circ, PauliRotation(:Z, q)); push!(params, λ)
+            push!(circ, PauliRotation(:Y, q)); push!(params, θ)
+            push!(circ, PauliRotation(:Z, q)); push!(params, φ)
         elseif name == "cx"
             @assert length(qargs) == 2
             c = pyconvert(Int, qargs[0]._index) + 1
@@ -153,6 +154,36 @@ function expectation_pp(
     obs = PauliString(nqubits, symbols, qinds, 1.0)
     propagated = propagate(pp_circuit, obs, pp_params; min_abs_coeff=min_abs_coeff, heisenberg=true)
     return overlapwithzero(propagated)
+end
+
+function expectation_pp_computational(
+    pp_circuit,
+    pp_params::Vector{Float64},
+    nqubits::Int,
+    symbols::Vector{Symbol},
+    qinds::Vector{Int},
+    onebitinds::Vector{Int};
+    min_abs_coeff::Float64=1e-12,
+)
+    obs = PauliString(nqubits, symbols, qinds, 1.0)
+    propagated = propagate(pp_circuit, obs, pp_params; min_abs_coeff=min_abs_coeff, heisenberg=true)
+    return overlapwithcomputational(propagated, onebitinds)
+end
+
+function bitstring_to_onebitinds(bs::String; reverse_bits::Bool=false, invert_bits::Bool=false)
+    n = length(bs)
+    out = Int[]
+    for q in 1:n
+        idx = reverse_bits ? (n - q + 1) : q
+        b = bs[idx] == '1'
+        if invert_bits
+            b = !b
+        end
+        if b
+            push!(out, q)
+        end
+    end
+    return out
 end
 
 function make_single_qubit_observables(qubits::Vector{Int})

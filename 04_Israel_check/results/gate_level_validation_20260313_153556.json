@@ -1,0 +1,9 @@
+{
+  "generated": "2026-03-13T15:35:56.482",
+  "u_mapping": {"samples": 45, "state_mean": 1.1565133999406081e-16, "state_max": 4.0412728104402651e-16, "op_mean": 1.3563777175272286e-16, "op_max": 3.9178644255214178e-16},
+  "cx": {"truth_ok": true, "pauli_mismatch_count": 0},
+  "tiny_subcircuits": [
+    {"label": "4q", "nsmall": 4, "ngates": 12, "pool": "[3, 5, 10, 14]", "state_err": 8.6322553193314816e-16},
+    {"label": "6q", "nsmall": 4, "ngates": 18, "pool": "[0, 1, 6, 8]", "state_err": 6.5851814394639317e-16}
+  ]
+}

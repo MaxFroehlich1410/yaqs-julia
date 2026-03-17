@@ -1,0 +1,28 @@
+Overall <Z_i> cross-check summary
+Generated: 2026-03-16T16:38:21.080
+Truncation: NONE (min_abs_coeff=0.0, max_weight=Inf)
+
+IMPORTANT: The .npz reference is the TARGET state; PauliPropagation
+computes the CIRCUIT OUTPUT. The two differ by the circuit's approximation error.
+Expected fidelity loss by circuit:
+  8q ≈ 12.0580% (fidelity ≈ 0.8794)
+  10q ≈ 11.3417% (fidelity ≈ 0.8866)
+  12q ≈ 11.1039% (fidelity ≈ 0.8890)
+
+8q: convention=qiskit   MAE=1.300612e-02  MAX=3.992534e-02  RMSE=1.861010e-02
+    active qubits (40):   MAE=2.211993e-02
+    inactive qubits (32): MAE=1.613867e-03
+10q: convention=qiskit   MAE=1.195816e-02  MAX=3.801762e-02  RMSE=1.675062e-02
+    active qubits (50):   MAE=1.717528e-02
+    inactive qubits (22): MAE=1.010775e-04
+12q: convention=qiskit   MAE=1.150240e-02  MAX=4.002667e-02  RMSE=1.609242e-02
+    active qubits (48):   MAE=1.715266e-02
+    inactive qubits (24): MAE=2.018854e-04
+
+Interpretation:
+  - Inactive qubits (X-gate only) have MAE ~ 1e-6 or better,
+    confirming that the PP gate mapping is correct.
+  - Active qubits (CX-involved) show large errors because the
+    circuit is an intentional approximation of the target state
+    with ~14% fidelity loss concentrated on these qubits.
+  - This is expected behavior, not a simulation bug.

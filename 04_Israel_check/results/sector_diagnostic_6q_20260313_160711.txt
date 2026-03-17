@@ -1,0 +1,25 @@
+Initial-state / sector diagnostic
+Generated: 2026-03-13T16:07:11.730
+Circuit: 6q
+Qiskit ops: Dict("u" => 404, "cx" => 217)
+Observable set: diagonal only (Z, ZZ), count=32
+
+Best combination:
+  reference bit convention: reversed
+  initial-state candidate: first_revtrue_invfalse
+  onebit count: 48
+  MAE=8.737e-01 MAX=1.241e+00 RMSE=9.009e-01
+  1q_Z: MAE=8.232e-01 MAX=1.046e+00 RMSE=8.615e-01
+  2q_ZZ: MAE=9.241e-01 MAX=1.241e+00 RMSE=9.387e-01
+
+Top 10 combinations by MAE:
+   1) conv=reversed cand=first_revtrue_invfalse  MAE=8.737e-01 MAX=1.241e+00 RMSE=9.009e-01
+   2) conv=reversed cand=peak_revtrue_invfalse  MAE=8.737e-01 MAX=1.241e+00 RMSE=9.009e-01
+   3) conv=reversed cand=first_revfalse_invtrue  MAE=8.740e-01 MAX=1.241e+00 RMSE=9.038e-01
+   4) conv=reversed cand=peak_revfalse_invtrue  MAE=8.740e-01 MAX=1.241e+00 RMSE=9.038e-01
+   5) conv=native_inverted cand=first_revtrue_invfalse  MAE=9.028e-01 MAX=1.245e+00 RMSE=9.307e-01
+   6) conv=native_inverted cand=peak_revtrue_invfalse  MAE=9.028e-01 MAX=1.245e+00 RMSE=9.307e-01
+   7) conv=reversed cand=first_revfalse_invfalse  MAE=9.093e-01 MAX=1.297e+00 RMSE=9.378e-01
+   8) conv=reversed cand=peak_revfalse_invfalse  MAE=9.093e-01 MAX=1.297e+00 RMSE=9.378e-01
+   9) conv=native_inverted cand=first_revfalse_invtrue  MAE=9.098e-01 MAX=1.213e+00 RMSE=9.397e-01
+  10) conv=native_inverted cand=peak_revfalse_invtrue  MAE=9.098e-01 MAX=1.213e+00 RMSE=9.397e-01

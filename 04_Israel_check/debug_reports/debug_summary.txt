@@ -1,0 +1,116 @@
+Debug Summary — PP vs TEBD vs Target
+Generated: 2026-03-16T12:20:19.009
+
+
+## PHASE 1: PP vs TEBD — 4q
+
+PP vs TEBD:  MAE = 2.870e-12   MAX = 1.317e-11   RMSE = 5.034e-12
+  Active qubits (36):   MAE = 5.740e-12
+  Inactive qubits (36): MAE = 3.115e-16
+  VERDICT: PP and TEBD AGREE to machine precision.
+
+
+## PHASE 1: PP vs TEBD — 6q
+
+PP vs TEBD:  MAE = 1.380e-01   MAX = 1.500e+00   RMSE = 3.887e-01
+  Active qubits (42):   MAE = 2.366e-01
+  Inactive qubits (30): MAE = 1.147e-14
+  VERDICT: PP and TEBD DISAGREE. Bug is in circuit mapping.
+
+
+## PHASE 2: Tiny gate-mapping tests
+
+Test 1 (u gate): PASS
+  |Z_qiskit - Z_pp| = 5.551e-17, |Z_qiskit - Z_tebd| = 0.000e+00
+Test 2a (CX 0→1 on |10⟩): FAIL
+Test 2b (CX 1→0 on |01⟩): PASS
+Test 2c (CX on |00⟩ = identity): PASS
+Test 3 (u + CX): FAIL
+  |Z0_qiskit - Z0_pp| = 1.110e-16, |Z1_qiskit - Z1_pp| = 1.110e-16
+Test 4 (Bell state): PASS
+
+Phase 2 overall: FAILURES DETECTED
+
+
+## PHASE 3: Bitstring convention — 4q
+
+  Convention qiskit  : ref vs TEBD  MAE=1.546e-02  MAX=4.756e-02
+                      ref vs PP    MAE=1.546e-02  MAX=4.756e-02
+  Convention native  : ref vs TEBD  MAE=1.332e+00  MAX=2.000e+00
+                      ref vs PP    MAE=1.332e+00  MAX=2.000e+00
+
+## PHASE 4: Active/inactive split — 4q
+
+
+  Convention: qiskit
+      active (36 qubits):
+      PP vs TEBD:   MAE=5.740e-12  MAX=1.317e-11
+      ref vs TEBD:  MAE=2.650e-02  MAX=4.756e-02
+      ref vs PP:    MAE=2.650e-02  MAX=4.756e-02
+    inactive (36 qubits):
+      PP vs TEBD:   MAE=3.115e-16  MAX=7.772e-16
+      ref vs TEBD:  MAE=4.422e-03  MAX=2.937e-02
+      ref vs PP:    MAE=4.422e-03  MAX=2.937e-02
+
+  Convention: native
+      active (36 qubits):
+      PP vs TEBD:   MAE=5.740e-12  MAX=1.317e-11
+      ref vs TEBD:  MAE=1.176e+00  MAX=2.000e+00
+      ref vs PP:    MAE=1.176e+00  MAX=2.000e+00
+    inactive (36 qubits):
+      PP vs TEBD:   MAE=3.115e-16  MAX=7.772e-16
+      ref vs TEBD:  MAE=1.489e+00  MAX=2.000e+00
+      ref vs PP:    MAE=1.489e+00  MAX=2.000e+00
+
+## PHASE 5: Fidelity interpretation — 4q
+
+  Expected fidelity loss: 0.141013  → expected F = 0.858987
+  Computed fidelity (TEBD vs ref): F = 0.8589874457
+
+  For fidelity ≈ 0.859:
+    The maximum possible |ΔZ_i| = 2(1-√F) ≈ 0.1464
+    Observed max |ΔZ_i| on active qubits = 0.0476
+    Errors are consistent with the fidelity bound.
+
+## PHASE 3: Bitstring convention — 6q
+
+  Convention qiskit  : ref vs TEBD  MAE=1.483e-01  MAX=1.496e+00
+                      ref vs PP    MAE=1.456e-02  MAX=5.042e-02
+  Convention native  : ref vs TEBD  MAE=1.302e+00  MAX=2.000e+00
+                      ref vs PP    MAE=1.332e+00  MAX=2.000e+00
+
+## PHASE 4: Active/inactive split — 6q
+
+
+  Convention: qiskit
+      active (42 qubits):
+      PP vs TEBD:   MAE=2.366e-01  MAX=1.500e+00
+      ref vs TEBD:  MAE=2.531e-01  MAX=1.496e+00
+      ref vs PP:    MAE=2.387e-02  MAX=5.042e-02
+    inactive (30 qubits):
+      PP vs TEBD:   MAE=1.147e-14  MAX=1.155e-14
+      ref vs TEBD:  MAE=1.530e-03  MAX=6.901e-03
+      ref vs PP:    MAE=1.530e-03  MAX=6.901e-03
+
+  Convention: native
+      active (42 qubits):
+      PP vs TEBD:   MAE=2.366e-01  MAX=1.500e+00
+      ref vs TEBD:  MAE=1.101e+00  MAX=2.000e+00
+      ref vs PP:    MAE=1.153e+00  MAX=2.000e+00
+    inactive (30 qubits):
+      PP vs TEBD:   MAE=1.147e-14  MAX=1.155e-14
+      ref vs TEBD:  MAE=1.583e+00  MAX=1.992e+00
+      ref vs PP:    MAE=1.583e+00  MAX=1.992e+00
+
+## PHASE 5: Fidelity interpretation — 6q
+
+  Expected fidelity loss: 0.135165  → expected F = 0.864835
+  Computed fidelity (TEBD vs ref): F = 0.0002737701
+
+  For fidelity ≈ 0.0003:
+    The maximum possible |ΔZ_i| = 2(1-√F) ≈ 1.9669
+    Observed max |ΔZ_i| on active qubits = 1.4962
+    Errors are consistent with the fidelity bound.
+
+================================================================================
+END OF REPORT

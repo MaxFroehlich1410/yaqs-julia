@@ -1,0 +1,51 @@
+<Z_i> cross-check summary — circuit 4q
+Generated: 2026-03-16T12:51:28.480
+Qubits: 72
+Bitstring convention: qiskit
+PauliPropagation truncation: NONE
+  min_abs_coeff = 0.0
+  max_weight    = Inf
+  max_freq      = Inf
+  max_sins      = Inf
+Initial state: |0...0⟩
+Heisenberg propagation + overlapwithzero
+
+NOTE: The reference .npz contains the TARGET state that the circuit is
+      designed to approximate, NOT the circuit output. The circuit has an
+      expected fidelity loss of 0.1410 (fidelity ≈ 0.8590).
+      PauliPropagation computes the exact CIRCUIT OUTPUT ⟨0|U†Z_iU|0⟩.
+      The errors below measure how well the circuit approximates the target.
+
+Overall MAE:          1.546251e-02
+Max absolute error:   4.755720e-02
+RMS error:            2.268540e-02
+
+Active qubits   (CX-involved, 36 qubits):  MAE = 2.650259e-02
+Inactive qubits (X-only,      36 qubits):  MAE = 4.422441e-03
+
+Worst 10 qubits:
+  q[22]: ref= 0.8495749911  pp= 0.8971321877  err=4.756e-02  terms=111
+  q[23]: ref= 0.8495749911  pp= 0.8971321877  err=4.756e-02  terms=111
+  q[30]: ref=-0.9526967556  pp=-1.0000000000  err=4.730e-02  terms=21
+  q[32]: ref=-0.9526967556  pp=-1.0000000000  err=4.730e-02  terms=21
+  q[31]: ref=-0.9526967556  pp=-0.9999999999  err=4.730e-02  terms=24
+  q[33]: ref=-0.9526967556  pp=-0.9999999999  err=4.730e-02  terms=24
+  q[16]: ref= 0.9483680709  pp= 0.9948041188  err=4.644e-02  terms=111
+  q[17]: ref= 0.9483680709  pp= 0.9948041188  err=4.644e-02  terms=111
+  q[26]: ref=-0.8536703452  pp=-0.8971321877  err=4.346e-02  terms=58
+  q[27]: ref=-0.8536703452  pp=-0.8971321877  err=4.346e-02  terms=58
+
+Best 10 qubits:
+  q[68]: ref=-0.9999999980  pp=-1.0000000000  err=1.977e-09  terms=3
+  q[69]: ref=-0.9999999980  pp=-1.0000000000  err=1.977e-09  terms=3
+  q[70]: ref=-0.9999999980  pp=-1.0000000000  err=1.995e-09  terms=3
+  q[71]: ref=-0.9999999980  pp=-1.0000000000  err=1.995e-09  terms=3
+  q[64]: ref=-0.9999975032  pp=-1.0000000000  err=2.497e-06  terms=3
+  q[65]: ref=-0.9999975032  pp=-1.0000000000  err=2.497e-06  terms=3
+  q[66]: ref=-0.9999971154  pp=-1.0000000000  err=2.885e-06  terms=3
+  q[67]: ref=-0.9999971154  pp=-1.0000000000  err=2.885e-06  terms=3
+  q[54]: ref=-0.9999905413  pp=-1.0000000000  err=9.459e-06  terms=3
+  q[55]: ref=-0.9999905413  pp=-1.0000000000  err=9.459e-06  terms=3
+
+Total PP Pauli terms: 1983
+Total PP time:        1.45 s

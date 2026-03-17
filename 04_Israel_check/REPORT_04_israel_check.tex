@@ -1,0 +1,219 @@
+\documentclass[11pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\sisetup{
+  exponent-product = \cdot,
+  output-exponent-marker = \ensuremath{\mathrm{e}},
+}
+
+\title{Observable Cross-Check of Israel's Approximate\\State-Preparation Circuits}
+\author{}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\section{Introduction}
+
+Israel's circuits are designed to approximate a target quantum state on 72 qubits.
+For each circuit, the target state is specified by a set of computational-basis amplitudes stored in a reference file (\texttt{.npz}), containing bitstrings and their associated complex amplitudes $a_{\mathrm{ref}}$.
+The circuits themselves are approximate: they are constructed to achieve a target fidelity of roughly $F\approx 0.86$, implying an expected fidelity loss of $\sim 14\%$.
+
+This report describes a local-observable cross-check of the five smallest circuits, \textbf{4q} (4-qubit entanglement clusters, 197 gates), \textbf{6q} (6-qubit clusters, 621 gates), \textbf{8q} (8-qubit clusters, 2336 gates), \textbf{10q} (10-qubit clusters, 7981 gates), and \textbf{12q} (12-qubit clusters, 18376 gates), all acting on 72 qubits.
+The goal is to verify that the circuit-output expectation values $\langle Z_i \rangle$ are consistent with those reconstructed from the reference amplitudes, within the bounds implied by the known fidelity.
+
+\section{Methods}
+
+\subsection{Simulator 1: Pauli Propagation (exact)}
+
+We use \textsc{PauliPropagation.jl} to compute exact circuit-output expectation values in the Heisenberg picture.
+For each qubit~$i$, the observable $Z_i$ is propagated backward through the circuit:
+\begin{equation}
+  \langle Z_i \rangle_{\mathrm{circuit}} = \langle 0^{\otimes n} | \, U^\dagger Z_i \, U \, | 0^{\otimes n} \rangle
+  = \texttt{overlapwithzero}\!\bigl(\texttt{propagate}(\text{circuit},\, Z_i)\bigr).
+\end{equation}
+The initial state is $|0\rangle^{\otimes 72}$.
+All truncation is disabled: \texttt{min\_abs\_coeff}${}=0$, \texttt{max\_weight}${}=\infty$, ensuring the result is exact to machine precision.
+
+Each Qiskit $U(\theta,\phi,\lambda)$ gate is decomposed as $R_z(\phi)\,R_y(\theta)\,R_z(\lambda)$, and each \texttt{cx} gate maps to a Clifford CNOT.
+
+\subsection{Simulator 2: TEBD (MPS-based)}
+
+As an independent cross-check, we simulate the same circuits using TEBD (time-evolving block decimation) within our MPS framework.
+The initial state is $|0\rangle^{\otimes 72}$ in MPS form.
+For the 4q circuit, TEBD runs without truncation (maximum bond dimension reached is 83).
+For the 6q circuit, the bond dimension saturates at the cap of $\chi_{\max}=512$ from layer~14 onward (out of 44 layers), introducing significant truncation error.
+For the larger 8q, 10q, and 12q circuits, no TEBD results are included here: this report extends those cases only with exact Pauli~Propagation, since MPS simulation becomes substantially more expensive and was deferred.
+
+\subsection{Reference observables from target amplitudes}
+
+The target-state expectation values are reconstructed from the reference data as:
+\begin{equation}
+  \langle Z_i \rangle_{\mathrm{target}} = \sum_{\mathbf{b}} |a_{\mathrm{ref}}(\mathbf{b})|^2 \, (-1)^{b_i},
+\end{equation}
+where the sum runs over all stored bitstrings $\mathbf{b}$ and $b_i$ is the bit at qubit~$i$.
+The bitstrings use Qiskit big-endian ordering, where the leftmost character corresponds to the highest-indexed qubit.
+
+\subsection{Validation of the gate mapping}
+
+The circuit conversion was validated on small hand-checkable circuits by comparing Pauli~Propagation against Qiskit's statevector simulator.
+For a single $U(\theta,\phi,\lambda)$ gate with random parameters, all three Pauli expectations $\langle X\rangle$, $\langle Y\rangle$, $\langle Z\rangle$ agree with Qiskit to machine precision ($< 10^{-15}$).
+For two-qubit circuits involving $U$ gates followed by CNOT (both control/target orderings), $\langle Z_i\rangle$ values agree with Qiskit to $< 10^{-15}$.
+
+\section{Results}
+
+\subsection{Pauli Propagation vs.\ TEBD on the 4q circuit}
+
+For the 4q circuit, which does not require bond-dimension truncation, Pauli~Propagation and TEBD agree on all 72 site-resolved $\langle Z_i \rangle$ values to machine precision:
+\begin{center}
+\begin{tabular}{lS[table-format=1.2e-1]S[table-format=1.2e-1]}
+\toprule
+ & {MAE} & {Max error} \\
+\midrule
+All qubits (72)     & 2.87e-12 & 1.32e-11 \\
+Active qubits (36)  & 5.74e-12 & 1.32e-11 \\
+Inactive qubits (36)& 3.12e-16 & 7.77e-16 \\
+\bottomrule
+\end{tabular}
+\end{center}
+This confirms that both simulators produce identical circuit-output observables.
+
+\subsection{Pauli Propagation vs.\ TEBD on the 6q circuit}
+
+For the 6q circuit, TEBD saturates the bond dimension at $\chi=512$ and produces unreliable results (the TEBD--reference amplitude overlap gives a fidelity of $F\approx 0.0003$, far from the expected $F\approx 0.86$).
+Pauli~Propagation, being exact, is the reliable reference here.
+On inactive qubits (which involve only single-qubit gates and are unaffected by bond truncation), the two methods still agree to $\sim 10^{-14}$.
+
+\subsection{Circuit output vs.\ target state}
+
+Table~\ref{tab:main} summarises the comparison of exact circuit-output $\langle Z_i \rangle$ (from Pauli~Propagation) against the target-state $\langle Z_i \rangle$ (from the reference amplitudes).
+
+\begin{table}[h]
+\centering
+\caption{Comparison of circuit-output and target-state $\langle Z_i \rangle$ for the 4q, 6q, 8q, 10q, and 12q circuits.
+Active qubits are those involved in at least one CNOT gate; inactive qubits undergo only single-qubit rotations.}
+\label{tab:main}
+\begin{tabular}{llS[table-format=1.2e-1]S[table-format=1.2e-1]S[table-format=1.2e-1]}
+\toprule
+Circuit & Qubit group & {MAE} & {Max $|\Delta Z_i|$} & {RMSE} \\
+\midrule
+4q & All (72)       & 1.55e-2 & 4.76e-2 & 2.27e-2 \\
+   & Active (36)    & 2.65e-2 & 4.76e-2 &         \\
+   & Inactive (36)  & 4.42e-3 & 2.94e-2 &         \\
+\midrule
+6q & All (72)       & 1.46e-2 & 5.04e-2 & 2.12e-2 \\
+   & Active (40)    & 2.42e-2 & 5.04e-2 &         \\
+   & Inactive (32)  & 2.54e-3 & 6.90e-3 &         \\
+\midrule
+8q & All (72)       & 1.30e-2 & 3.99e-2 & 1.86e-2 \\
+   & Active (40)    & 2.21e-2 & 3.99e-2 &         \\
+   & Inactive (32)  & 1.61e-3 & 8.52e-3 &         \\
+\midrule
+10q & All (72)      & 1.20e-2 & 3.80e-2 & 1.68e-2 \\
+    & Active (50)   & 1.72e-2 & 3.80e-2 &         \\
+    & Inactive (22) & 1.01e-4 & 1.32e-3 &         \\
+\midrule
+12q & All (72)      & 1.15e-2 & 4.00e-2 & 1.61e-2 \\
+    & Active (48)   & 1.72e-2 & 4.00e-2 &         \\
+    & Inactive (24) & 2.02e-4 & 3.64e-3 &         \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For the larger 8q, 10q, and 12q circuits, exact Pauli~Propagation continues to show the same qualitative pattern as for 4q and 6q: the dominant discrepancies are confined to active qubits, while inactive qubits remain extremely close to the target-state values.
+The overall errors decrease slightly with circuit size in this set, from MAE $\approx 1.55\times 10^{-2}$ for 4q to $1.15\times 10^{-2}$ for 12q.
+
+\subsection{Fidelity bound}
+
+For two states $|\psi\rangle$ and $|\phi\rangle$ with fidelity $F = |\langle \psi | \phi \rangle|^2$, the difference in expectation value of any observable with $\|O\| \leq 1$ satisfies
+\begin{equation}
+  |\langle O \rangle_\psi - \langle O \rangle_\phi| \leq 2\bigl(1 - \sqrt{F}\bigr).
+\end{equation}
+For the 4q circuit, the fidelity between the TEBD circuit output and the reference state was computed directly from the stored amplitudes:
+\begin{equation}
+  F_{4\mathrm{q}} = \bigl|\textstyle\sum_{\mathbf{b}} a_{\mathrm{ref}}^*(\mathbf{b})\, a_{\mathrm{circuit}}(\mathbf{b})\bigr|^2 = 0.8590,
+\end{equation}
+matching the expected value.
+The resulting fidelity bound is $2(1-\sqrt{0.859}) \approx 0.146$, and the observed maximum $|\Delta Z_i| = 0.048$ is well within this bound.
+
+For the 6q circuit, the direct fidelity computation from TEBD is unreliable due to bond-dimension truncation.
+However, the observed $\langle Z_i \rangle$ errors from Pauli~Propagation (max $|\Delta Z_i| = 0.050$) are consistent with the reported fidelity $F_{6\mathrm{q}} \approx 0.865$ and bound $2(1-\sqrt{0.865}) \approx 0.141$.
+
+For the 8q, 10q, and 12q circuits, we use the expected fidelities reported with the circuit data:
+\begin{align}
+  F_{8\mathrm{q}} &\approx 0.8794, & 2(1-\sqrt{F_{8\mathrm{q}}}) &\approx 0.124, \\
+  F_{10\mathrm{q}} &\approx 0.8866, & 2(1-\sqrt{F_{10\mathrm{q}}}) &\approx 0.117, \\
+  F_{12\mathrm{q}} &\approx 0.8890, & 2(1-\sqrt{F_{12\mathrm{q}}}) &\approx 0.114.
+\end{align}
+The observed maxima, $|\Delta Z_i|_{\max} = 0.040$ for 8q, $0.038$ for 10q, and $0.040$ for 12q, remain comfortably within these bounds.
+
+\subsection{Bitstring convention}
+
+Two bitstring ordering conventions were tested for reconstructing $\langle Z_i\rangle_{\mathrm{target}}$:
+\begin{center}
+\begin{tabular}{llS[table-format=1.2e-1]S[table-format=1.1]}
+\toprule
+Convention & Description & {MAE (4q)} & {MAE (native)} \\
+\midrule
+Qiskit big-endian & leftmost bit = highest qubit & 1.55e-2 & \\
+Native (little-endian) & leftmost bit = lowest qubit & & 1.3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+The Qiskit big-endian convention produces errors consistent with the fidelity bound; the native convention yields errors close to~2 (effectively random), confirming that the reference data uses Qiskit ordering.
+The same convention was selected automatically for the 8q, 10q, and 12q runs as well, with native-ordering MAE again of order unity ($\sim 1.33$), while the Qiskit-ordering MAE stays at the $\sim 10^{-2}$ level.
+
+\subsection{Single-qubit X/Y check on the 4q circuit}
+
+As an additional phase-sensitive validation, we compared exact Pauli~Propagation against the sparse reference amplitudes for all 72 single-qubit observables $X_i$, $Y_i$, and $Z_i$ on the 4q circuit.
+With the corrected gate mapping, the same Qiskit-consistent bit ordering (implemented as the reversed convention in the local sparse-state parser) is selected by a clear margin.
+
+For the single-qubit off-diagonal observables, all reference expectations vanish within numerical precision:
+\begin{center}
+\begin{tabular}{lS[table-format=1.2e-1]S[table-format=1.2e-1]}
+\toprule
+Observable family & {MAE} & {Max error} \\
+\midrule
+$X_i$ (72 qubits) & 2.63e-16 & 1.89e-15 \\
+$Y_i$ (72 qubits) & 2.11e-16 & 1.38e-15 \\
+\bottomrule
+\end{tabular}
+\end{center}
+Pauli~Propagation gives the same result: all 72 single-qubit $X_i$ and $Y_i$ expectations are zero up to machine precision.
+This makes the check reliable in the limited sense that there is no detectable phase-convention mismatch between the sparse reference amplitudes and Pauli~Propagation for these observables.
+However, it is not a strong off-diagonal stress test, because the signal is trivial: all single-qubit $X_i$ and $Y_i$ expectations are essentially zero.
+To probe genuinely nontrivial off-diagonal structure, two-qubit correlators such as $X_iX_j$ or $Y_iY_j$ would be more informative.
+
+\section{Discussion}
+
+\begin{enumerate}
+  \item \textbf{Gate mapping is validated.}
+    Pauli Propagation matches Qiskit's statevector simulator to machine precision on small test circuits and agrees with TEBD to $\sim 10^{-12}$ on the full 72-qubit 4q circuit.
+
+  \item \textbf{The reference data uses Qiskit big-endian bitstring ordering.}
+    This was confirmed by testing both plausible conventions: only the big-endian convention gives physically consistent $\langle Z_i\rangle$ values.
+    The dedicated 4q single-qubit $X_i/Y_i$ check is also consistent with this convention.
+
+  \item \textbf{All $\langle Z_i \rangle$ discrepancies are within the fidelity bound.}
+    Across 4q, 6q, 8q, 10q, and 12q, the maximum observed error ranges from $\sim 0.038$ to $\sim 0.050$, well within the theoretical bounds of $\sim 0.11$--$0.15$ implied by the reported fidelities.
+    The discrepancies are concentrated on active qubits (those involved in CNOT gates), consistent with the fact that the circuit approximation error is carried by the entangling part of the circuit.
+
+  \item \textbf{Single-qubit $X_i/Y_i$ checks on 4q are consistent but not discriminating.}
+    Both the reference amplitudes and Pauli~Propagation give $\langle X_i\rangle \approx \langle Y_i\rangle \approx 0$ for all 72 qubits, at the level of machine precision.
+    This supports the correctness of the off-diagonal observable evaluation, but because the expected signal vanishes, it does not by itself provide a stringent test of the phase structure.
+
+  \item \textbf{TEBD at $\chi=512$ is insufficient for the 6q circuit.}
+    The 6q circuit requires bond dimensions exceeding 512 for accurate simulation.
+    Pauli~Propagation, which is exact for observable-level computations, is the appropriate tool for this cross-check and was therefore used as the sole method extended to 8q, 10q, and 12q here.
+
+  \item \textbf{The circuits behave as expected.}
+    There is no evidence of an anomaly in the circuit output.
+    The local observable values produced by the circuits are consistent with approximate preparation of the target state at the reported fidelity.
+\end{enumerate}
+
+\end{document}

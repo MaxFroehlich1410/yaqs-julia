@@ -1,0 +1,9 @@
+Long-range non-Hermitian TDVP benchmark summary
+timestamp=2026-03-13T19:01:19
+N=10 J0=1.0 g=0.7 gamma=0.2 dt=0.05 tmax=1.0 steps=20 krylov=arnoldi
+lambdas=0.5 D_list=4,8,16,32
+lambda=0.5 exact_runtime_seconds=0.443258 psi0_mps_dense_error=7.771561e-16 mpo_dense_action_error=6.766240e-15
+lambda=0.5 D=4 tdvp_runtime_seconds=5.987986 final_err_state=4.855306e-02 final_max_abs_err_z=3.937946e-04 final_norm_ref=4.470055e-01 final_norm_tdvp=4.467365e-01 init_err=7.771561e-16 nan_warnings=0
+lambda=0.5 D=8 tdvp_runtime_seconds=8.652376 final_err_state=3.309283e-03 final_max_abs_err_z=2.500633e-05 final_norm_ref=4.470055e-01 final_norm_tdvp=4.469892e-01 init_err=7.771561e-16 nan_warnings=0
+lambda=0.5 D=16 tdvp_runtime_seconds=12.526553 final_err_state=5.672665e-04 final_max_abs_err_z=3.236746e-05 final_norm_ref=4.470055e-01 final_norm_tdvp=4.469912e-01 init_err=7.771561e-16 nan_warnings=0
+lambda=0.5 D=32 tdvp_runtime_seconds=12.776707 final_err_state=5.656743e-04 final_max_abs_err_z=3.236115e-05 final_norm_ref=4.470055e-01 final_norm_tdvp=4.469912e-01 init_err=7.771561e-16 nan_warnings=0

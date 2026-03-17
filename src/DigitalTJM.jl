@@ -449,7 +449,7 @@ function apply_single_qubit_gate!(mps::MPS, gate::DigitalGate)
     end
 end
 
-function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::Int, config::AbstractSimConfig)
+function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::Int, config::AbstractSimConfig; swap_qubits::Bool=false)
     # Standard TEBD update for nearest neighbor gate
     # Moves orthogonality center to s1 (assumes mixed/right canonical to right of s1)
     @t :shift_orth_center MPSModule.shift_orthogonality_center!(mps, s1)
@@ -465,8 +465,20 @@ function apply_local_gate_exact!(mps::MPS, op::AbstractOperator, s1::Int, s2::In
     # Contract with Gate
     # op_mat: 4x4 (acting on p1, p2)
     # Reshape op_mat to (p1_out, p2_out, p1_in, p2_in)
+    #
+    # Convention: Julia's column-major reshape maps the flat 4x4 index as
+    #   flat = p1 + 2*(p2-1)   (p1 fast, p2 slow)
+    # while the standard 4x4 gate matrix uses
+    #   flat = 2*q1 + q2 + 1   (q1 = 1st qubit in gate spec, q2 = 2nd)
+    # so p1 ↔ q2 (2nd qubit) and p2 ↔ q1 (1st qubit).
+    #
+    # When swap_qubits=true, permute so that p1 ↔ q1 and p2 ↔ q2,
+    # i.e. the lower MPS site (s1) acts as the gate's 1st qubit.
     @t :matrix_2q op_mat = matrix(op)
     op_tensor = reshape(op_mat, 2, 2, 2, 2)
+    if swap_qubits
+        op_tensor = permutedims(op_tensor, (2, 1, 4, 3))
+    end
     
     @t :contract_gate @tensor Theta_prime[l1, p1_out, p2_out, r2] := op_tensor[p1_out, p2_out, p1_in, p2_in] * Theta[l1, p1_in, p2_in, r2]
     
@@ -528,6 +540,14 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
         is_long_range = (s2 > s1 + 1)
         method = is_long_range ? alg_options.long_range_method : alg_options.local_method
 
+        # For asymmetric gates (e.g. CX): the 4x4 matrix convention assigns
+        # gate.sites[1] → 1st qubit (control) and gate.sites[2] → 2nd (target).
+        # After sorting, s1 is always the lower-index site.  Due to Julia's
+        # column-major reshape the lower site maps to the matrix's 2nd qubit.
+        # When the gate's 1st qubit IS the lower site (gate.sites[1]<gate.sites[2]),
+        # we must permute the matrix so s1 correctly acts as the 1st qubit.
+        needs_swap = (gate.sites[1] < gate.sites[2])
+
         if method == :TEBD
             if is_long_range
                 # Swap Network + Local TEBD
@@ -539,7 +559,7 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
                 end
 
                 # Apply gate on (s1, s1+1)
-                @t :apply_local_gate_exact apply_local_gate_exact!(state, gate.op, s1, s1+1, sim_params)
+                @t :apply_local_gate_exact apply_local_gate_exact!(state, gate.op, s1, s1+1, sim_params; swap_qubits=needs_swap)
 
                 # Unwind Swaps: (s1+1, s1+2), ..., (s2-1, s2)
                 # s2 moves RIGHT back to s2
@@ -548,7 +568,7 @@ function apply_window!(state::MPS, gate::DigitalGate, sim_params::AbstractSimCon
                 end
             else
                 # Nearest Neighbor: Direct
-                @t :apply_local_gate_exact apply_local_gate_exact!(state, gate.op, s1, s2, sim_params)
+                @t :apply_local_gate_exact apply_local_gate_exact!(state, gate.op, s1, s2, sim_params; swap_qubits=needs_swap)
             end
         elseif method == :TDVP
             padding = 0

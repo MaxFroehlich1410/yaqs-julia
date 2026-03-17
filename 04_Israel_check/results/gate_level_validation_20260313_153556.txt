@@ -1,0 +1,15 @@
+Gate-level validation summary
+Generated: 2026-03-13T15:35:56.364
+
+[1] U gate mapping: Qiskit U vs Rz*Ry*Rz
+  samples=45
+  state error: mean=1.157e-16 max=4.041e-16
+  operator error (phase-aligned): mean=1.356e-16 max=3.918e-16
+
+[2] CX checks
+  truth table check (q0 LSB, control=0,target=1): true
+  Pauli-basis mismatch count: 0
+
+[3] Tiny extracted subcircuits (dense state)
+  4q: nsmall=4 ngates=12 pool=[3, 5, 10, 14] state_err=8.632e-16
+  6q: nsmall=4 ngates=18 pool=[0, 1, 6, 8] state_err=6.585e-16
