@@ -9,7 +9,7 @@ This repository also contains all experiments from the paper:
 > **Noisy quantum circuit simulation with the tensor jump method**
 
 The experiment code and interactive walkthroughs are located in the [`PaperExps/`](PaperExps/) directory.
-The data artifacts used for the paper plots are tracked in [`PaperExps/data/`](PaperExps/data/).
+The data artifacts used for the paper plots are tracked in [`PaperExps/data/`](PaperExps/data/), split into the 2-qubit, 25-qubit, and 127-qubit experiments.
 
 ## Features
 

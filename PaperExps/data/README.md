@@ -10,20 +10,17 @@ temporary TOML files were intentionally excluded.
 
 ## Contents
 
-- `two_site_bitflip_noise/`: serialized 2-qubit bitflip-noise variance
-  comparison runs and final figure PNGs corresponding to
-  `scripts/2sites_variance_exp_circuit_tjm.jl`. The script defines the
-  IX/XI/XX Pauli-X noise model used for these `L=2` runs.
-- `ctjm_paper_data/`: curated CTJM paper plot data.
-  - `unraveling_eff_N25_L20_tau0p1_noise*_basisXY_*`: 25-site XY quench data
-    for noise strengths `0.001`, `0.01`, and `0.1`. These folders include the
-    aggregate `LargeSystem_*.pkl` files, per-method batch pickle sources, and
-    the generated comparison PNGs.
-  - `127_datapoints_L5/`: IBM 127-qubit kicked-Ising data. The
-    `127_datapoints_L5_V2/` subtree contains standard-run CSV exports, while
-    sibling L5 folders contain projector and aggregate pickle outputs. The L20
-    aggregate folders are retained as legacy/reference outputs from the same
-    data collection.
+- `2_qubit_bitflip_variance/`: 2-qubit bitflip-noise variance experiment for
+  `scripts/2sites_variance_exp_circuit_tjm.jl`.
+- `25_qubit_simulation/`: 25-qubit XY-quench simulation data and plots for
+  `scripts/25q_exp.jl`.
+- `127_qubit_simulation/`: IBM 127-qubit kicked-Ising simulation data and plots
+  for `scripts/ibm127_exp.jl`.
+
+Each experiment folder contains:
+
+- `data/`: serialized data artifacts used to generate the plots.
+- `plots/`: reference plot PNGs generated from the neighboring data.
 
 ## Notes
 
