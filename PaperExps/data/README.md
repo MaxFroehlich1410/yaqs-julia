@@ -19,8 +19,9 @@ temporary TOML files were intentionally excluded.
 
 Each experiment folder contains:
 
-- `data/`: serialized data artifacts used to generate the plots.
-- `plots/`: reference plot PNGs generated from the neighboring data.
+- `data/`: serialized data artifacts used to generate the plot.
+- `plots/`: one canonical reference plot PNG generated from the neighboring
+  data.
 
 ## Notes
 
@@ -28,5 +29,5 @@ Each experiment folder contains:
   associated aggregation scripts.
 - `.csv` files are plain numeric exports used by the IBM 127-qubit comparison
   plots.
-- `.png` files are included as visual references for the exact plots backed by
-  the data in the neighboring folders.
+- `.png` files are included as visual references for the exact plot backed by
+  the data in the neighboring folder.

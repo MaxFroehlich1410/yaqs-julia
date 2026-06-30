@@ -11,4 +11,4 @@ pickle sources used for the paper plots.
 ## Contents
 
 - `data/`: serialized 25-qubit simulation data and the all-noise run note.
-- `plots/`: aggregate all-noise and per-noise comparison PNGs.
+- `plots/`: `comparison_all_noise_3x3.png`.

@@ -10,4 +10,4 @@ outputs for the comparison plots.
 ## Contents
 
 - `data/`: serialized IBM 127-qubit simulation data and CSV exports.
-- `plots/`: projector-vs-standard and aggregate comparison PNGs.
+- `plots/`: `comparison_projector_vs_standard_3x3.png`.

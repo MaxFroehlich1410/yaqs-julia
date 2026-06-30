@@ -7,9 +7,9 @@ The experiment is the 2-qubit variance comparison under sparse Pauli-X
 bitflip noise on `X on site 1`, `X on site 2`, and `X on both sites`
 (`IX`, `XI`, and `XX` in the script comments). The serialized pickle files are
 the `L=2` runs found in the Desktop source folder `cTJM data`, and the
-`plots/` directory contains the corresponding plot PNGs.
+`plots/` directory contains the canonical plot PNG.
 
 ## Contents
 
 - `data/`: three serialized `variance_comparison_*L2*.pkl` runs.
-- `plots/`: six variance and expectation comparison PNGs.
+- `plots/`: `variance_and_expectation_all_gammas.png`.
