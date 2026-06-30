@@ -9,6 +9,7 @@ This repository also contains all experiments from the paper:
 > **Noisy quantum circuit simulation with the tensor jump method**
 
 The experiment code and interactive walkthroughs are located in the [`PaperExps/`](PaperExps/) directory.
+The data artifacts used for the paper plots are tracked in [`PaperExps/data/`](PaperExps/data/).
 
 ## Features
 
@@ -66,7 +67,7 @@ The `PaperExps/` directory contains all experiments from the paper, organized in
 
 | Script | Description |
 |--------|-------------|
-| `scripts/2sites_variance_exp_circuit_tjm.jl` | 2-qubit variance experiment comparing trajectory variance across different unravelings |
+| `scripts/2sites_variance_exp_circuit_tjm.jl` | 2-qubit bitflip-noise variance experiment comparing trajectory variance across different unravelings |
 | `scripts/25q_exp.jl` | 25-site XY quench experiment with configurable circuits and noise |
 | `scripts/ibm127_exp.jl` | IBM 127-qubit kicked-Ising experiment with long-range crosstalk |
 
@@ -126,6 +127,7 @@ julia --project run_tests.jl
 | `src/` | Core MPS/MPO algorithms, TDVP, noise models, gate library, and circuit simulation |
 | `PaperExps/scripts/` | Experiment scripts from the paper |
 | `PaperExps/notebooks/` | Interactive Pluto notebook walkthroughs |
+| `PaperExps/data/` | Curated data artifacts and reference plot outputs for the paper experiments |
 | `test/` | Unit tests and full algorithm validation checks |
 
 ## License

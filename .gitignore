@@ -36,5 +36,14 @@ outputs/
 *.tsv
 *.log
 
+## Curated paper experiment data
+!PaperExps/data/
+!PaperExps/data/**
+PaperExps/data/**/.DS_Store
+PaperExps/data/**/__pycache__/
+PaperExps/data/**/*.py[cod]
+PaperExps/data/**/*.jls
+PaperExps/data/**/*.toml
+
 ## Large binary artifacts
 *.whl

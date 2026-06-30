@@ -1,0 +1,4 @@
+PaperExps/data/**/*.pkl binary
+PaperExps/data/**/*.png binary
+PaperExps/data/**/*.csv text eol=lf
+PaperExps/data/**/*.md text eol=lf
