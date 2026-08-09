@@ -383,6 +383,7 @@ function fixed_bug!(state::MPS{ComplexF64},
 
     updated = _update_site(left_envs[1], right_env, mpo.tensors[1], canon_center_tensors[1], dt, numiter_lanczos)
     state.tensors[1] = updated
+    state.orth_center = 1
 
     return nothing
 end
